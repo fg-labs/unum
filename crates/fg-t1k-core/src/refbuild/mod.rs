@@ -3,3 +3,4 @@
 //! the FASTA references T1K's genotyper indexes.
 
 pub mod dat;
+pub mod gene_coord;
