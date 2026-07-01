@@ -1,0 +1,4 @@
+chr19	HAVANA	gene	54769793	54784332	.	+	.	gene_id "ENSG00000125498.22"; gene_type "protein_coding"; gene_name "KIR2DL1"; level 2; hgnc_id "HGNC:6329"; tag "overlapping_locus"; havana_gene "OTTHUMG00000065885.4";
+chr19	HAVANA	gene	54803610	54814517	.	+	.	gene_id "ENSG00000189013.18"; gene_type "protein_coding"; gene_name "KIR2DL4"; level 2; hgnc_id "HGNC:6332"; havana_gene "OTTHUMG00000065880.7";
+chr19	HAVANA	gene	54816440	54830778	.	+	.	gene_id "ENSG00000167633.19"; gene_type "protein_coding"; gene_name "KIR3DL1"; level 2; hgnc_id "HGNC:6338"; havana_gene "OTTHUMG00000065933.3";
+chr19	HAVANA	gene	54755023	54767371	.	+	.	gene_id "ENSG00000242473.1"; gene_type "unprocessed_pseudogene"; gene_name "KIR2DP1"; level 2; hgnc_id "HGNC:16344"; tag "overlapping_locus"; havana_gene "OTTHUMG00000065882.1";
