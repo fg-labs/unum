@@ -6,3 +6,18 @@
 // oracle module and FFI decls are feature-gated (they depend on build-script env vars).
 #[cfg(feature = "t1k-sys")]
 pub mod oracle;
+
+/// Raw FFI declarations for the header-only shim (`shim/shim.cpp`).
+///
+/// The shim includes T1K headers (e.g. `KmerCode.hpp`) but links zero T1K
+/// `.cpp` files, proving that individual header-only components can be
+/// exercised for differential testing without pulling in T1K's `main()`.
+#[cfg(feature = "t1k-sys")]
+mod ffi {
+    use std::os::raw::c_char;
+    unsafe extern "C" {
+        pub fn fg_t1k_canonical_kmer(seq: *const c_char, len: i32, k: i32) -> u64;
+    }
+}
+#[cfg(feature = "t1k-sys")]
+pub use ffi::fg_t1k_canonical_kmer;

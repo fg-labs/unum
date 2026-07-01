@@ -45,4 +45,18 @@ fn main() {
     }
     println!("cargo:rustc-env=FG_T1K_ORACLE_DIR={}", out.display());
     println!("cargo:rerun-if-changed={}", vendor.display());
+
+    // Header-only shim: includes T1K headers (e.g. KmerCode.hpp) but links zero
+    // T1K .cpp files. Defines the extern nucToNum/numToNuc tables itself since
+    // they are declared (not defined) in the headers.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    cc::Build::new()
+        .cpp(true)
+        .file(manifest_dir.join("shim/shim.cpp"))
+        .include(&vendor) // T1K headers
+        .include(manifest_dir.join("shim"))
+        .flag_if_supported("-std=c++11")
+        .opt_level(3)
+        .compile("t1k_shim");
+    println!("cargo:rerun-if-changed={}", manifest_dir.join("shim").display());
 }
