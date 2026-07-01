@@ -1,2 +1,10 @@
 /target
 **/*.o
+
+# Vendored C++ build outputs (samtools bundle built by the t1k-sys feature)
+/vendor/t1k/samtools-0.1.19/**/*.a
+/vendor/t1k/samtools-0.1.19/**/*.o
+/vendor/t1k/samtools-0.1.19/samtools
+/vendor/t1k/samtools-0.1.19/bcftools/bcftools
+/vendor/t1k/samtools-0.1.19/bcftools/vcfutils.pl
+/vendor/t1k/samtools-0.1.19/misc/

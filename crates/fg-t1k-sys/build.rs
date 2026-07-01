@@ -16,11 +16,7 @@ fn main() {
     let sam = vendor.join("samtools-0.1.19");
     if !sam.join("libbam.a").exists() {
         assert!(
-            Command::new("make")
-                .current_dir(&sam)
-                .status()
-                .expect("make")
-                .success(),
+            Command::new("make").current_dir(&sam).status().expect("make").success(),
             "samtools build failed"
         );
     }
@@ -43,9 +39,7 @@ fn main() {
             c.arg("-lbam");
         }
         assert!(
-            c.status()
-                .unwrap_or_else(|e| panic!("compile {name}: {e}"))
-                .success(),
+            c.status().unwrap_or_else(|e| panic!("compile {name}: {e}")).success(),
             "compile {name} failed"
         );
     }
