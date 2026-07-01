@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/fg-t1k", "crates/fg-t1k-core", "crates/fg-t1k-sys"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT"
