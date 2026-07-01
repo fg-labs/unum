@@ -190,6 +190,22 @@ fn prepend_with_invalid_base_matches_t1k() {
 }
 
 #[test]
+fn prepend_on_partially_filled_window_matches_t1k() {
+    // All the prepend tests above first fill the window with exactly k
+    // appends. Here the window is only partially filled (3 appends against
+    // a k=9 window) before prepending, exercising Prepend's ShiftRight(1)
+    // + invalid_pos bookkeeping when the "oldest" slots are still at their
+    // initial zero-value rather than holding real appended bases.
+    let mut ls = Lockstep::new(9, "prepend_partial_window");
+    for &c in b"ACG" {
+        ls.append(c);
+    }
+    ls.prepend(b'T');
+    ls.prepend(b'A');
+    ls.prepend(b'N'); // invalid byte via Prepend's nucToNum check, still on a partial window
+}
+
+#[test]
 fn boundary_k_equals_1() {
     let mut ls = Lockstep::new(1, "k=1");
     for &c in b"ACGTNACGT" {
@@ -220,6 +236,89 @@ fn boundary_k_equals_31() {
     ls.prepend(b'A');
     ls.restart();
     for &c in b"TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAA" {
+        ls.append(c);
+    }
+}
+
+#[test]
+fn boundary_k_equals_4_even() {
+    // All boundary_k_equals_* cases above use odd k (1, 15, 31); exercise an
+    // even k too, since the 2-bit-per-base packing/masking arithmetic
+    // (`2 * k`, mask-building loop, shift amounts) has no inherent reason to
+    // treat odd/even k differently, but parity is worth confirming directly.
+    let mut ls = Lockstep::new(4, "k=4");
+    for &c in b"ACGTNACGT" {
+        ls.append(c);
+    }
+    ls.shift_right(1);
+    ls.prepend(b'T');
+    ls.set_code(0b1010_1010);
+}
+
+#[test]
+fn boundary_k_equals_8_even() {
+    let mut ls = Lockstep::new(8, "k=8");
+    for &c in b"ACGTACGTNACGTACGT" {
+        ls.append(c);
+    }
+    ls.shift_right(2);
+    ls.prepend(b'G');
+    ls.restart();
+    for &c in b"TTTTGGGGCCCCAAAA" {
+        ls.append(c);
+    }
+}
+
+#[test]
+fn boundary_k_equals_16_even() {
+    let mut ls = Lockstep::new(16, "k=16");
+    for &c in b"ACGTACGTACGTACGTNACGTACGTACGTACGT" {
+        ls.append(c);
+    }
+    ls.shift_right(3);
+    ls.prepend(b'A');
+    ls.set_code(0xDEAD_BEEF);
+}
+
+#[test]
+fn boundary_k_equals_30() {
+    let mut ls = Lockstep::new(30, "k=30");
+    for &c in b"ACGTACGTACGTACGTACGTACGTACGTACNGTACGTACGTACGTACGTACGTACGTACGT" {
+        ls.append(c);
+    }
+    ls.shift_right(4);
+    ls.prepend(b'A');
+    ls.restart();
+    for &c in b"TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATT" {
+        ls.append(c);
+    }
+}
+
+#[test]
+fn boundary_k_equals_32_max_packing() {
+    // k=32 is the largest k that fits in a u64 with 2-bit-per-base packing
+    // (2*32 == 64 bits exactly, so mask is all-ones with no headroom bit).
+    // The mask-building loop (32 iterations of `mask = (mask << 2) | 3`) and
+    // GetCanonicalKmerCode's `code >> (2*i)` loop (i up to 31, so max shift
+    // is 62) both stay within a single-bit-shift-amount < 64, so no shift
+    // overflow occurs for the operations exercised here.
+    //
+    // Deliberately NOT exercised: `shift_right(32)` (shifting the *entire*
+    // k=32 window in one call). That requires a single `>> 64` /
+    // `mask >> 64` shift, which is undefined behavior in both C++ (shift
+    // amount >= bit-width of the operand) and Rust (`attempt to shift right
+    // with overflow`, panics in debug builds) -- T1K itself never calls
+    // ShiftRight with the full kmer_length in one step, so this isn't a
+    // real usage pattern to lock down, just a UB landmine on both sides.
+    let mut ls = Lockstep::new(32, "k=32");
+    for &c in b"ACGTACGTACGTACGTACGTACGTACGTACGTNACGTACGTACGTACGTACGTACGTACGTACGT" {
+        ls.append(c);
+    }
+    ls.shift_right(4);
+    ls.prepend(b'A');
+    ls.set_code(u64::MAX);
+    ls.restart();
+    for &c in b"TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTGGGGCCCCAAAA" {
         ls.append(c);
     }
 }

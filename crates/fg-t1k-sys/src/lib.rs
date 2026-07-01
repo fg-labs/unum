@@ -30,10 +30,20 @@ mod ffi {
         pub fn fg_t1k_kmercode_rc(p: *mut c_void) -> u64;
         pub fn fg_t1k_kmercode_is_valid(p: *mut c_void) -> i32;
         pub fn fg_t1k_kmercode_kmer_length(p: *mut c_void) -> i32;
+
+        /// Returns the shim's own `nucToNum[i]` entry (`i` in `0..26`). Bound
+        /// as `i8` (not `c_char`) because the C signature is explicitly
+        /// `signed char`, regardless of the platform's default char
+        /// signedness.
+        pub fn fg_t1k_nuc_to_num(i: i32) -> i8;
+        /// Returns the shim's own `numToNuc[i]` entry (`i` in `0..4`).
+        pub fn fg_t1k_num_to_nuc(i: i32) -> c_char;
     }
 }
 #[cfg(feature = "t1k-sys")]
 pub use ffi::fg_t1k_canonical_kmer;
+#[cfg(feature = "t1k-sys")]
+pub use ffi::{fg_t1k_nuc_to_num, fg_t1k_num_to_nuc};
 
 /// Safe Rust wrapper around the opaque C++ `KmerCode*` handle.
 ///

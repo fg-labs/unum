@@ -236,10 +236,14 @@ impl KmerCode {
     /// [`is_invalid_base`] check (any non-ACGT byte), unlike `Append`'s
     /// literal `'N'` check -- see the struct-level doc comment.
     ///
-    /// # Panics
+    /// # Preconditions
     ///
-    /// Panics if `kmer_length == 0` (mirrors the C++ side, which has
-    /// undefined behavior for a zero-length k-mer at this call site).
+    /// Requires `kmer_length >= 1` (mirrors the C++ side, which has
+    /// undefined behavior for a zero-length k-mer at this call site). The
+    /// `self.kmer_length as u64 - 1` subtraction below underflows when
+    /// `kmer_length == 0`: in debug builds this panics (Rust's default
+    /// overflow check on arithmetic), while release builds wrap silently
+    /// and produce a garbage shift amount/code rather than panicking.
     pub fn prepend(&mut self, c: u8) {
         self.shift_right(1);
         if is_invalid_base(c) {

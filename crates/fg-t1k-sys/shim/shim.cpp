@@ -39,3 +39,9 @@ int fg_t1k_kmercode_is_valid(void* p) { return static_cast<KmerCode*>(p)->IsVali
 int fg_t1k_kmercode_kmer_length(void* p) {
     return static_cast<KmerCode*>(p)->GetKmerLength();
 }
+
+// Exposes the shim's own nucToNum/numToNuc tables (defined above) so Rust
+// tests can assert them against the vendored copy in Genotyper.cpp, guarding
+// against undetected drift between the two.
+signed char fg_t1k_nuc_to_num(int i) { return nucToNum[i]; }
+char fg_t1k_num_to_nuc(int i) { return numToNuc[i]; }

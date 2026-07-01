@@ -20,6 +20,14 @@ uint64_t fg_t1k_kmercode_canonical(void* p);
 uint64_t fg_t1k_kmercode_rc(void* p);
 int fg_t1k_kmercode_is_valid(void* p);
 int fg_t1k_kmercode_kmer_length(void* p);
+
+// Exposes the shim's hand-copied nucToNum/numToNuc tables (see shim.cpp) so
+// differential tests can assert they still match the vendored table in
+// vendor/t1k/Genotyper.cpp, rather than only checking the shim's copy
+// against itself. `i` must be in 0..26 for fg_t1k_nuc_to_num and 0..4 for
+// fg_t1k_num_to_nuc.
+signed char fg_t1k_nuc_to_num(int i);
+char fg_t1k_num_to_nuc(int i);
 #ifdef __cplusplus
 }
 #endif
