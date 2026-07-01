@@ -1,0 +1,7 @@
+[alias]
+ci-test = "nextest run --locked --no-tests=pass"
+ci-fmt = "fmt -- --check"
+ci-lint = "clippy --all-targets -- -D warnings -W clippy::pedantic -A clippy::doc_markdown"
+# t1k-sys variants exercise the vendored C++ oracle + FFI differential tests (heavy; CI-only job)
+ci-test-sys = "nextest run --locked --no-tests=pass --features t1k-sys"
+ci-lint-sys = "clippy --all-targets --features t1k-sys -- -D warnings -W clippy::pedantic -A clippy::doc_markdown"
