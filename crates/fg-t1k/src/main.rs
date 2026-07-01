@@ -1,9 +1,15 @@
 #![forbid(unsafe_code)]
 
-// Scaffold placeholder: the CLI entry point is fallible once command dispatch lands,
-// so the `Result` return type is intentional even though it's an unconditional `Ok`
-// today. Remove this allow once real command handling is wired up.
-#[allow(clippy::unnecessary_wraps)]
+mod cli;
+mod engine;
+mod stages;
+
+use clap::Parser;
+use cli::{Cli, Commands};
+
 fn main() -> anyhow::Result<()> {
-    Ok(())
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Run(args) => stages::run(&args),
+    }
 }

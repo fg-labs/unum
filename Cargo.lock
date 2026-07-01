@@ -149,6 +149,8 @@ dependencies = [
  "anyhow",
  "clap",
  "fg-t1k-core",
+ "fg-t1k-sys",
+ "tempfile",
 ]
 
 [[package]]
