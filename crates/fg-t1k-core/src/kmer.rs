@@ -39,12 +39,28 @@ fn nuc_to_code(c: u8) -> u64 {
 /// mask-and-shift behavior of `Append`. The returned value is
 /// `min(forward_code, reverse_complement_code)`.
 ///
+/// # Preconditions
+///
+/// - `k` must be `<= 32`, since each base is packed into 2 bits of a `u64`
+///   (`2 * k` must not exceed 64). `k == 0` yields a code of `0` (both forward
+///   and reverse-complement codes are empty).
+/// - Input bases in `seq` must be uppercase (`A`/`C`/`G`/`T`; any other
+///   uppercase byte falls back to code `3`). T1K uppercases sequences
+///   upstream before calling `KmerCode::Append`, so this port does not
+///   special-case lowercase input. Lowercase bytes diverge from the C++
+///   side, whose `nucToNum` table is indexed by `c - 'A'` and reads out of
+///   bounds (undefined behavior) for lowercase input; callers must not rely
+///   on parity with T1K for lowercase bytes.
+///
 /// # Panics
 ///
-/// Never panics. `k == 0` yields a code of `0` (both forward and
-/// reverse-complement codes are empty).
+/// Panics (in debug builds, via `debug_assert!`) if `k > 32`, since the
+/// 2-bit-per-base packing would overflow the `u64` code (`2 * k >= 64`
+/// triggers a shift-amount overflow). Release builds compile out the
+/// assertion and instead silently truncate.
 #[must_use]
 pub fn canonical_kmer(seq: &[u8], k: usize) -> u64 {
+    debug_assert!(k <= 32, "kmer length must be <= 32 (2-bit packing in u64)");
     let mask: u64 = if k >= 32 { u64::MAX } else { (1u64 << (2 * k)) - 1 };
 
     let mut code: u64 = 0;
