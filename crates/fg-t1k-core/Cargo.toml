@@ -7,3 +7,6 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

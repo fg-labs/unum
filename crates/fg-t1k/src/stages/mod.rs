@@ -8,6 +8,8 @@ use crate::cli::RunArgs;
 use crate::engine::{Engine, EngineOverrides};
 use anyhow::Context;
 
+pub mod build;
+
 /// Runs the full extract -> genotype -> analyze pipeline for `args`.
 ///
 /// Output file names are derived exactly as `run-t1k` derives them:
