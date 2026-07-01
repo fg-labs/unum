@@ -26,12 +26,12 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
     let candidate_2 = format!("{extractor_prefix}_2.fq");
 
     match overrides.engine_for("extract") {
-        Engine::Rust => unimplemented!("rust engine for stage extract not yet implemented"),
+        Engine::Rust => anyhow::bail!("rust engine for stage 'extract' is not yet implemented"),
         Engine::Cpp => cpp::run_extract(args, &extractor_prefix)?,
     }
 
     match overrides.engine_for("genotype") {
-        Engine::Rust => unimplemented!("rust engine for stage genotype not yet implemented"),
+        Engine::Rust => anyhow::bail!("rust engine for stage 'genotype' is not yet implemented"),
         Engine::Cpp => cpp::run_genotype(args, &prefix, &candidate_1, &candidate_2)?,
     }
 
@@ -40,7 +40,7 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
     let aligned_2 = format!("{prefix}_aligned_2.fa");
 
     match overrides.engine_for("analyze") {
-        Engine::Rust => unimplemented!("rust engine for stage analyze not yet implemented"),
+        Engine::Rust => anyhow::bail!("rust engine for stage 'analyze' is not yet implemented"),
         Engine::Cpp => cpp::run_analyze(args, &prefix, &allele_tsv, &aligned_1, &aligned_2)?,
     }
 

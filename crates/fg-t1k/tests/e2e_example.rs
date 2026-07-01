@@ -1,6 +1,12 @@
 #![cfg(feature = "t1k-sys")]
 use std::process::Command;
 
+/// Resolves a path under the workspace-level `fixtures/` directory, relative to this crate's
+/// manifest directory, so the test does not depend on the process's current working directory.
+fn fixture(rel: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures").join(rel)
+}
+
 // Proves the `fg-t1k run` subprocess wrapper reproduces, byte-for-byte, the output of the
 // vendored T1K oracle pipeline on the pinned KIR reference (wrapper == oracle).
 #[test]
@@ -10,11 +16,11 @@ fn run_example_matches_oracle() {
         .args([
             "run",
             "-1",
-            "fixtures/example/example_1.fq",
+            fixture("example/example_1.fq").to_str().unwrap(),
             "-2",
-            "fixtures/example/example_2.fq",
+            fixture("example/example_2.fq").to_str().unwrap(),
             "-f",
-            "fixtures/example/ref/kir_rna_seq.fa",
+            fixture("example/ref/kir_rna_seq.fa").to_str().unwrap(),
             "-o",
             "example",
             "--od",
@@ -24,6 +30,6 @@ fn run_example_matches_oracle() {
         .unwrap();
     assert!(status.success());
     let got = std::fs::read_to_string(tmp.path().join("example_genotype.tsv")).unwrap();
-    let expected = std::fs::read_to_string("fixtures/example/oracle_genotype.golden.tsv").unwrap();
+    let expected = std::fs::read_to_string(fixture("example/oracle_genotype.golden.tsv")).unwrap();
     assert_eq!(got, expected);
 }
