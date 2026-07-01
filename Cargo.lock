@@ -156,6 +156,9 @@ dependencies = [
 [[package]]
 name = "fg-t1k-core"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+]
 
 [[package]]
 name = "fg-t1k-sys"
