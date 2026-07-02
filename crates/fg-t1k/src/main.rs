@@ -14,5 +14,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Build(args) => stages::build::run(&args),
         Commands::Extract(args) => stages::extract::run(&args),
         Commands::Genotype(args) => stages::genotype::run(&args),
+        Commands::Analyze(args) => stages::analyze::run(&args),
     }
 }

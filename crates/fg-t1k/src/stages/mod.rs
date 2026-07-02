@@ -8,6 +8,7 @@ use crate::cli::RunArgs;
 use crate::engine::{Engine, EngineOverrides};
 use anyhow::Context;
 
+pub mod analyze;
 pub mod build;
 pub mod extract;
 pub mod genotype;

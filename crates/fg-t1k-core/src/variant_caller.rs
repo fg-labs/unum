@@ -19,13 +19,27 @@
 //! (`SolveVariantGroup`/`EnumerateVariants`), and `OutputAlleleVCF`
 //! (`VariantCaller.hpp:1202-1227`).
 //!
-//! Deferred to Task 6b: the `Analyzer` driver that performs read I/O and
-//! reassigns reads to the CALLED alleles (`AddFragmentAlignmentInfo`,
-//! `Analyzer.cpp:672-686`) before feeding them here. This module therefore
-//! takes already-assigned `read1`/`read2`/`fragmentAssignments` as plain
-//! parameters (mirroring `ComputeVariant`'s own signature exactly), the same
-//! way [`crate::genotyper`] takes already-computed overlaps rather than
-//! calling `GetOverlapsFromRead` itself.
+//! `VariantCaller::compute_variant` still takes already-assigned
+//! `read1`/`read2`/`fragmentAssignments` as plain parameters (mirroring
+//! `ComputeVariant`'s own signature exactly), the same way
+//! [`crate::genotyper`] takes already-computed overlaps rather than calling
+//! `GetOverlapsFromRead` itself -- the DRIVER that produces those inputs
+//! (reference loading restricted to the called alleles, read I/O, read
+//! reassignment) lives in `crates/fg-t1k/src/stages/analyze.rs` (the CLI
+//! layer), matching `stages/genotype.rs`'s own split of "core in
+//! `fg-t1k-core`, driver in the CLI crate".
+//!
+//! # Scope: the 6b slice
+//!
+//! [`add_overlap_alignment_info`]/[`add_fragment_alignment_info`] -- ported
+//! from `SeqSet::AddOverlapAlignmentInfo`/`AddFragmentAlignmentInfo`
+//! (`SeqSet.hpp:2657-2680,2758-2778`): the REQUIRED pre-`ComputeVariant` step
+//! that populates every fragment overlap's `align` (see
+//! [`add_fragment_alignment_info`]'s doc comment for why this is not merely
+//! an optimization). [`exonic_position`] -- ported from
+//! `SeqSet::GetExonicPosition` (`SeqSet.hpp:2808-2828`): the genomic-to-exon-
+//! relative coordinate remap [`VariantCaller::output_allele_vcf`]'s VCF `POS`
+//! column needs.
 //!
 //! # No indel calling (matches stock T1K exactly)
 //!
@@ -39,19 +53,23 @@
 //!
 //! # `_overlap::align` is always caller-provided in the real pipeline
 //!
-//! In stock T1K, `Analyzer::ProcessReads` populates every fragment
-//! assignment's `overlap1.align`/`overlap2.align` via
+//! In stock T1K, `Analyzer::main` populates every fragment assignment's
+//! `overlap1.align`/`overlap2.align` via
 //! `SeqSet::AddFragmentAlignmentInfo`/`AddOverlapAlignmentInfo`
-//! (`SeqSet.hpp:2657-2680,2758-2778`) BEFORE calling
+//! (`SeqSet.hpp:2657-2680,2758-2778`, `Analyzer.cpp:622-633`) BEFORE calling
 //! `VariantCaller::ComputeVariant` -- so `UpdateBaseVariantFromOverlap`'s own
 //! `align == NULL` fallback (`VariantCaller.hpp:116-123`, recomputing the
 //! alignment via `AlignAlgo::GlobalAlignment` from `seqStart`/`seqEnd`/
-//! `readStart`/`readEnd`) is dead code on that path. This port still
-//! implements both branches faithfully (see
+//! `readStart`/`readEnd`) is dead code on that path (confirmed: every
+//! `fragment_assignment` the real `fg-t1k analyze` driver builds has already
+//! had [`add_fragment_alignment_info`] called on it -- see that function's
+//! own doc comment for why this is a REQUIRED step, not just the lazy
+//! optimization `update_base_variant_from_overlap`'s fallback name might
+//! suggest). This port still implements both branches faithfully (see
 //! [`VariantCaller::update_base_variant_from_overlap`]) since 6a's
 //! [`Overlap::align`] is modeled as `Option<Vec<i8>>` for completeness and
-//! testability without requiring a full Task 6b `Analyzer` driver to
-//! pre-populate it.
+//! testability without requiring the full `fg-t1k analyze` driver to
+//! pre-populate it in unit tests.
 //!
 //! # `f64` counts, not `f32`
 //!
@@ -337,6 +355,143 @@ fn reverse_complement(seq: &[u8]) -> Vec<u8> {
 /// call -- see this module's doc comment on staying additive-only).
 fn is_exon(exons: &[(i32, i32)], pos: i32) -> bool {
     exons.iter().any(|&(s, e)| pos >= s && pos <= e)
+}
+
+/// Ported from `SeqSet::GetExonicPosition` (`SeqSet.hpp:2808-2828`): maps a
+/// 0-based genomic (full-consensus) position to its 0-based exon-relative
+/// position -- the sum of every EARLIER exon's length plus the offset into
+/// the exon `pos` itself falls in -- or `-1` if `pos` is not in any exon
+/// (mirrors `!IsPosInExon(seqIdx, pos)`'s early return, via [`is_exon`]).
+///
+/// This is what [`VariantCaller::output_allele_vcf`]'s `exonic_position`
+/// parameter is expected to compute (see that function's doc comment); it is
+/// a free function here (not a [`VariantCaller`] method) since it depends
+/// only on one allele's `exons`, matching [`is_exon`]'s own shape.
+///
+/// # `ConvertVariantsToExonCoord` is dead code -- this is the ONLY
+/// `GetExonicPosition` call site on the `OutputAlleleVCF` path
+///
+/// `VariantCaller::ConvertVariantsToExonCoord` (`VariantCaller.hpp:1189-
+/// 1200`) would call `GetExonicPosition` a SECOND time, mutating
+/// `finalVariants[i].refStart`/`refEnd` in place before `OutputAlleleVCF`
+/// runs -- but its body is `return ;` as its very first statement (dead
+/// code), and `grep -n "ConvertVariantsToExonCoord" vendor/t1k/*.cpp
+/// vendor/t1k/*.hpp` has exactly one match (the dead definition itself): it
+/// is never called from `ComputeVariant` or any `main`. So `finalVariants[i]
+/// .refStart`/`refEnd` are always genomic (never exonic) coordinates by the
+/// time [`VariantCaller::output_allele_vcf`] runs, and this function's own
+/// `GetExonicPosition` call (`VariantCaller.hpp:1215`) is the only exonic
+/// remapping that ever actually happens -- exactly what this port's
+/// `exonic_position` closure parameter is for.
+#[must_use]
+pub fn exonic_position(exons: &[(i32, i32)], pos: i32) -> i32 {
+    if !is_exon(exons, pos) {
+        return -1;
+    }
+    let mut psum = 0;
+    for &(s, e) in exons {
+        if pos >= s && pos <= e {
+            return psum + pos - s;
+        }
+        psum += e - s + 1;
+    }
+    psum
+}
+
+/// Ported from `SeqSet::AddOverlapAlignmentInfo` (`SeqSet.hpp:2657-2680`):
+/// populates `o.align` (unconditionally overwriting any previous value, NOT
+/// gated on `align == NULL` -- unlike
+/// [`VariantCaller::update_base_variant_from_overlap`]'s own `align == NULL`
+/// fallback, which is a DIFFERENT code path with a different caller; see
+/// that function's doc comment) via [`crate::align_algo::global_alignment`]
+/// over exactly the overlap's aligned sub-ranges: the allele consensus slice
+/// `[seq_start, seq_end]` against the (possibly reverse-complemented, when
+/// `o.strand == -1`) read slice `[read_start, read_end]`.
+///
+/// A no-op (mirrors the C++'s `if (o.seqIdx == -1) return ;`) when `o` has
+/// no overlap.
+///
+/// # Panics
+///
+/// Panics if `o`'s coordinates are out of bounds for `read`/`allele_consensus`
+/// (not expected: `o` is assumed to be a valid overlap against the same
+/// reference/read this is called with, e.g. one of
+/// [`crate::genotyper::read_assignment_to_fragment_assignment_with_overlaps`]'s
+/// own `ExtendedOverlap`s converted to an [`Overlap`]).
+pub fn add_overlap_alignment_info(read: &[u8], o: &mut Overlap, allele_consensus: &[u8]) {
+    if o.seq_idx == -1 {
+        return;
+    }
+    let rc;
+    let r: &[u8] = if o.strand == -1 {
+        rc = reverse_complement(read);
+        &rc
+    } else {
+        read
+    };
+    let seq_start = usize::try_from(o.seq_start).unwrap();
+    let seq_end = usize::try_from(o.seq_end).unwrap();
+    let read_start = usize::try_from(o.read_start).unwrap();
+    let read_end = usize::try_from(o.read_end).unwrap();
+    let result = crate::align_algo::global_alignment(
+        &allele_consensus[seq_start..=seq_end],
+        &r[read_start..=read_end],
+        crate::align_algo::DEFAULT_BAND,
+    );
+    o.align = Some(result.align);
+}
+
+/// Ported from `SeqSet::AddFragmentAlignmentInfo` (`SeqSet.hpp:2758-2778`):
+/// for each fragment overlap, populates `overlap1`'s (and, for mate-pair
+/// fragments, `overlap2`'s) `align` via [`add_overlap_alignment_info`] --
+/// this is the `Analyzer` driver step (`Analyzer.cpp:622-633`'s
+/// `AddFragmentAlignmentInfo` call, gated on `reads1[i].fragmentAssigned`
+/// at that call site, not here) that MUST run before
+/// [`VariantCaller::compute_variant`]: unlike
+/// [`VariantCaller::update_base_variant_from_overlap`]'s own lazy `align ==
+/// NULL` recompute fallback, [`VariantCaller::expand_candidate_variants_from_fragment_overlap`]
+/// and [`VariantCaller::build_fragment_candidate_var_graph`] both `continue`/
+/// no-op on `align == None` rather than recomputing it -- so a
+/// [`FragmentOverlap`] whose `align` was never populated silently
+/// contributes nothing to variant-group construction on the real pipeline.
+///
+/// `read2` is `None` for single-end fragments (every `fragment_overlap` in
+/// `fragment_assignment` is then expected to have `has_mate_pair == false`).
+///
+/// # Panics
+///
+/// Panics if any `fragment_assignment[i].seq_idx` is out of range for
+/// `allele_consensus`, or if a mate-pair/`o1FromR2` fragment is passed with
+/// `read2 == None` (not expected: every `fragment_assignment` here is
+/// assumed to come from the same reference/read pair this is called with,
+/// e.g. [`crate::genotyper::read_assignment_to_fragment_assignment_with_overlaps`]'s
+/// own output).
+pub fn add_fragment_alignment_info(
+    read1: &[u8],
+    read2: Option<&[u8]>,
+    fragment_assignment: &mut [FragmentOverlap],
+    allele_consensus: &[Vec<u8>],
+) {
+    for frag in fragment_assignment {
+        let seq_idx = usize::try_from(frag.seq_idx).unwrap();
+        let consensus = &allele_consensus[seq_idx];
+        if frag.has_mate_pair {
+            add_overlap_alignment_info(read1, &mut frag.overlap1, consensus);
+            add_overlap_alignment_info(
+                read2.expect("has_mate_pair implies read2 is present"),
+                &mut frag.overlap2,
+                consensus,
+            );
+        } else if !frag.o1_from_r2 {
+            add_overlap_alignment_info(read1, &mut frag.overlap1, consensus);
+        } else {
+            add_overlap_alignment_info(
+                read2.expect("o1_from_r2 implies read2 is present"),
+                &mut frag.overlap1,
+                consensus,
+            );
+        }
+    }
 }
 
 /// Ported from `VariantCaller` (`VariantCaller.hpp:92-1312`). See module
@@ -953,6 +1108,30 @@ impl VariantCaller {
                     // stop the walk instead of reading out of bounds, which
                     // is behavior-equivalent since a trailing insertion
                     // contributes no base variant).
+                    //
+                    // CONFIRMED REACHABLE on the real `fg-t1k analyze`
+                    // pipeline (Task 6b's IMP-1 follow-up), not just a
+                    // hypothetical: `align` here always comes from
+                    // [`add_overlap_alignment_info`]'s
+                    // [`crate::align_algo::global_alignment`] call over `t =
+                    // allele_consensus[seq_start..=seq_end]` (`lent`) vs `p =
+                    // read[read_start..=read_end]` (`lenp`) -- and
+                    // `SeqSet::ExtendOverlap` (`SeqSet.hpp:1994-2100`, this
+                    // port's `extend_overlap`) does not guarantee `lent ==
+                    // lenp`: the two overhang extensions each advance BOTH
+                    // spans by the SAME clamped amount, but the underlying
+                    // k-mer-CHAINED overlap they extend from can already have
+                    // unequal `seqEnd-seqStart` vs `readEnd-readStart` spans
+                    // whenever a real indel separates two k-mer hits
+                    // (`GetOverlapsFromHits`, unrelated to this guard, is
+                    // free to chain hits across such a gap). A scratch probe
+                    // (`fg_t1k_core::align_algo::global_alignment(b"ACGTACGTAC",
+                    // b"ACGTACGTACGG", DEFAULT_BAND)`, `lent=10 < lenp=12`)
+                    // confirms `global_alignment` DOES place the resulting
+                    // gap as a trailing `EDIT_INSERT` in that shape -- so this
+                    // guard is load-bearing on real inputs, not merely a
+                    // defensive no-op for a path C++'s own trace makes
+                    // unreachable.
                     if usize::try_from(ref_pos).unwrap() >= self.base_variants[seq_idx].len() {
                         break;
                     }
@@ -1913,5 +2092,212 @@ mod tests {
         assert_eq!(v.reference, b'C');
         assert_eq!(v.var, b'T');
         assert_eq!(v.qual, 60);
+    }
+
+    // ---- exonic_position ---------------------------------------------------
+
+    #[test]
+    fn exonic_position_single_whole_sequence_exon_is_identity() {
+        let exons = [(0, 19)];
+        assert_eq!(exonic_position(&exons, 0), 0);
+        assert_eq!(exonic_position(&exons, 19), 19);
+        assert_eq!(exonic_position(&exons, 10), 10);
+    }
+
+    #[test]
+    fn exonic_position_maps_across_multiple_exons() {
+        // Exon 0: genomic [0,9] -> exonic [0,9]; exon 1: genomic [20,29] ->
+        // exonic [10,19] (the intervening intron [10,19] is excluded).
+        let exons = [(0, 9), (20, 29)];
+        assert_eq!(exonic_position(&exons, 0), 0);
+        assert_eq!(exonic_position(&exons, 9), 9);
+        assert_eq!(exonic_position(&exons, 20), 10);
+        assert_eq!(exonic_position(&exons, 25), 15);
+        assert_eq!(exonic_position(&exons, 29), 19);
+    }
+
+    #[test]
+    fn exonic_position_returns_negative_one_outside_any_exon() {
+        let exons = [(0, 9), (20, 29)];
+        assert_eq!(exonic_position(&exons, 10), -1, "intron position must return -1");
+        assert_eq!(exonic_position(&exons, 15), -1);
+    }
+
+    // ---- add_overlap_alignment_info / add_fragment_alignment_info ---------
+
+    #[test]
+    fn add_overlap_alignment_info_populates_align_for_perfect_match() {
+        let consensus = b"ACGTACGTAC";
+        let read = b"ACGTACGTAC";
+        let mut o = Overlap {
+            seq_idx: 0,
+            read_start: 0,
+            read_end: 9,
+            seq_start: 0,
+            seq_end: 9,
+            strand: 1,
+            match_cnt: 20,
+            similarity: 1.0,
+            align: None,
+        };
+        add_overlap_alignment_info(read, &mut o, consensus);
+        let align = o.align.expect("align must be populated");
+        assert_eq!(align, vec![crate::align_algo::EDIT_MATCH; 10]);
+    }
+
+    #[test]
+    fn add_overlap_alignment_info_reverse_strand_uses_reverse_complement() {
+        // consensus and its reverse complement: a perfect match on strand -1
+        // must reverse-complement the read before aligning.
+        let consensus = b"AAAACCCC"; // len 8
+        let read = b"GGGGTTTT"; // reverse complement is AAAACCCC
+        let mut o = Overlap {
+            seq_idx: 0,
+            read_start: 0,
+            read_end: 7,
+            seq_start: 0,
+            seq_end: 7,
+            strand: -1,
+            match_cnt: 16,
+            similarity: 1.0,
+            align: None,
+        };
+        add_overlap_alignment_info(read, &mut o, consensus);
+        let align = o.align.expect("align must be populated");
+        assert_eq!(
+            align,
+            vec![crate::align_algo::EDIT_MATCH; 8],
+            "RC(read) must match consensus exactly"
+        );
+    }
+
+    #[test]
+    fn add_overlap_alignment_info_no_overlap_is_noop() {
+        let consensus = b"ACGT";
+        let read = b"ACGT";
+        let mut o = Overlap::none();
+        assert!(o.align.is_none());
+        add_overlap_alignment_info(read, &mut o, consensus);
+        assert!(o.align.is_none(), "seq_idx == -1 must leave align untouched (None)");
+    }
+
+    #[test]
+    fn add_overlap_alignment_info_overwrites_existing_align_unconditionally() {
+        // Unlike VariantCaller::update_base_variant_from_overlap's `align ==
+        // NULL` fallback, AddOverlapAlignmentInfo always recomputes -- even
+        // if `align` was already populated with something else.
+        let consensus = b"ACGT";
+        let read = b"ACGT";
+        let mut o = Overlap {
+            seq_idx: 0,
+            read_start: 0,
+            read_end: 3,
+            seq_start: 0,
+            seq_end: 3,
+            strand: 1,
+            match_cnt: 8,
+            similarity: 1.0,
+            align: Some(vec![crate::align_algo::EDIT_MISMATCH; 4]), // stale/wrong on purpose
+        };
+        add_overlap_alignment_info(read, &mut o, consensus);
+        assert_eq!(
+            o.align,
+            Some(vec![crate::align_algo::EDIT_MATCH; 4]),
+            "must overwrite, not keep stale align"
+        );
+    }
+
+    #[test]
+    fn add_fragment_alignment_info_populates_both_mates_for_mate_pair_fragment() {
+        let consensus = vec![b"ACGTACGTAC".to_vec()];
+        let read1 = b"ACGTA";
+        let read2 = b"CGTAC";
+        let mut assignment = vec![FragmentOverlap {
+            seq_idx: 0,
+            has_mate_pair: true,
+            o1_from_r2: false,
+            overlap1: Overlap {
+                seq_idx: 0,
+                read_start: 0,
+                read_end: 4,
+                seq_start: 0,
+                seq_end: 4,
+                strand: 1,
+                match_cnt: 10,
+                similarity: 1.0,
+                align: None,
+            },
+            overlap2: Overlap {
+                seq_idx: 0,
+                read_start: 0,
+                read_end: 4,
+                seq_start: 5,
+                seq_end: 9,
+                strand: 1,
+                match_cnt: 10,
+                similarity: 1.0,
+                align: None,
+            },
+        }];
+        add_fragment_alignment_info(read1, Some(read2), &mut assignment, &consensus);
+        assert!(assignment[0].overlap1.align.is_some());
+        assert!(assignment[0].overlap2.align.is_some());
+    }
+
+    #[test]
+    fn add_fragment_alignment_info_single_end_populates_overlap1_only() {
+        let consensus = vec![b"ACGTACGTAC".to_vec()];
+        let read1 = b"ACGTA";
+        let mut assignment = vec![FragmentOverlap {
+            seq_idx: 0,
+            has_mate_pair: false,
+            o1_from_r2: false,
+            overlap1: Overlap {
+                seq_idx: 0,
+                read_start: 0,
+                read_end: 4,
+                seq_start: 0,
+                seq_end: 4,
+                strand: 1,
+                match_cnt: 10,
+                similarity: 1.0,
+                align: None,
+            },
+            overlap2: Overlap::none(),
+        }];
+        add_fragment_alignment_info(read1, None, &mut assignment, &consensus);
+        assert!(assignment[0].overlap1.align.is_some());
+        assert!(assignment[0].overlap2.align.is_none(), "overlap2 is unused (no mate pair)");
+    }
+
+    #[test]
+    fn add_fragment_alignment_info_o1_from_r2_aligns_against_read2() {
+        let consensus = vec![b"ACGTACGTAC".to_vec()];
+        let read1 = b"NNNNN"; // must not be touched
+        let read2 = b"ACGTA";
+        let mut assignment = vec![FragmentOverlap {
+            seq_idx: 0,
+            has_mate_pair: false,
+            o1_from_r2: true,
+            overlap1: Overlap {
+                seq_idx: 0,
+                read_start: 0,
+                read_end: 4,
+                seq_start: 0,
+                seq_end: 4,
+                strand: 1,
+                match_cnt: 10,
+                similarity: 1.0,
+                align: None,
+            },
+            overlap2: Overlap::none(),
+        }];
+        add_fragment_alignment_info(read1, Some(read2), &mut assignment, &consensus);
+        let align = assignment[0].overlap1.align.as_ref().expect("align must be populated");
+        assert_eq!(
+            align,
+            &vec![crate::align_algo::EDIT_MATCH; 5],
+            "must align against read2, not read1"
+        );
     }
 }

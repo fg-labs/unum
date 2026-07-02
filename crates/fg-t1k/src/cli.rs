@@ -26,6 +26,12 @@ pub enum Commands {
     /// `genotyper`). NOT YET wired into the `run`/`--engine` strangler router -- see
     /// `crate::stages::genotype`'s module docs for that follow-up.
     Genotype(GenotypeArgs),
+
+    /// Post-analyze a genotype call, restricting the reference to the CALLED alleles and
+    /// emitting a novel-variant `_allele.vcf` (the Rust port of `analyzer`). NOT YET wired into
+    /// the `run`/`--engine` strangler router -- see `crate::stages::analyze`'s module docs for
+    /// that follow-up.
+    Analyze(AnalyzeArgs),
 }
 
 /// Arguments for the `run` subcommand, mirroring `run-t1k`'s flag names for the paired-end
@@ -206,4 +212,53 @@ pub struct GenotypeArgs {
     /// The effect from other gene's expression.
     #[arg(long = "crossGeneRate", default_value_t = 0.04)]
     pub cross_gene_rate: f64,
+}
+
+/// Arguments for the `analyze` subcommand. Mirrors `analyzer`'s flag names (`Analyzer.cpp`'s
+/// `usage[]`) for the paired/single-end aligned-read-FASTA-plus-selected-allele-list path this
+/// port targets (`--barcode`/`--relaxIntronAlign`/`--alleleDigitUnits`/`--alleleDelimiter` input
+/// are not exposed here -- see `crate::stages::analyze`'s module docs).
+#[derive(Args, Debug)]
+pub struct AnalyzeArgs {
+    /// Path to the reference sequence FASTA file (e.g. `kir_rna_seq.fa`).
+    #[arg(short = 'f', value_name = "STRING")]
+    pub ref_seq_fasta: String,
+
+    /// Path to the selected-alleles list file (`{prefix}_allele.tsv`, `genotype`'s output).
+    #[arg(short = 'a', value_name = "STRING")]
+    pub allele_file: String,
+
+    /// Path to the first-mate aligned-read FASTA file (paired mode; requires `-2`).
+    #[arg(short = '1', value_name = "STRING")]
+    pub mate1: Option<String>,
+
+    /// Path to the second-mate aligned-read FASTA file (paired mode; requires `-1`).
+    #[arg(short = '2', value_name = "STRING")]
+    pub mate2: Option<String>,
+
+    /// Path to a single-end aligned-read FASTA file (mutually exclusive with `-1`/`-2`).
+    #[arg(short = 'u', value_name = "STRING")]
+    pub single: Option<String>,
+
+    /// Prefix of the output file (`{prefix}_allele.vcf`).
+    #[arg(short = 'o', long = "prefix", default_value = "t1k", value_name = "STRING")]
+    pub prefix: String,
+
+    /// Number of threads. Accepted for CLI compatibility -- this port always runs
+    /// single-threaded internally (mirrors `Analyzer.cpp`'s `threadCnt <= 1` code path, the only
+    /// one this port reproduces; see `crate::stages::genotype`'s identical rationale).
+    #[arg(short = 't', default_value_t = 1)]
+    pub threads: u32,
+
+    /// Maximal number of alleles per read.
+    #[arg(short = 'n', default_value_t = 2000)]
+    pub max_assign_cnt: i32,
+
+    /// Filter alignments with alignment similarity less than the specified value.
+    #[arg(short = 's', default_value_t = 0.8)]
+    pub similarity: f64,
+
+    /// The maximum variant group size to call a novel variant. `-1` for no limitation.
+    #[arg(long = "varMaxGroup", default_value_t = 8)]
+    pub var_max_group: i32,
 }
