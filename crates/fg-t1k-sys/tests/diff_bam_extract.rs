@@ -450,6 +450,17 @@ fn run_rust(
     coord_fasta: &Path,
     out_prefix: &Path,
 ) -> bam_extract::BamExtractMetrics {
+    run_rust_with_threads(bam_path, coord_fasta, out_prefix, 1)
+}
+
+/// Same as [`run_rust`], but drives the parallel pass-1 decision path via
+/// [`bam_extract::extract_from_bam_with_threads`] at the given `threads`.
+fn run_rust_with_threads(
+    bam_path: &Path,
+    coord_fasta: &Path,
+    out_prefix: &Path,
+    threads: usize,
+) -> bam_extract::BamExtractMetrics {
     let coord_records =
         bam_extract::parse_coord_fa(coord_fasta).unwrap_or_else(|e| panic!("parse_coord_fa: {e}"));
     let mut filter = RefKmerFilter::from_reference_fasta(coord_fasta, INITIAL_KMER_LENGTH)
@@ -470,8 +481,16 @@ fn run_rust(
         FastqFileSink::create_paired(out_prefix)
     };
 
-    bam_extract::extract_from_bam(&mut alignments, &mut filter, &genes, false, -1, &mut sink)
-        .unwrap_or_else(|e| panic!("extract_from_bam: {e}"))
+    bam_extract::extract_from_bam_with_threads(
+        &mut alignments,
+        &mut filter,
+        &genes,
+        false,
+        -1,
+        threads,
+        &mut sink,
+    )
+    .unwrap_or_else(|e| panic!("extract_from_bam_with_threads(threads={threads}): {e}"))
 }
 
 /// Runs the real oracle `bam-extractor` binary, always at `-t 1` (see module
@@ -663,4 +682,184 @@ fn missing_unaligned_mate_is_an_error_on_the_oracle() {
         result.unwrap_err().to_string().contains("not showing up together"),
         "rust error message should match the oracle's semantics"
     );
+}
+
+/// Builds a LARGE coordinate-sorted paired BAM (thousands of on-target
+/// pairs, spanning several `512 * threads`-sized parallel pass-1-decision
+/// batches even at `threads = 8`) plus one of every other pass-1 category
+/// ([`build_test_bam`]'s categories), so the `-t N` identity test below
+/// actually exercises the parallel-decision batch-boundary path, not just a
+/// single in-memory batch.
+#[allow(clippy::too_many_lines)]
+fn build_large_test_bam(path: &Path, pair_count: usize) {
+    let kir_seq = kir2dl1_sequence();
+    let kir_bytes = kir_seq.as_bytes();
+
+    let mut header = Header::new();
+    let mut hd = HeaderRecord::new(b"HD");
+    hd.push_tag(b"VN", "1.6");
+    hd.push_tag(b"SO", "coordinate");
+    header.push_record(&hd);
+    let mut sq_chr19 = HeaderRecord::new(b"SQ");
+    sq_chr19.push_tag(b"SN", KIR2DL1_CHROM);
+    sq_chr19.push_tag(b"LN", 58_617_616);
+    header.push_record(&sq_chr19);
+    let mut sq_alt = HeaderRecord::new(b"SQ");
+    sq_alt.push_tag(b"SN", "chr19_KI270938v1_alt");
+    sq_alt.push_tag(b"LN", 1_000_000);
+    header.push_record(&sq_alt);
+
+    let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+    // Many on-target pairs, at monotonically increasing coordinates within
+    // KIR2DL1's interval, rotating through the reference sequence so they're
+    // non-identical (still all exact substrings, so every one is a
+    // candidate).
+    let usable_len = kir_bytes.len() - 100;
+    for i in 0..pair_count {
+        let off1 = (i * 13) % usable_len;
+        let off2 = (i * 13 + 40) % usable_len;
+        let seq1 = &kir_bytes[off1..off1 + 60];
+        let seq2 = &kir_bytes[off2..off2 + 60];
+        let name = format!("on_target_{i}");
+        let pos1 = KIR2DL1_START + 10 + i64::try_from(i).unwrap() * 4;
+        let pos2 = pos1 + 300;
+
+        let mut r1 = bam::Record::new();
+        r1.set(name.as_bytes(), Some(&CigarString(vec![Cigar::Match(60)])), seq1, &[30u8; 60]);
+        r1.set_tid(0);
+        r1.set_pos(pos1);
+        r1.set_mtid(0);
+        r1.set_mpos(pos2);
+        r1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
+        writer.write(&r1).unwrap();
+
+        let mut r2 = bam::Record::new();
+        r2.set(name.as_bytes(), Some(&CigarString(vec![Cigar::Match(60)])), seq2, &[30u8; 60]);
+        r2.set_tid(0);
+        r2.set_pos(pos2);
+        r2.set_mtid(0);
+        r2.set_mpos(pos1);
+        r2.set_flags(0x1 | 0x2 | 0x10 | 0x80);
+        writer.write(&r2).unwrap();
+    }
+
+    // One off-target pair (dropped before any candidate check).
+    let off_target_seq = noise_seq(80);
+    let mut off1 = bam::Record::new();
+    off1.set(
+        b"off_target_pair",
+        Some(&CigarString(vec![Cigar::Match(80)])),
+        &off_target_seq,
+        &[30u8; 80],
+    );
+    off1.set_tid(0);
+    off1.set_pos(1000);
+    off1.set_mtid(0);
+    off1.set_mpos(1200);
+    off1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
+    writer.write(&off1).unwrap();
+    let mut off2 = bam::Record::new();
+    off2.set(
+        b"off_target_pair",
+        Some(&CigarString(vec![Cigar::Match(80)])),
+        &off_target_seq,
+        &[30u8; 80],
+    );
+    off2.set_tid(0);
+    off2.set_pos(1200);
+    off2.set_mtid(0);
+    off2.set_mpos(1000);
+    off2.set_flags(0x1 | 0x2 | 0x10 | 0x80);
+    writer.write(&off2).unwrap();
+
+    // One alt-chrom pair.
+    let alt_seq1 = &kir_bytes[400..480];
+    let alt_seq2 = &kir_bytes[600..680];
+    let mut alt1 = bam::Record::new();
+    alt1.set(b"alt_chrom_pair", Some(&CigarString(vec![Cigar::Match(80)])), alt_seq1, &[30u8; 80]);
+    alt1.set_tid(1);
+    alt1.set_pos(500);
+    alt1.set_mtid(1);
+    alt1.set_mpos(700);
+    alt1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
+    writer.write(&alt1).unwrap();
+    let mut alt2 = bam::Record::new();
+    alt2.set(b"alt_chrom_pair", Some(&CigarString(vec![Cigar::Match(80)])), alt_seq2, &[30u8; 80]);
+    alt2.set_tid(1);
+    alt2.set_pos(700);
+    alt2.set_mtid(1);
+    alt2.set_mpos(500);
+    alt2.set_flags(0x1 | 0x2 | 0x10 | 0x80);
+    writer.write(&alt2).unwrap();
+
+    // Several unaligned-template pairs (direct-emit path, consumes 2
+    // records via a second alignments.next() call each).
+    for i in 0..10 {
+        let off1 = (i * 17) % usable_len;
+        let off2 = (i * 17 + 20) % usable_len;
+        let seq1 = &kir_bytes[off1..off1 + 70];
+        let seq2 = &kir_bytes[off2..off2 + 70];
+        let name = format!("unaligned_{i}");
+        let mut um1 = bam::Record::new();
+        um1.set(name.as_bytes(), None, seq1, &[25u8; 70]);
+        um1.set_tid(-1);
+        um1.set_pos(-1);
+        um1.set_mtid(-1);
+        um1.set_mpos(-1);
+        um1.set_flags(0x1 | 0x4 | 0x8 | 0x40);
+        writer.write(&um1).unwrap();
+        let mut um2 = bam::Record::new();
+        um2.set(name.as_bytes(), None, seq2, &[25u8; 70]);
+        um2.set_tid(-1);
+        um2.set_pos(-1);
+        um2.set_mtid(-1);
+        um2.set_mpos(-1);
+        um2.set_flags(0x1 | 0x4 | 0x8 | 0x80);
+        writer.write(&um2).unwrap();
+    }
+
+    drop(writer);
+}
+
+/// The core byte-identity requirement of the P1 parallelism task for BAM
+/// input: `-t 1`, `-t 4`, and `-t 8` must all produce output byte-identical
+/// to EACH OTHER and to the real oracle (always run at its own `-t 1` -- see
+/// this module's docs for why that single oracle run is the correct
+/// comparator). `pair_count` (3000) spans multiple `512 * threads`-sized
+/// parallel pass-1 batches even at `threads = 8`.
+#[test]
+fn parallel_threads_1_4_8_byte_identical_to_each_other_and_oracle() {
+    let dir = tempfile::tempdir().unwrap();
+    let bam_path = dir.path().join("large.bam");
+    build_large_test_bam(&bam_path, 3000);
+
+    let coord_fasta = coord_fa();
+    let t1_prefix = dir.path().join("t1");
+    let t4_prefix = dir.path().join("t4");
+    let t8_prefix = dir.path().join("t8");
+    let oracle_prefix = dir.path().join("oracle");
+
+    let m1 = run_rust_with_threads(&bam_path, &coord_fasta, &t1_prefix, 1);
+    let m4 = run_rust_with_threads(&bam_path, &coord_fasta, &t4_prefix, 4);
+    let m8 = run_rust_with_threads(&bam_path, &coord_fasta, &t8_prefix, 8);
+    assert!(!m1.single_end && !m4.single_end && !m8.single_end, "fixture BAM must be paired");
+    // Total emitted (pass1 + pass2) must be independent of threads too.
+    assert_eq!(m1.pass1_emitted + m1.pass2_emitted, m4.pass1_emitted + m4.pass2_emitted);
+    assert_eq!(m1.pass1_emitted + m1.pass2_emitted, m8.pass1_emitted + m8.pass2_emitted);
+
+    run_oracle(&bam_path, &coord_fasta, &oracle_prefix);
+
+    for suffix in ["_1.fq", "_2.fq"] {
+        let t1_file = dir.path().join(format!("t1{suffix}"));
+        assert_files_byte_identical(&t1_file, &dir.path().join(format!("t4{suffix}")));
+        assert_files_byte_identical(&t1_file, &dir.path().join(format!("t8{suffix}")));
+        assert_files_byte_identical(&t1_file, &dir.path().join(format!("oracle{suffix}")));
+    }
+
+    // Sanity: the fixture actually produced a non-trivial number of
+    // candidates (not vacuously empty).
+    let out1 = std::fs::read_to_string(dir.path().join("t1_1.fq")).unwrap();
+    let emitted: usize = out1.lines().filter(|l| l.starts_with('@')).count();
+    assert!(emitted > 1000, "expected a large number of candidate pairs, got {emitted}");
 }

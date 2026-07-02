@@ -9,13 +9,18 @@
 //! 2. FASTQ mode: constructs the initial `k=9`
 //!    [`fg_t1k_core::ref_kmer_filter::RefKmerFilter`] from `-f`, the
 //!    paired/single-end read source from `-1`/`-2` or `-u`, and calls
-//!    [`fg_t1k_core::extract::extract_candidates`].
+//!    [`fg_t1k_core::extract::extract_candidates_with_threads`] with `-t`.
 //! 3. BAM mode: parses `-f` as a `_coord.fa` (via
 //!    [`fg_t1k_core::bam_extract::parse_coord_fa`]), builds the
 //!    [`RefKmerFilter`] from its sequences and the sorted gene-interval list
 //!    (via [`fg_t1k_core::bam_extract::build_genes`]), opens `-b` as an
 //!    [`fg_t1k_core::alignments::Alignments`], and calls
-//!    [`fg_t1k_core::bam_extract::extract_from_bam`].
+//!    [`fg_t1k_core::bam_extract::extract_from_bam_with_threads`] with `-t`.
+//!
+//! `-t` controls how many worker threads parallelize the per-read candidate
+//! DECISION in both modes; output is byte-identical at any `-t` -- see
+//! `fg_t1k_core::extract`'s and `fg_t1k_core::bam_extract`'s module docs for
+//! why.
 //!
 //! Both modes share [`FastqFileSink`] (`{prefix}_1.fq`/`_2.fq` for paired,
 //! `{prefix}.fq` for single-end -- `FastqExtractor.cpp:425-439` /
@@ -103,8 +108,15 @@ fn run_fastq(args: &ExtractArgs) -> Result<()> {
     let mut sink = FastqFileSink::create(&args.prefix, mate2_path.is_some())
         .context("creating output FASTQ file(s)")?;
 
-    let metrics = extract::extract_candidates(&mut source, &mut filter, args.similarity, &mut sink)
-        .context("extracting candidate reads")?;
+    let threads = usize::try_from(args.threads).unwrap_or(usize::MAX).max(1);
+    let metrics = extract::extract_candidates_with_threads(
+        &mut source,
+        &mut filter,
+        args.similarity,
+        threads,
+        &mut sink,
+    )
+    .context("extracting candidate reads")?;
 
     eprintln!(
         "extracted {} / {} candidate {} (kmer_length={}, hit_len_required={})",
@@ -167,12 +179,14 @@ fn run_bam(args: &ExtractArgs, bam_path: &str) -> Result<()> {
     let mut sink = FastqFileSink::create(&args.prefix, !single_end)
         .with_context(|| format!("creating output FASTQ file(s) for prefix {}", args.prefix))?;
 
-    let metrics = bam_extract::extract_from_bam(
+    let threads = usize::try_from(args.threads).unwrap_or(usize::MAX).max(1);
+    let metrics = bam_extract::extract_from_bam_with_threads(
         &mut alignments,
         &mut filter,
         &genes,
         args.abnormal_unmapped,
         args.mate_id_suffix_len,
+        threads,
         &mut sink,
     )
     .context("extracting candidate reads from BAM")?;

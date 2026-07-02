@@ -83,13 +83,31 @@ impl CandidateSink for FastqFileSink {
 /// Runs the Rust extractor end-to-end (library call, not the CLI binary),
 /// writing `{prefix}_1.fq`/`{prefix}_2.fq` (paired) to `out_dir`.
 fn run_rust_paired(ref_fasta: &Path, r1: &Path, r2: &Path, out_prefix: &Path) {
+    run_rust_paired_with_threads(ref_fasta, r1, r2, out_prefix, 1);
+}
+
+/// Same as [`run_rust_paired`], but drives the parallel-decision path via
+/// [`extract::extract_candidates_with_threads`] at the given `threads`.
+fn run_rust_paired_with_threads(
+    ref_fasta: &Path,
+    r1: &Path,
+    r2: &Path,
+    out_prefix: &Path,
+    threads: usize,
+) {
     let mut filter = RefKmerFilter::from_reference_fasta(ref_fasta, INITIAL_KMER_LENGTH)
         .unwrap_or_else(|e| panic!("RefKmerFilter::from_reference_fasta: {e}"));
     let mut source =
         extract::open_source(r1, Some(r2)).unwrap_or_else(|e| panic!("open_source(paired): {e}"));
     let mut sink = FastqFileSink::create(out_prefix, true);
-    extract::extract_candidates(&mut source, &mut filter, DEFAULT_SIMILARITY, &mut sink)
-        .unwrap_or_else(|e| panic!("extract_candidates(paired): {e}"));
+    extract::extract_candidates_with_threads(
+        &mut source,
+        &mut filter,
+        DEFAULT_SIMILARITY,
+        threads,
+        &mut sink,
+    )
+    .unwrap_or_else(|e| panic!("extract_candidates_with_threads(paired, threads={threads}): {e}"));
 }
 
 /// Same as [`run_rust_paired`] but single-end, writing `{prefix}.fq`.
@@ -457,4 +475,113 @@ fn mate_count_mismatch_matches_oracle_error_behavior() {
     assert!(!output.status.success(), "oracle should fail on mate-count mismatch");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("different number of reads"), "unexpected oracle stderr: {stderr}");
+}
+
+/// Builds a LARGE synthetic paired fixture (thousands of pairs, spanning
+/// several `512 * threads`-sized parallel-decision batches even at `threads
+/// = 8`) covering the same mix of pass/fail/RC/low-complexity categories as
+/// [`build_synthetic_fixture`], so the `-t N` identity test below actually
+/// exercises the parallel-decision path across multiple batches, not just a
+/// single one.
+fn build_large_synthetic_fixture(pair_count: usize) -> SyntheticFixture {
+    let dir = tempfile::tempdir().unwrap();
+
+    // A 300bp base-balanced reference (same shape as build_synthetic_fixture's).
+    let reference = "ACGTACGTGGATTACAGATTACAGATTACAGATTACAGCCCTGACGTGTGACGTGTGACGTGTGACGTGTGGATCAGATCAGATCAGATCAGGATCCATGGATCCATGGATCCATGACTGACTGACTGACTGCATGCATGCATGCATGGTACGTACGTACGTACGGGCATTCATGGCATTCATGGCATTCATGACGTTAGCACGTTAGCACGTTAGCACGTTAGCTGACCATGTGACCATGTGACCATGTGACCATG";
+    let ref_fasta = dir.path().join("ref.fa");
+    {
+        let mut f = std::fs::File::create(&ref_fasta).unwrap();
+        writeln!(f, ">only\n{reference}").unwrap();
+    }
+
+    let random_noise = "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA";
+
+    let mut r1_records: Vec<(String, String)> = Vec::with_capacity(pair_count);
+    let mut r2_records: Vec<(String, String)> = Vec::with_capacity(pair_count);
+
+    for i in 0..pair_count {
+        match i % 4 {
+            // Hit: mate1 is a rotating 80bp reference substring.
+            0 => {
+                let start = (i * 7) % (reference.len() - 80);
+                r1_records.push((format!("hit_{i}"), reference[start..start + 80].to_string()));
+                r2_records.push((
+                    format!("hit_{i}"),
+                    reference[(start + 5) % (reference.len() - 80)
+                        ..(start + 5) % (reference.len() - 80) + 80]
+                        .to_string(),
+                ));
+            }
+            // Miss: both mates unrelated noise.
+            1 => {
+                r1_records.push((format!("miss_{i}"), random_noise.to_string()));
+                r2_records.push((format!("miss_{i}"), random_noise.to_string()));
+            }
+            // RC hit: mate1 is the reverse complement of a reference
+            // substring.
+            2 => {
+                let start = (i * 11) % (reference.len() - 80);
+                r1_records
+                    .push((format!("rc_{i}"), reverse_complement(&reference[start..start + 80])));
+                r2_records.push((format!("rc_{i}"), random_noise.to_string()));
+            }
+            // Low-complexity: dropped by IsLowComplexity before even
+            // reaching the k-mer filter.
+            _ => {
+                r1_records.push((format!("lowc_{i}"), "A".repeat(80)));
+                r2_records.push((format!("lowc_{i}"), random_noise.to_string()));
+            }
+        }
+    }
+
+    let r1 = dir.path().join("r1.fq");
+    let r2 = dir.path().join("r2.fq");
+    write_fastq(&r1, &r1_records);
+    write_fastq(&r2, &r2_records);
+
+    SyntheticFixture { dir, ref_fasta, r1, r2 }
+}
+
+/// The core byte-identity requirement of the P1 parallelism task: `-t 1`,
+/// `-t 4`, and `-t 8` must all produce output byte-identical to EACH OTHER
+/// and to the real oracle (which is always run at its own default `-t 1` --
+/// see this module's docs for why that single oracle run is sufficient).
+/// `pair_count` (4000) spans multiple `512 * threads`-sized parallel batches
+/// even at `threads = 8` (`512 * 8 = 4096` per batch, so this fixture forces
+/// at least two batches total), directly exercising the batch-boundary code
+/// path, not just a single in-memory batch.
+#[test]
+fn parallel_threads_1_4_8_byte_identical_to_each_other_and_oracle() {
+    let fx = build_large_synthetic_fixture(4000);
+
+    let t1_prefix = fx.dir.path().join("t1");
+    let t4_prefix = fx.dir.path().join("t4");
+    let t8_prefix = fx.dir.path().join("t8");
+    let oracle_prefix = fx.dir.path().join("oracle");
+
+    run_rust_paired_with_threads(&fx.ref_fasta, &fx.r1, &fx.r2, &t1_prefix, 1);
+    run_rust_paired_with_threads(&fx.ref_fasta, &fx.r1, &fx.r2, &t4_prefix, 4);
+    run_rust_paired_with_threads(&fx.ref_fasta, &fx.r1, &fx.r2, &t8_prefix, 8);
+    run_oracle_paired(&fx.ref_fasta, &fx.r1, &fx.r2, &oracle_prefix);
+
+    // -t 1 vs -t 4 vs -t 8 vs oracle, both mate files, all pairwise
+    // byte-identical.
+    for (label, prefix) in [("t4", &t4_prefix), ("t8", &t8_prefix), ("oracle", &oracle_prefix)] {
+        assert_files_byte_identical(
+            &fx.dir.path().join("t1_1.fq"),
+            &fx.dir.path().join(format!("{}_1.fq", prefix.file_name().unwrap().to_str().unwrap())),
+        );
+        assert_files_byte_identical(
+            &fx.dir.path().join("t1_2.fq"),
+            &fx.dir.path().join(format!("{}_2.fq", prefix.file_name().unwrap().to_str().unwrap())),
+        );
+        let _ = label; // used only in the loop's own readability; assertions above do the work.
+    }
+
+    // Sanity: the fixture actually exercises a real mix of pass/fail (not
+    // vacuously all-pass or all-fail).
+    let out1 = std::fs::read_to_string(fx.dir.path().join("t1_1.fq")).unwrap();
+    let emitted: usize = out1.lines().filter(|l| l.starts_with('@')).count();
+    assert!(emitted > 0, "expected at least one candidate pair to pass");
+    assert!(emitted < 4000, "expected at least one candidate pair to be dropped");
 }

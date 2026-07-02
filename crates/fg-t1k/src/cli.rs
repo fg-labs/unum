@@ -145,11 +145,9 @@ pub struct ExtractArgs {
     #[arg(short = 'o', long = "prefix", default_value = "toassemble", value_name = "STRING")]
     pub prefix: String,
 
-    /// Number of threads. Accepted for CLI compatibility; the extraction pass itself always
-    /// runs single-threaded internally. For FASTQ mode, output is provably threadCnt-invariant --
-    /// see `fg_t1k_core::extract`'s module docs ("Output order == input order"). For BAM mode,
-    /// see `fg_t1k_core::bam_extract`'s module docs for why only `-t 1` oracle semantics are
-    /// reproduced.
+    /// Number of threads used to parallelize the per-read candidate-filter decision (both FASTQ
+    /// and BAM mode). Output is byte-identical at any `-t` -- see `fg_t1k_core::extract`'s and
+    /// `fg_t1k_core::bam_extract`'s module docs ("Output order == input order") for why.
     #[arg(short = 't', default_value_t = 1)]
     pub threads: u32,
 
