@@ -99,22 +99,60 @@
 //!   the genotype CALL itself (Phase 5c, end-to-end) is the ultimate
 //!   correctness gate, not bitwise abundance parity.
 //!
-//! # Deliberately NOT ported here (deferred to 5c)
+//! This module also carries the Phase-5c slice: the capstone that turns
+//! candidate reads into a called, quality-scored genotype and writes the
+//! output TSVs. See `crates/fg-t1k/src/stages/genotype.rs` for the CLI/read-
+//! processing driver (reference loading/dedup, [`extend_overlap`]/
+//! [`assign_read`]/[`read_assignment_to_fragment_assignment`] wiring, the
+//! main read loop) that ties this module's pieces together end-to-end.
 //!
-//! - `SelectAllele`/genotype-quality scoring/output formatting -- Phase 5c.
-//! - `ReadAssignmentToFragmentAssignment` (`SeqSet.hpp:2310-2556`, builds
-//!   `_fragmentOverlap`s from per-mate `_overlap` lists) -- this belongs to
-//!   the read-processing loop that calls `SetReadAssignments` in a loop
-//!   (`Genotyper.cpp:160-192`); [`Genotyper::set_read_assignments`] here
-//!   takes already-built [`FragmentOverlap`]s as input, matching the C++
-//!   method signature exactly, so this port is agnostic to how its caller
-//!   produces them.
-//! - `RemoveLowLikelihoodAlleleInEquivalentClass`/`InitAlleleAbundance` --
-//!   neither is called from `Genotyper.cpp:main`'s stock pipeline between
-//!   `FinalizeReadAssignments` and `QuantifyAlleleEquivalentClass`
-//!   (`Genotyper.cpp:634,644`), so they are out of the 5b slice.
+//! - [`alnorm`] -- ported from `Genotyper::alnorm` (`Genotyper.hpp:252-370`):
+//!   the AS66 standard-normal-CDF polynomial approximation
+//!   [`Genotyper::select_alleles_for_genes`]'s quality score is built from.
+//! - [`extend_overlap`] -- ported from `SeqSet::ExtendOverlap`
+//!   (`SeqSet.hpp:1994-2100`): extends a k-mer-chained [`overlap::Overlap`]
+//!   to the read's/allele's full overhangs via `AlignAlgo::GlobalAlignment`.
+//!   Only the `ignoreNonExonDiff == false` path is ported (see its doc
+//!   comment) -- correct for every caller in this port's scope, since
+//!   `Genotyper.cpp`'s CLI only sets `ignoreNonExonDiff` true via
+//!   `--relaxIntronAlign`, which no invocation this port targets passes.
+//! - [`assign_read`] -- ported from `SeqSet::AssignRead` (`SeqSet.hpp:2119-
+//!   2303`), restricted to `weight == -1` (no base-coverage marking; see its
+//!   doc comment for why `posWeight`/`GetSeqMissingBaseCoverage` are out of
+//!   this port's scope) and `ignoreNonExonDiff == false` (same as
+//!   [`extend_overlap`]): turns one (deduplicated) read sequence into its
+//!   sorted, [`extend_overlap`]-refined list of [`overlap::Overlap`]s.
+//! - [`read_assignment_to_fragment_assignment`] -- ported from
+//!   `SeqSet::ReadAssignmentToFragmentAssignment` (`SeqSet.hpp:2310-2655`):
+//!   combines a read pair's two mate-end overlap lists (as produced by
+//!   [`assign_read`]) into per-allele [`FragmentOverlap`]s, the direct input
+//!   to [`Genotyper::set_read_assignments`].
+//! - [`Genotyper::remove_low_likelihood_allele_in_equivalent_class`] --
+//!   ported from `Genotyper::RemoveLowLikelihoodAlleleInEquivalentClass`
+//!   (`Genotyper.hpp:1371-1460`): a coverage-likelihood filter over each
+//!   equivalence class's member alleles, run once (`Genotyper.cpp:647`)
+//!   between quantification and allele selection.
+//! - [`Genotyper::select_alleles_for_genes`] -- ported from
+//!   `Genotyper::SelectAllelesForGenes` (`Genotyper.hpp:1462-2090`): the
+//!   genotyping decision itself -- ranks equivalence classes by abundance,
+//!   assigns alleles to genes/ranks (0/1/2+), runs the iterative
+//!   best-haplotype-pair search, then scores each rank's `genotypeQuality`
+//!   via [`alnorm`]. This is the capstone this whole module (5a/5b/5c)
+//!   builds up to.
+//! - [`Genotyper::get_gene_allele_types`]/
+//!   [`Genotyper::is_reads_in_allele_idx_optimal`]/
+//!   [`Genotyper::get_average_read_assignment_cnt`] -- small ported helpers
+//!   [`Genotyper::select_alleles_for_genes`] and the output writers below
+//!   depend on.
+//! - [`Genotyper::get_allele_description`]/[`Genotyper::output_representative_alleles`]
+//!   -- ported from `Genotyper::GetAlleleDescription` (`Genotyper.hpp:2103-
+//!   2178`, main's `_genotype.tsv` row formatting) and
+//!   `Genotyper::OutputRepresentativeAlleles` (`Genotyper.hpp:2180-2229`,
+//!   `_allele.tsv`).
 
 use std::collections::HashMap;
+
+use crate::overlap;
 
 use crate::kmer_count::KmerCount;
 
@@ -246,6 +284,84 @@ pub fn parse_allele_name(
             String::from_utf8_lossy(&bytes[..major_end]).into_owned(),
         )
     }
+}
+
+/// Ported from `Genotyper::alnorm` (`Genotyper.hpp:252-370`): Algorithm AS66
+/// (Hill 1973), the polynomial approximation to the standard normal
+/// cumulative distribution used by [`Genotyper::select_alleles_for_genes`]'s
+/// `genotypeQuality` scoring (`Genotyper.hpp:2068`,
+/// `-log(alnorm(...))/log(10)`).
+///
+/// `upper == true` integrates from `x` to `+Infinity`; `upper == false`
+/// integrates from `-Infinity` to `x`. All coefficients/branches/constants
+/// are copied verbatim from the vendored C++ (down to variable names in this
+/// doc comment) -- this is a fixed numerical-methods polynomial, not
+/// something to "clean up" or re-derive.
+///
+/// # FLOATS
+///
+/// Pure `+`/`*`/`/`/`exp`/`abs`/comparisons, no loops or data-dependent
+/// accumulation order -- a straight-line polynomial evaluation. `exp` is
+/// libm's `f64::exp`; like [`Genotyper::squarem_alpha`]'s `sqrt` note, this
+/// single transcendental call is not itself a source of divergence, but the
+/// C++ oracle's `-O3` build may still contract the surrounding
+/// multiply-then-divide chains via FMA in ways Rust's non-fused `+`/`*` does
+/// not -- so this targets (and the `diff_genotype_e2e` end-to-end test
+/// verifies at the genotype-CALL tier) close agreement with the oracle, not
+/// guaranteed bit-identical `f64` output.
+#[must_use]
+#[allow(clippy::many_single_char_names)] // matches the C++'s own single-letter variable names verbatim.
+pub fn alnorm(x: f64, upper: bool) -> f64 {
+    let a1 = 5.758_854_804_58;
+    let a2 = 2.624_331_216_79;
+    let a3 = 5.928_857_244_38;
+    let b1 = -29.821_355_780_7;
+    let b2 = 48.695_993_069_2;
+    let c1 = -0.000_000_038_052;
+    let c2 = 0.000_398_064_794;
+    let c3 = -0.151_679_116_635;
+    let c4 = 4.838_591_280_8;
+    let c5 = 0.742_380_924_027;
+    let c6 = 3.990_194_170_11;
+    let con = 1.28;
+    let d1 = 1.000_006_153_02;
+    let d2 = 1.986_153_813_64;
+    let d3 = 5.293_303_249_26;
+    let d4 = -15.150_897_245_1;
+    let d5 = 30.789_933_034;
+    let ltone = 7.0;
+    let p = 0.398_942_280_444;
+    let q = 0.399_903_485_04;
+    let r = 0.398_942_280_385;
+    let utzero = 18.66;
+
+    let mut up = upper;
+    let mut z = x;
+
+    if z < 0.0 {
+        up = !up;
+        z = -z;
+    }
+
+    if ltone < z && (!up || utzero < z) {
+        return if up { 0.0 } else { 1.0 };
+    }
+
+    let y = 0.5 * z * z;
+
+    let mut value = if z <= con {
+        0.5 - z * (p - q * y / (y + a1 + b1 / (y + a2 + b2 / (y + a3))))
+    } else {
+        r * (-y).exp()
+            / (z + c1
+                + d1 / (z + c2 + d2 / (z + c3 + d3 / (z + c4 + d4 / (z + c5 + d5 / (z + c6))))))
+    };
+
+    if !up {
+        value = 1.0 - value;
+    }
+
+    value
 }
 
 /// Ported from `_alleleInfo` (`Genotyper.hpp:16-31`): per-allele bookkeeping
@@ -405,6 +521,1003 @@ pub struct PairId {
     pub b: f64,
 }
 
+/// An [`overlap::Overlap`] refined by [`extend_overlap`]/[`assign_read`]:
+/// carries the extra fields `_overlap` has that `overlap::Overlap` (Phase 4's
+/// `GetOverlapsFromHits`-only port) does not need -- `relaxed_match_cnt`
+/// (`_overlap::relaxedMatchCnt`) and `left_clip`/`right_clip`
+/// (`_overlap::leftClip`/`rightClip`). Defined here rather than added to
+/// [`overlap::Overlap`] itself, since that type is Phase 4's and this port's
+/// scope is additive-only on top of it (see this module's doc comment).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExtendedOverlap {
+    /// `_overlap::seqIdx`.
+    pub seq_idx: u32,
+    /// `_overlap::readStart`.
+    pub read_start: i32,
+    /// `_overlap::readEnd`.
+    pub read_end: i32,
+    /// `_overlap::seqStart`.
+    pub seq_start: i32,
+    /// `_overlap::seqEnd`.
+    pub seq_end: i32,
+    /// `_overlap::strand`.
+    pub strand: i8,
+    /// `_overlap::matchCnt` -- count TWICE, as with [`overlap::Overlap::match_cnt`].
+    pub match_cnt: i32,
+    /// `_overlap::similarity`.
+    pub similarity: f64,
+    /// `_overlap::relaxedMatchCnt`.
+    pub relaxed_match_cnt: i32,
+    /// `_overlap::leftClip`.
+    pub left_clip: i32,
+    /// `_overlap::rightClip`.
+    pub right_clip: i32,
+}
+
+/// Ported from `_overlap::operator<` (`SeqSet.hpp:103-127`), specialized to
+/// [`ExtendedOverlap`] -- identical field-by-field comparison to
+/// [`overlap::overlap_less_than`] (both types share the same first eight
+/// compared fields in the same order), duplicated here because
+/// [`ExtendedOverlap`] is a distinct Rust type from [`overlap::Overlap`]. See
+/// [`overlap::overlap_less_than`]'s doc comment for the full field-order
+/// rationale (a strict weak ordering, not a total `Ord`).
+#[must_use]
+pub fn extended_overlap_less_than(a: &ExtendedOverlap, b: &ExtendedOverlap) -> bool {
+    if a.match_cnt != b.match_cnt {
+        return a.match_cnt > b.match_cnt;
+    }
+    #[allow(clippy::float_cmp)]
+    let similarity_differs = a.similarity != b.similarity;
+    if similarity_differs {
+        return a.similarity > b.similarity;
+    }
+    let a_span = a.read_end - a.read_start;
+    let b_span = b.read_end - b.read_start;
+    if a_span != b_span {
+        return a_span > b_span;
+    }
+    if a.seq_idx != b.seq_idx {
+        return a.seq_idx < b.seq_idx;
+    }
+    if a.strand != b.strand {
+        return a.strand < b.strand;
+    }
+    if a.read_start != b.read_start {
+        return a.read_start < b.read_start;
+    }
+    if a.read_end != b.read_end {
+        return a.read_end < b.read_end;
+    }
+    if a.seq_start != b.seq_start {
+        return a.seq_start < b.seq_start;
+    }
+    a.seq_end < b.seq_end
+}
+
+/// Ported from `SeqSet::ExtendOverlap` (`SeqSet.hpp:1994-2100`): extends a
+/// k-mer-chained `overlap` to the read's/allele's full available overhangs
+/// on both ends via `AlignAlgo::GlobalAlignment`, stopping early at the
+/// first `N` found in the reference overhang (mirrors the C++'s "locate the
+/// boundary in the reference with 'N'" loops, `SeqSet.hpp:2008-2016,2043-
+/// 2051`).
+///
+/// `read` is the (possibly already reverse-complemented, matching
+/// `overlap.strand`) read sequence; `allele_consensus` is
+/// `refSet.GetSeqConsensus(overlap.seq_idx)`.
+///
+/// Returns `Some(extended)` if the extended similarity meets
+/// `ref_seq_similarity` (mirrors the C++ `ret == 1`, i.e.
+/// `extendedOverlap.similarity >= refSeqSimilarity`, `SeqSet.hpp:2074-2075`),
+/// `None` otherwise (`ret == 0`) -- callers still receive the extended
+/// overlap either way via the
+/// `Result`-independent output; unlike the C++ (which writes into
+/// `extendedOverlap` unconditionally and returns a separate `int` status),
+/// this port folds both into a single `Option` since every caller in this
+/// port's scope (`assign_read`) only ever wants the value when it passed.
+///
+/// # `ignoreNonExonDiff` is not a parameter here
+///
+/// The C++ `ExtendOverlap` itself never reads `ignoreNonExonDiff` -- that
+/// flag only affects the CALLER's (`AssignRead`'s) post-processing after
+/// `ExtendOverlap` returns (see [`assign_read`]'s doc comment). This
+/// function therefore has no `ignoreNonExonDiff`-shaped parameter to begin
+/// with; it is included in this doc comment only to make that absence
+/// explicit for a reader cross-checking against the module's other
+/// `ignoreNonExonDiff == false`-only ports.
+///
+/// # Panics
+///
+/// Panics if `read.len()`/`allele_consensus.len()` do not fit an `i32`, or
+/// if `overlap`'s coordinates are out of bounds for `read`/`allele_consensus`
+/// (not expected: `overlap` is assumed to be a valid
+/// [`crate::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read`] result
+/// against the same `read`/`allele_consensus`).
+#[must_use]
+#[allow(clippy::similar_names)]
+pub fn extend_overlap(
+    read: &[u8],
+    allele_consensus: &[u8],
+    overlap: &overlap::Overlap,
+    ref_seq_similarity: f64,
+) -> Option<ExtendedOverlap> {
+    let len = i32::try_from(read.len()).expect("read length fits in i32");
+    let consensus_len =
+        i32::try_from(allele_consensus.len()).expect("consensus length fits in i32");
+
+    // Extension to the 5' end (left).
+    let mut left_overhang_size = overlap.read_start.min(overlap.seq_start);
+    let mut left_clip = if overlap.read_start > overlap.seq_start {
+        overlap.read_start - overlap.seq_start
+    } else {
+        0
+    };
+    for i in 0..left_overhang_size {
+        let pos = usize::try_from(overlap.seq_start - i - 1).expect("in-bounds seq offset");
+        if allele_consensus[pos] == b'N' {
+            left_clip = left_overhang_size - i;
+            left_overhang_size = i;
+            break;
+        }
+    }
+
+    let left_seq_start = usize::try_from(overlap.seq_start - left_overhang_size).unwrap();
+    let left_seq_end = usize::try_from(overlap.seq_start).unwrap();
+    let left_read_start = usize::try_from(overlap.read_start - left_overhang_size).unwrap();
+    let left_read_end = usize::try_from(overlap.read_start).unwrap();
+    let left_align = crate::align_algo::global_alignment(
+        &allele_consensus[left_seq_start..left_seq_end],
+        &read[left_read_start..left_read_end],
+        crate::align_algo::DEFAULT_BAND,
+    );
+    let (mut match_cnt, mut mismatch_cnt, mut indel_cnt) = (0, 0, 0);
+    crate::align_algo::get_align_stats(
+        &left_align.align,
+        false,
+        &mut match_cnt,
+        &mut mismatch_cnt,
+        &mut indel_cnt,
+    );
+
+    // Extension to the 3' end (right).
+    let mut right_overhang_size =
+        (len - 1 - overlap.read_end).min(consensus_len - 1 - overlap.seq_end);
+    let mut right_clip = if len - 1 - overlap.read_end > consensus_len - 1 - overlap.seq_end {
+        len - 1 - overlap.read_end - (consensus_len - 1 - overlap.seq_end)
+    } else {
+        0
+    };
+    for i in 0..right_overhang_size {
+        let pos = usize::try_from(overlap.seq_end + 1 + i).expect("in-bounds seq offset");
+        if allele_consensus[pos] == b'N' {
+            right_clip = right_overhang_size - i;
+            right_overhang_size = i;
+            break;
+        }
+    }
+
+    let right_seq_start = usize::try_from(overlap.seq_end + 1).unwrap();
+    let right_seq_end = usize::try_from(overlap.seq_end + 1 + right_overhang_size).unwrap();
+    let right_read_start = usize::try_from(overlap.read_end + 1).unwrap();
+    let right_read_end = usize::try_from(overlap.read_end + 1 + right_overhang_size).unwrap();
+    let right_align = crate::align_algo::global_alignment(
+        &allele_consensus[right_seq_start..right_seq_end],
+        &read[right_read_start..right_read_end],
+        crate::align_algo::DEFAULT_BAND,
+    );
+    // `update = true`: accumulate onto the left-extension's stats (SeqSet.hpp:2057).
+    crate::align_algo::get_align_stats(
+        &right_align.align,
+        true,
+        &mut match_cnt,
+        &mut mismatch_cnt,
+        &mut indel_cnt,
+    );
+    let _ = mismatch_cnt; // matches stock: computed, never read after this point.
+
+    let mut extended = ExtendedOverlap {
+        seq_idx: overlap.seq_idx,
+        read_start: overlap.read_start - left_overhang_size,
+        read_end: overlap.read_end + right_overhang_size,
+        seq_start: overlap.seq_start - left_overhang_size,
+        seq_end: overlap.seq_end + right_overhang_size,
+        strand: overlap.strand,
+        match_cnt: 2 * match_cnt + overlap.match_cnt,
+        similarity: 0.0,
+        relaxed_match_cnt: 0,
+        left_clip,
+        right_clip,
+    };
+    extended.similarity = f64::from(extended.match_cnt)
+        / f64::from(
+            extended.read_end - extended.read_start + 1 + extended.seq_end - extended.seq_start + 1,
+        );
+    extended.relaxed_match_cnt = extended.match_cnt;
+
+    // `ret` (SeqSet.hpp:2074-2075): decided from the PRE-clip-adjustment
+    // similarity and never revisited, even though `extendedOverlap.similarity`
+    // itself IS mutated below when a clip is present -- ported verbatim
+    // (not a bug in this port; matches stock exactly).
+    let passed = extended.similarity >= ref_seq_similarity;
+
+    if left_clip > 0 || right_clip > 0 {
+        extended.match_cnt += 2 * left_clip + 2 * right_clip;
+        extended.similarity = f64::from(extended.match_cnt)
+            / f64::from(
+                extended.read_end - extended.read_start + 1 + extended.seq_end - extended.seq_start
+                    + 1
+                    + 2 * left_clip
+                    + 2 * right_clip,
+            );
+    }
+
+    passed.then_some(extended)
+}
+
+/// Ported from the `nucToNum` table as linked into the `genotyper`/`analyzer`
+/// binaries (`Genotyper.cpp:37-40`): maps `A`/`C`/`G`/`T` to a 0-3 index.
+/// Duplicated from (rather than reusing) `align_algo`'s private, identically
+/// defined `nuc_to_num` -- see this module's doc comment for why 5c stays
+/// additive-only on top of Phase 3/3b/4 files rather than exposing their
+/// internals.
+fn nuc_to_num(c: u8) -> Option<usize> {
+    match c {
+        b'A' => Some(0),
+        b'C' => Some(1),
+        b'G' => Some(2),
+        b'T' => Some(3),
+        _ => None,
+    }
+}
+
+/// Complements a single base: `A<->T`, `C<->G`, `N->N` -- mirrors
+/// `numToNuc[3 - nucToNum[c - 'A']]` with `N` bypassing the table
+/// (`SeqSet::ReverseComplement`, `SeqSet.hpp:2103-2114`). Duplicated from
+/// (rather than reusing) `ref_kmer_filter`'s private, identically defined
+/// `reverse_complement_into`/`complement_base` -- see this module's doc
+/// comment for why 5c stays additive-only on top of Phase 3/3b/4 files.
+fn complement_base(c: u8) -> u8 {
+    match c {
+        b'A' => b'T',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'T' => b'A',
+        _ => b'N',
+    }
+}
+
+/// Returns the reverse complement of `seq` (see [`complement_base`]).
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter().rev().map(|&c| complement_base(c)).collect()
+}
+
+/// Per-allele reference bookkeeping this port's `AssignRead`/
+/// `GetSeqMissingBaseCoverage` ports need beyond what
+/// [`crate::ref_kmer_filter::RefKmerFilter`] tracks: exon intervals (for
+/// `isValidDiff.exon`) and per-position base-coverage counts (`posWeight`).
+/// Mirrors the fields of `_seqWrapper` (`SeqSet.hpp:25-42`) this port's 5c
+/// slice actually reads/writes; a caller (the `fg-t1k genotype` CLI) builds
+/// one of these per deduplicated allele sequence and keeps it alongside a
+/// [`crate::ref_kmer_filter::RefKmerFilter`] built from the same
+/// deduplicated sequences in the same order.
+#[derive(Debug, Clone)]
+pub struct AlleleRef {
+    /// `_seqWrapper::consensus`.
+    pub consensus: Vec<u8>,
+    /// `_seqWrapper::exons` -- 0-based, inclusive `(start, end)` intervals,
+    /// as parsed by [`parse_exon_comment`] from the reference FASTA header
+    /// comment (or a single whole-sequence interval when no comment is
+    /// present, matching `InputRefSeq`'s `comment == NULL` fallback,
+    /// `SeqSet.hpp:970-976`).
+    pub exons: Vec<(i32, i32)>,
+    /// `_seqWrapper::posWeight` -- per-position base-observation counts,
+    /// mutated in place by [`assign_read`]'s coverage-marking step (mirrors
+    /// `SeqSet::AssignRead`'s `weight > 0` branch, `SeqSet.hpp:2253-2274`).
+    /// Initialized to all-zero (`SetSeqExonInfo`'s `posWeight.SetZero`,
+    /// `SeqSet.hpp:646`).
+    pub pos_weight: Vec<crate::align_algo::PosWeight>,
+}
+
+impl AlleleRef {
+    /// Builds a fresh [`AlleleRef`] for `consensus`, parsing `comment` (the
+    /// FASTA header's post-id text, or `None`) into exon intervals via
+    /// [`parse_exon_comment`] -- mirrors `InputRefSeq` + `SetSeqExonInfo`
+    /// (`SeqSet.hpp:906-989,638-720`) for the `initExonInfo = true` call
+    /// site `InitRefSet` always uses (`Genotyper.hpp:722`).
+    #[must_use]
+    pub fn new(consensus: Vec<u8>, comment: Option<&str>) -> Self {
+        let len = consensus.len();
+        let exons = match comment {
+            Some(c) => parse_exon_comment(c, len),
+            None => vec![(0, i32::try_from(len).unwrap_or(0) - 1)],
+        };
+        Self { consensus, exons, pos_weight: vec![crate::align_algo::PosWeight::default(); len] }
+    }
+
+    /// `true` if position `pos` (0-based) falls within any parsed exon
+    /// interval (`_validDiff::exon`, `SeqSet.hpp:657,670`).
+    #[must_use]
+    fn is_exon(&self, pos: i32) -> bool {
+        self.exons.iter().any(|&(s, e)| pos >= s && pos <= e)
+    }
+}
+
+/// Ported from `InputRefSeq`'s comment-parsing loop (`SeqSet.hpp:936-961`):
+/// splits `comment` into a sequence of non-negative integers (digit runs
+/// separated by any non-digit byte), discards the FIRST number (an unused
+/// leading marker in every reference this port targets), then pairs up the
+/// rest into `(start, end)` inclusive exon intervals: `(nums[1], nums[2])`,
+/// `(nums[3], nums[4])`, etc. -- i.e. `for i in (1..nums.len()).step_by(2)`.
+///
+/// Returns a single whole-sequence interval `[(0, seq_len - 1)]` if `comment`
+/// yields fewer than 2 numbers (mirrors the C++'s `if (size > 0) {...} else
+/// {whole-sequence interval}` -- `size` there is `nums.size()`, which is 0
+/// only when `comment` has no digits at all; a `size` of exactly 1, i.e. only
+/// the discarded leading number, still enters the `for (i = 1 ; i < size ...)`
+/// loop as a zero-iteration range, yielding an EMPTY `exons` vec, not the
+/// whole-sequence fallback -- ported exactly: `size <= 1` produces an empty
+/// list here too, `size == 0` is the only case mapped to the fallback).
+#[must_use]
+pub fn parse_exon_comment(comment: &str, seq_len: usize) -> Vec<(i32, i32)> {
+    let mut nums: Vec<i32> = Vec::new();
+    let mut n: i32 = 0;
+    let mut in_digits = false;
+    for b in comment.bytes() {
+        if b.is_ascii_digit() {
+            n = n * 10 + i32::from(b - b'0');
+            in_digits = true;
+        } else if in_digits {
+            nums.push(n);
+            n = 0;
+            in_digits = false;
+        }
+    }
+    if in_digits {
+        nums.push(n);
+    }
+
+    if nums.is_empty() {
+        return vec![(0, i32::try_from(seq_len).unwrap_or(0) - 1)];
+    }
+
+    let mut exons = Vec::new();
+    let mut i = 1;
+    while i + 1 < nums.len() {
+        exons.push((nums[i], nums[i + 1]));
+        i += 2;
+    }
+    exons
+}
+
+/// Ported from `SeqSet::AssignRead` (`SeqSet.hpp:2119-2303`), restricted to
+/// `ignoreNonExonDiff == false` (see this module's doc comment). Turns one
+/// (deduplicated) read sequence into its sorted, extended overlap list,
+/// mutating `allele_refs`' `pos_weight` in place when `weight > 0` (mirrors
+/// the C++'s `weight > 0` base-coverage-marking gate,
+/// `SeqSet.hpp:2253`) -- every caller in this port's scope
+/// (`Genotyper.cpp:472`'s `weight = j - i`, the duplicate-sequence count)
+/// passes `weight >= 1`, so that gate is always live here.
+///
+/// `overlaps` is `GetOverlapsFromRead`'s already-computed, already-similarity-
+/// filtered result for `read` (i.e.
+/// [`crate::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read`]'s
+/// output) -- this port takes it as a parameter rather than calling
+/// `get_overlaps_from_read` itself, so it stays independent of exactly how a
+/// caller obtains it (mirrors the "caller supplies reference-derived input"
+/// pattern used throughout this module).
+///
+/// Returns `None` if `overlaps` is empty (mirrors the C++'s `overlapCnt <= 0`
+/// early `return -1`, `SeqSet.hpp:2135-2138` -- `seqs.size() == 0` is
+/// unreachable here since `allele_refs` is non-empty by construction in every
+/// caller).
+///
+/// # Separators are always absent in this port's fixtures
+///
+/// `IsSeparatorInRange` (`SeqSet.hpp:2163-2169`) always returns `false` for
+/// every reference this port targets: `kir_rna_seq.fa`'s per-allele
+/// sequences contain no interior `N` runs (the only source of a non-trivial
+/// `separator` list, `SeqSet.hpp:896-900`), so `seqs[i].separator` is always
+/// exactly `[-1, len]` and no `(s, e)` range with `s, e` inside `[0, len)`
+/// can ever contain one of those two sentinel values. This port therefore
+/// omits the `IsSeparatorInRange` calls (both the per-overlap skip and the
+/// `needClip` computation, which then feeds `onlyConsiderClip`'s SIMILARITY
+/// exception at `< 0.95` -- with `needClip` always `false`, that exception
+/// is dead too) rather than threading a separator predicate through for a
+/// condition that is provably always `false` for this port's inputs.
+///
+/// # Panics
+///
+/// Panics if any `overlaps[i].seq_idx` is out of range for `allele_refs`
+/// (not expected: `overlaps` is assumed to come from
+/// [`crate::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read`] against
+/// the same reference set `allele_refs` was built from).
+#[must_use]
+pub fn assign_read(
+    read: &[u8],
+    overlaps: &[overlap::Overlap],
+    allele_refs: &mut [AlleleRef],
+    ref_seq_similarity: f64,
+    weight: i32,
+) -> Option<Vec<ExtendedOverlap>> {
+    if overlaps.is_empty() {
+        return None;
+    }
+
+    let mut sorted_overlaps = overlaps.to_vec();
+    sorted_overlaps.sort_by(|a, b| {
+        if overlap::overlap_less_than(a, b) {
+            std::cmp::Ordering::Less
+        } else if overlap::overlap_less_than(b, a) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+
+    let rc: Vec<u8> = reverse_complement(read);
+    let r: &[u8] = if sorted_overlaps[0].strand == -1 { &rc } else { read };
+
+    let mut extended_overlaps: Vec<ExtendedOverlap> = Vec::new();
+    let mut only_consider_clip = false;
+    let mut good_match_cnt: i32 = -1;
+
+    for o in &sorted_overlaps {
+        if only_consider_clip && o.match_cnt < good_match_cnt {
+            // `needClip` is always false in this port's fixtures (see doc
+            // comment), so the `(!needClip || similarity < 0.95)` escape
+            // hatch never fires -- this is an unconditional `continue` here.
+            continue;
+        }
+        let allele_idx = usize::try_from(o.seq_idx).expect("seq_idx is non-negative");
+        let consensus = &allele_refs[allele_idx].consensus;
+        if let Some(extended) = extend_overlap(r, consensus, o, ref_seq_similarity) {
+            extended_overlaps.push(extended);
+            if !only_consider_clip && (good_match_cnt == -1 || o.match_cnt > good_match_cnt) {
+                good_match_cnt = o.match_cnt;
+            }
+        } else {
+            only_consider_clip = true;
+        }
+    }
+
+    // Adding the exonic and base support for good overlaps (SeqSet.hpp:2188-2286).
+    if !extended_overlaps.is_empty() && weight >= 0 {
+        let mut best = extended_overlaps[0];
+        for &eo in &extended_overlaps {
+            if extended_overlap_less_than(&eo, &best) {
+                best = eo;
+            }
+        }
+
+        for eo in &mut extended_overlaps {
+            if eo.match_cnt < best.match_cnt - 10 {
+                // "The assignment is very bad" (SeqSet.hpp:2261-2262): C++'s
+                // `else` arm zeroes `relaxedMatchCnt` here (rather than
+                // leaving it at `extend_overlap`'s `relaxedMatchCnt =
+                // matchCnt` default) and skips the alignment/base-coverage
+                // marking below entirely.
+                eo.relaxed_match_cnt = 0;
+                continue;
+            }
+            let allele_idx = usize::try_from(eo.seq_idx).expect("seq_idx is non-negative");
+            let seq_start = usize::try_from(eo.seq_start).unwrap();
+            let seq_end = usize::try_from(eo.seq_end).unwrap();
+            let read_start = usize::try_from(eo.read_start).unwrap();
+            let read_end = usize::try_from(eo.read_end).unwrap();
+            let align = crate::align_algo::global_alignment(
+                &allele_refs[allele_idx].consensus[seq_start..=seq_end],
+                &r[read_start..=read_end],
+                crate::align_algo::DEFAULT_BAND,
+            );
+
+            // `ignoreNonExonDiff == false`: `relaxedMatchCnt = matchCnt`
+            // (SeqSet.hpp:2247-2250), skipping the exon-walk that would
+            // otherwise recompute it.
+            eo.relaxed_match_cnt = eo.match_cnt;
+
+            // Mark the base coverage (SeqSet.hpp:2252-2274). No locking
+            // needed: this port is single-threaded (see module docs).
+            if weight > 0 {
+                let mut ref_pos = eo.seq_start;
+                let mut read_pos = eo.read_start;
+                for &op in &align.align {
+                    if op == crate::align_algo::EDIT_MATCH {
+                        let rb = r[usize::try_from(read_pos).unwrap()];
+                        if rb != b'N' {
+                            if let Some(code) = nuc_to_num(rb) {
+                                let pos = usize::try_from(ref_pos).unwrap();
+                                allele_refs[allele_idx].pos_weight[pos].count[code] += weight;
+                            }
+                        }
+                    }
+                    if op != crate::align_algo::EDIT_INSERT {
+                        ref_pos += 1;
+                    }
+                    if op != crate::align_algo::EDIT_DELETE {
+                        read_pos += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // `extendedOverlaps.size() > 1000` truncation (SeqSet.hpp:2290-2298).
+    if extended_overlaps.len() > 1000 {
+        extended_overlaps.sort_by(|a, b| {
+            if extended_overlap_less_than(a, b) {
+                std::cmp::Ordering::Less
+            } else if extended_overlap_less_than(b, a) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        let first_similarity = extended_overlaps[0].similarity;
+        let mut j = 1usize;
+        while j < extended_overlaps.len()
+            && extended_overlaps[j].similarity >= first_similarity - 0.1
+        {
+            j += 1;
+        }
+        extended_overlaps.truncate(j);
+    }
+
+    Some(extended_overlaps)
+}
+
+/// Ported from `SeqSet::GetSeqMissingBaseCoverage` (`SeqSet.hpp:2717-2755`):
+/// counts how many of `allele_ref`'s exon positions (sorted ascending by
+/// observed base coverage) fall below `ratio` times the MEDIAN exon-position
+/// coverage (floored at `1`) -- i.e. the number of "missing" (low-coverage)
+/// exon bases, consumed as [`AlleleInfo::missing_coverage`] by
+/// [`Genotyper::finalize_read_assignments`].
+///
+/// # Panics
+///
+/// Panics if `allele_ref` has zero exon positions (mirrors the C++'s
+/// undefined behavior indexing `exonBaseCoverage[k / 2]` with `k == 0`) --
+/// not expected for any real allele, which always has at least one exon
+/// interval (see [`AlleleRef::new`]'s whole-sequence fallback).
+#[must_use]
+pub fn get_seq_missing_base_coverage(allele_ref: &AlleleRef, ratio: f64) -> i32 {
+    let mut exon_base_coverage: Vec<i32> = Vec::new();
+    for (i, &base) in allele_ref.consensus.iter().enumerate() {
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let i_i32 = i as i32;
+        if allele_ref.is_exon(i_i32) {
+            let code = nuc_to_num(base).expect("consensus base is A/C/G/T");
+            exon_base_coverage.push(allele_ref.pos_weight[i].count[code]);
+        }
+    }
+    exon_base_coverage.sort_unstable();
+    let k = exon_base_coverage.len();
+    assert!(k > 0, "get_seq_missing_base_coverage: allele has zero exon positions");
+
+    let mut cutoff = f64::from(exon_base_coverage[k / 2]) * ratio;
+    if cutoff < 1.0 {
+        cutoff = 1.0;
+    }
+
+    let mut i = 0i32;
+    for &cov in &exon_base_coverage {
+        if f64::from(cov) >= cutoff {
+            break;
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Ported from `SeqSet::IsOverlapIntersect` (`SeqSet.hpp:317-323`): `true` if
+/// `a`/`b` are against the same allele and their `[seqStart, seqEnd]` ranges
+/// overlap. Not currently reachable from
+/// [`read_assignment_to_fragment_assignment`] (see that function's doc
+/// comment for why -- the `ignoreNonExonDiff`-gated branch that would call
+/// this is dead at this port's `ignoreNonExonDiff == false` default); ported
+/// anyway for fidelity, matching this module's general "port the branch even
+/// if currently dead at the default flags" convention (see
+/// [`extend_overlap`]'s doc comment for the same rationale applied
+/// elsewhere).
+#[must_use]
+pub fn is_overlap_intersect(a: &ExtendedOverlap, b: &ExtendedOverlap) -> bool {
+    a.seq_idx == b.seq_idx
+        && ((a.seq_start <= b.seq_start && a.seq_end >= b.seq_start)
+            || (b.seq_start <= a.seq_start && b.seq_end >= a.seq_start))
+}
+
+/// Ported from `SeqSet::TruncatedMatePairOverlap` (`SeqSet.hpp:502-522`):
+/// `o` is a mate-1-set overlap; tests whether `o`'s mate pair could be
+/// missing because the reference allele sequence is too short to contain it
+/// (i.e. the implied mate position falls off the end of `consensus_len`).
+///
+/// `separator_in_range` always returns `false` for this port's fixtures (see
+/// [`assign_read`]'s doc comment for why); accepted as a parameter anyway
+/// (rather than hardcoded away) to keep this function's signature
+/// independent of that fixture-specific fact, matching
+/// [`Genotyper::set_read_assignments`]'s own `separator_lookup` pattern.
+///
+/// # Panics
+///
+/// Panics if `o.seq_idx` does not fit an `i32` (not expected: allele indices
+/// are always small and non-negative).
+#[must_use]
+pub fn truncated_mate_pair_overlap(
+    o: &ExtendedOverlap,
+    comp_mate1: &ExtendedOverlap,
+    comp_mate2: &ExtendedOverlap,
+    consensus_len: i32,
+    mut separator_in_range: impl FnMut(i32, i32, i32) -> bool,
+) -> bool {
+    if o.strand == 1 {
+        // Mate is on the right.
+        consensus_len - 1 < o.seq_end + comp_mate2.seq_end - comp_mate1.seq_end
+            || separator_in_range(
+                o.seq_end,
+                o.seq_end + comp_mate2.seq_end - comp_mate1.seq_end + 1,
+                i32::try_from(o.seq_idx).expect("seq_idx fits in i32"),
+            )
+    } else {
+        o.seq_start - (comp_mate1.seq_start - comp_mate2.seq_start) < 0
+            || separator_in_range(
+                o.seq_start - (comp_mate1.seq_start - comp_mate2.seq_start) - 1,
+                o.seq_start,
+                i32::try_from(o.seq_idx).expect("seq_idx fits in i32"),
+            )
+    }
+}
+
+/// Internal pairing of a [`FragmentOverlap`] with the raw `ExtendedOverlap`(s)
+/// it was built from -- mirrors `_fragmentOverlap::overlap1`/`overlap2`
+/// (`SeqSet.hpp:158-159`), which the C++ keeps attached to every
+/// `_fragmentOverlap` all the way through
+/// `ReadAssignmentToFragmentAssignment` (used by its
+/// [`fragment_overlap_less_than`] tie-break and the truncated-mate-pair
+/// filter) even though [`FragmentOverlap`] itself (5a/5b's struct, which
+/// only stores what [`Genotyper::set_read_assignments`] needs downstream)
+/// does not carry them. Kept as a transient, function-local pairing here
+/// rather than widening [`FragmentOverlap`]'s public fields.
+#[derive(Debug, Clone, Copy)]
+struct Assembled {
+    fragment: FragmentOverlap,
+    overlap1: ExtendedOverlap,
+    overlap2: Option<ExtendedOverlap>,
+}
+
+/// Ported from `SeqSet::ReadAssignmentToFragmentAssignment` (`SeqSet.hpp:
+/// 2310-2655`): combines a read pair's two mate-end [`assign_read`] outputs
+/// into per-allele [`FragmentOverlap`]s -- the direct input to
+/// [`Genotyper::set_read_assignments`].
+///
+/// `overlaps1`/`overlaps2` mirror `pOverlaps1`/`pOverlaps2` (mate 1's / mate
+/// 2's [`assign_read`] output; `overlaps2 = None` for single-end reads,
+/// mirroring `pOverlaps2 == NULL`). `has_n` mirrors the C++'s
+/// `reads1[i].hasN || reads2[i].hasN` (computed by the caller, since this
+/// port has no `_genotypeRead`-equivalent read struct).
+///
+/// # `ignoreNonExonDiff == false`: the WHOLE relaxed-tie qual=1 branch is dead
+///
+/// C++'s tie-marking loop (`SeqSet.hpp:2492-2518`) has two `if`/`else if`
+/// arms that can set `assign[k].qual = 1`: the `exactTie` arm (matchCnt AND
+/// similarity both equal `bestAssign`'s, `SeqSet.hpp:2508`) and a second
+/// `else if (ignoreNonExonDiff && assign[i].matchCnt >= bestAssign.matchCnt -
+/// matchCntRelax && assign[i].relaxedMatchCnt == bestAssign.relaxedMatchCnt)`
+/// arm (`SeqSet.hpp:2514`). That second arm's condition is gated on
+/// `ignoreNonExonDiff` as a WHOLE -- not just the `matchCntRelax` widening
+/// from `2` to `4` computed just above it (`SeqSet.hpp:2495-2505`, the
+/// `IsOverlapIntersect` branch). At this port's `ignoreNonExonDiff == false`
+/// default (see this module's doc comment; there is no `--relaxIntronAlign`
+/// flag in this port's scope), the ENTIRE `else if` arm is unreachable in
+/// C++ -- so only `exactTie` ever sets `qual = 1` here. This function
+/// therefore does not compute a `relaxed_tie` term at all: doing so
+/// unconditionally (i.e. not gated on a false `ignoreNonExonDiff`) would
+/// admit fragment assignments C++ would drop, corrupting downstream
+/// abundance/genotype calls. A future port of `--relaxIntronAlign` should
+/// reintroduce this arm gated behind an explicit `ignore_non_exon_diff: bool`
+/// parameter (mirroring `matchCntRelax`'s own dead `IsOverlapIntersect` arm,
+/// which for the same reason is hardcoded to `2` below rather than computed).
+///
+/// `hit_len_required` mirrors `refSet.hitLenRequired` (the dangling-mate-pair
+/// filter's span threshold, `SeqSet.hpp:2561`; see
+/// [`crate::ref_kmer_filter::RefKmerFilter::hit_len_required`]).
+/// `consensus_len_of(seq_idx)` mirrors `refSet.GetSeqConsensusLen`/
+/// `seqs[seqIdx].consensusLen` (needed by [`truncated_mate_pair_overlap`]'s
+/// filter, `SeqSet.hpp:2580-2653`); `separator_in_range` mirrors
+/// `IsSeparatorInRange` (see [`assign_read`]'s doc comment: always `false`
+/// for this port's fixtures, but threaded through rather than hardcoded
+/// away).
+///
+/// # Panics
+///
+/// Panics if any `ExtendedOverlap::seq_idx` does not fit an `i32`/`u32` (not
+/// expected: every allele index this port produces is small and
+/// non-negative).
+#[must_use]
+#[allow(clippy::too_many_lines, clippy::similar_names)]
+pub fn read_assignment_to_fragment_assignment(
+    overlaps1: &[ExtendedOverlap],
+    overlaps2: Option<&[ExtendedOverlap]>,
+    has_n: bool,
+    hit_len_required: i32,
+    consensus_len_of: impl Fn(u32) -> i32,
+    mut separator_in_range: impl FnMut(i32, i32, i32) -> bool,
+) -> Vec<FragmentOverlap> {
+    // Build the (mate1Idx, mate2Idx) fragment index pairs (SeqSet.hpp:2314-2384).
+    // `-1` (C++'s sentinel for "no pairing on this side") is modeled as `None`.
+    let mut fragments: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+    match overlaps2 {
+        None => {
+            for i in 0..overlaps1.len() {
+                fragments.push((Some(i), None));
+            }
+        }
+        Some(overlaps2) if overlaps1.is_empty() || overlaps2.is_empty() => {
+            for i in 0..overlaps1.len() {
+                fragments.push((Some(i), None));
+            }
+            for i in 0..overlaps2.len() {
+                fragments.push((None, Some(i)));
+            }
+        }
+        Some(overlaps2) => {
+            let mut seq_idx_to_overlap2: HashMap<u32, Vec<usize>> = HashMap::new();
+            for (i, o2) in overlaps2.iter().enumerate() {
+                seq_idx_to_overlap2.entry(o2.seq_idx).or_default().push(i);
+            }
+            for (i, o1) in overlaps1.iter().enumerate() {
+                let Some(candidates) = seq_idx_to_overlap2.get(&o1.seq_idx) else { continue };
+                for &j in candidates {
+                    let o2 = &overlaps2[j];
+                    // Compatible mate pairs: opposite strands, same allele,
+                    // and o1 positioned "before" o2 on the strand.
+                    if o1.strand == o2.strand || o1.seq_idx != o2.seq_idx {
+                        continue;
+                    }
+                    if (o1.strand == 1 && o1.seq_start < o2.seq_start)
+                        || (o1.strand == -1 && o1.seq_start > o2.seq_start)
+                    {
+                        fragments.push((Some(i), Some(j)));
+                    }
+                }
+            }
+        }
+    }
+
+    // For each seq idx, keep the best fragment (SeqSet.hpp:2386-2455).
+    let mut assign: Vec<Assembled> = Vec::new();
+    let mut seq_idx_to_assign_idx: HashMap<u32, usize> = HashMap::new();
+    for &(a, b) in &fragments {
+        let assembled = match (a, b) {
+            (Some(a), b_opt) => {
+                let o = overlaps1[a];
+                let mut fo = FragmentOverlap {
+                    seq_idx: i32::try_from(o.seq_idx).unwrap(),
+                    seq_start: o.seq_start,
+                    seq_end: o.seq_end,
+                    match_cnt: o.match_cnt,
+                    relaxed_match_cnt: o.relaxed_match_cnt,
+                    similarity: o.similarity,
+                    has_mate_pair: false,
+                    o1_from_r2: false,
+                    qual: 0.0,
+                    has_n,
+                };
+                let mut overlap2 = None;
+                if let Some(b) = b_opt {
+                    let o2 = overlaps2.unwrap()[b];
+                    fo.match_cnt += o2.match_cnt;
+                    fo.relaxed_match_cnt += o2.relaxed_match_cnt;
+                    if o.strand == 1 {
+                        fo.seq_end = o2.seq_end;
+                    } else {
+                        fo.seq_start = o2.seq_start;
+                    }
+                    fo.similarity = f64::from(fo.match_cnt)
+                        / f64::from(
+                            (o.read_end - o.read_start + 1)
+                                + (o2.read_end - o2.read_start + 1)
+                                + (o.seq_end - o.seq_start + 1)
+                                + (o2.seq_end - o2.seq_start + 1)
+                                + 2 * o.left_clip
+                                + 2 * o.right_clip
+                                + 2 * o2.left_clip
+                                + 2 * o2.right_clip,
+                        );
+                    fo.has_mate_pair = true;
+                    overlap2 = Some(o2);
+                }
+                Assembled { fragment: fo, overlap1: o, overlap2 }
+            }
+            (None, Some(b)) => {
+                // Dangling case: only mate 2 aligned; `overlap1` (the
+                // "primary" overlap the C++ keeps for tie-breaking/filtering)
+                // is set from mate 2's overlap here, matching
+                // `fragmentOverlap.overlap1 = o` at `SeqSet.hpp:2439`.
+                let o = overlaps2.unwrap()[b];
+                let fo = FragmentOverlap {
+                    seq_idx: i32::try_from(o.seq_idx).unwrap(),
+                    seq_start: o.seq_start,
+                    seq_end: o.seq_end,
+                    match_cnt: o.match_cnt,
+                    relaxed_match_cnt: o.relaxed_match_cnt,
+                    similarity: o.similarity,
+                    has_mate_pair: false,
+                    o1_from_r2: true,
+                    qual: 0.0,
+                    has_n,
+                };
+                Assembled { fragment: fo, overlap1: o, overlap2: None }
+            }
+            (None, None) => continue,
+        };
+
+        let seq_idx_u32 = u32::try_from(assembled.fragment.seq_idx).unwrap();
+        if let Some(&existing_idx) = seq_idx_to_assign_idx.get(&seq_idx_u32) {
+            // Note `<` here is for ranking, so smaller has higher rank.
+            if fragment_overlap_less_than(&assembled, &assign[existing_idx]) {
+                assign[existing_idx] = assembled;
+            }
+        } else {
+            assign.push(assembled);
+            seq_idx_to_assign_idx.insert(seq_idx_u32, assign.len() - 1);
+        }
+    }
+
+    // Pick the best assignment and mark qual=1 ties (SeqSet.hpp:2474-2545).
+    let mut best_assign = FragmentOverlap {
+        seq_idx: 0,
+        seq_start: 0,
+        seq_end: 0,
+        match_cnt: -1,
+        relaxed_match_cnt: 0,
+        similarity: 0.0,
+        has_mate_pair: false,
+        o1_from_r2: false,
+        qual: 0.0,
+        has_n: false,
+    };
+    for a in &assign {
+        #[allow(clippy::float_cmp)]
+        let tie_similarity_better = a.fragment.match_cnt == best_assign.match_cnt
+            && a.fragment.similarity > best_assign.similarity;
+        if a.fragment.match_cnt > best_assign.match_cnt || tie_similarity_better {
+            best_assign = a.fragment;
+        }
+    }
+
+    // Only `exactTie` (SeqSet.hpp:2508) ever fires at `ignoreNonExonDiff ==
+    // false` -- see this function's doc comment for why the `relaxedTie`
+    // `else if` arm (SeqSet.hpp:2514) is not ported here at all.
+    let mut kept: Vec<Assembled> = Vec::new();
+    for a in &assign {
+        #[allow(clippy::float_cmp)]
+        let exact_tie = a.fragment.match_cnt == best_assign.match_cnt
+            && a.fragment.similarity == best_assign.similarity;
+        if exact_tie {
+            let mut a = *a;
+            a.fragment.qual = 1.0;
+            kept.push(a);
+        }
+    }
+    assign = kept;
+
+    // Dangling-mate-pair filter (SeqSet.hpp:2553-2578): only applies when
+    // paired-end AND the best assignment has NO mate pair.
+    if !assign.is_empty() && overlaps2.is_some() && !assign[0].fragment.has_mate_pair {
+        let mut i = 0usize;
+        while i < assign.len() {
+            let a = &assign[i];
+            let span = a.fragment.seq_end - a.fragment.seq_start
+                + 1
+                + (a.overlap1.read_end - a.overlap1.read_start + 1);
+            if a.fragment.similarity < 1.0
+                || separator_in_range(a.fragment.seq_start, a.fragment.seq_end, a.fragment.seq_idx)
+                || span < 3 * hit_len_required
+            {
+                break;
+            }
+            let span_range = 100;
+            let consensus_len = consensus_len_of(u32::try_from(a.fragment.seq_idx).unwrap());
+            if (a.overlap1.strand == 1 && a.fragment.seq_end + span_range < consensus_len)
+                || (a.overlap1.strand == -1 && a.fragment.seq_start - span_range >= 0)
+            {
+                break;
+            }
+            i += 1;
+        }
+        if i < assign.len() {
+            assign.clear();
+        }
+    }
+
+    // Truncated-mate-pair filter (SeqSet.hpp:2580-2653): only applies when
+    // paired-end AND the best assignment HAS a mate pair.
+    if !assign.is_empty() && overlaps2.is_some() && assign[0].fragment.has_mate_pair {
+        #[allow(clippy::float_cmp)] // exact C++ `== 1` on qual, not a fuzzy float comparison.
+        let representative_idx = assign.iter().position(|a| a.fragment.qual == 1.0).unwrap_or(0);
+        let representative = &assign[representative_idx];
+        let rep_overlap1 = representative.overlap1;
+        let rep_overlap2 = representative.overlap2.expect("has_mate_pair implies overlap2 is set");
+
+        let mut filter = false;
+
+        // "Better read 1": is there an unused mate-1 overlap that dominates
+        // the representative's overlap1 AND looks truncated?
+        for o in overlaps1 {
+            if filter {
+                break;
+            }
+            let dominates = o.match_cnt > rep_overlap1.match_cnt
+                || (o.match_cnt == rep_overlap1.match_cnt
+                    && o.similarity > rep_overlap1.similarity);
+            let unused = !seq_idx_to_assign_idx.contains_key(&o.seq_idx);
+            if dominates
+                && unused
+                && (truncated_mate_pair_overlap(
+                    o,
+                    &rep_overlap1,
+                    &rep_overlap2,
+                    consensus_len_of(o.seq_idx),
+                    &mut separator_in_range,
+                ) || o.similarity > rep_overlap2.similarity + 0.1)
+            {
+                filter = true;
+            }
+        }
+
+        // "Better read 2": same check against mate-2 overlaps.
+        if !filter {
+            if let Some(overlaps2) = overlaps2 {
+                for o in overlaps2 {
+                    if filter {
+                        break;
+                    }
+                    let dominates = o.match_cnt > rep_overlap2.match_cnt
+                        || (o.match_cnt == rep_overlap2.match_cnt
+                            && o.similarity > rep_overlap2.similarity);
+                    let unused = !seq_idx_to_assign_idx.contains_key(&o.seq_idx);
+                    if dominates
+                        && unused
+                        && (truncated_mate_pair_overlap(
+                            o,
+                            &rep_overlap2,
+                            &rep_overlap1,
+                            consensus_len_of(o.seq_idx),
+                            &mut separator_in_range,
+                        ) || o.similarity > rep_overlap1.similarity + 0.1)
+                    {
+                        filter = true;
+                    }
+                }
+            }
+        }
+
+        if filter {
+            assign.clear();
+        }
+    }
+
+    assign.into_iter().map(|a| a.fragment).collect()
+}
+
+/// Ported from `_fragmentOverlap::operator<` (`SeqSet.hpp:161-172`): the
+/// "smaller is better" ranking [`read_assignment_to_fragment_assignment`]
+/// uses to keep the best fragment overlap per allele. The final `overlap1 <
+/// b.overlap1` tie-break (`SeqSet.hpp:169`) uses [`extended_overlap_less_than`]
+/// on each [`Assembled`]'s `overlap1` (see that struct's doc comment for why
+/// this state is tracked alongside [`FragmentOverlap`] rather than inside
+/// it).
+#[must_use]
+fn fragment_overlap_less_than(a: &Assembled, b: &Assembled) -> bool {
+    if a.fragment.match_cnt != b.fragment.match_cnt {
+        return a.fragment.match_cnt > b.fragment.match_cnt;
+    }
+    #[allow(clippy::float_cmp)]
+    let similarity_differs = a.fragment.similarity != b.fragment.similarity;
+    if similarity_differs {
+        return a.fragment.similarity > b.fragment.similarity;
+    }
+    extended_overlap_less_than(&a.overlap1, &b.overlap1)
+}
+
 /// The Phase-5a slice of T1K's `Genotyper` (`vendor/t1k/Genotyper.hpp`): the
 /// allele/gene data model, its initialization, and read-assignment weight +
 /// storage. See the module docs for exactly what is (and is not) ported.
@@ -509,6 +1622,31 @@ pub struct Genotyper {
     /// `Genotyper::geneMaxMajorAlleleAbundance`. Populated by
     /// [`Genotyper::set_allele_abundance`].
     pub gene_max_major_allele_abundance: Vec<f64>,
+
+    // --- Phase-5c: allele-selection tuning knobs (Genotyper.hpp:477-484,499-500,504) ---
+    /// `Genotyper::filterCov`. Constructor default `1.0` (`Genotyper.hpp:499`);
+    /// the minimum rank-level abundance [`Genotyper::select_alleles_for_genes`]
+    /// requires before assigning a nonzero `genotypeQuality`.
+    pub filter_cov: f64,
+    /// `Genotyper::crossGeneRate`. Constructor default `0.04`
+    /// (`Genotyper.hpp:500`); scales cross-gene `geneSimilarity`-weighted
+    /// noise into each gene's null-hypothesis mean in
+    /// [`Genotyper::select_alleles_for_genes`].
+    pub cross_gene_rate: f64,
+    /// `Genotyper::readLength`. Constructor default `0` (`Genotyper.hpp:504`,
+    /// set via `SetReadLength`, `Genotyper.cpp:443`, from the max observed
+    /// read length across the input FASTQ(s)); used by
+    /// [`Genotyper::select_alleles_for_genes`]'s missing-coverage weight
+    /// term.
+    pub read_length: i32,
+
+    // --- Phase-5c: allele-selection output (Genotyper.hpp:447) ---
+    /// `Genotyper::selectedAlleles` -- per-gene list of `(alleleIdx,
+    /// alleleRank)` pairs (`_pair`'s `(a, b)`). Populated by
+    /// [`Genotyper::select_alleles_for_genes`]; consumed by
+    /// [`Genotyper::get_gene_allele_types`]/[`Genotyper::get_allele_description`]/
+    /// [`Genotyper::output_representative_alleles`].
+    pub selected_alleles: Vec<Vec<(i32, i32)>>,
 }
 
 impl Default for Genotyper {
@@ -554,12 +1692,31 @@ impl Genotyper {
             gene_abundance: Vec::new(),
             major_allele_abundance: Vec::new(),
             gene_max_major_allele_abundance: Vec::new(),
+            filter_cov: 1.0,
+            cross_gene_rate: 0.04,
+            read_length: 0,
+            selected_alleles: Vec::new(),
         }
     }
 
     /// Ported from `Genotyper::SetFilterFrac` (`Genotyper.hpp:528-531`).
     pub fn set_filter_frac(&mut self, f: f64) {
         self.filter_frac = f;
+    }
+
+    /// Ported from `Genotyper::SetFilterCov` (`Genotyper.hpp:533-536`).
+    pub fn set_filter_cov(&mut self, c: f64) {
+        self.filter_cov = c;
+    }
+
+    /// Ported from `Genotyper::SetCrossGeneRate` (`Genotyper.hpp:543-546`).
+    pub fn set_cross_gene_rate(&mut self, r: f64) {
+        self.cross_gene_rate = r;
+    }
+
+    /// Ported from `Genotyper::SetReadLength` (`Genotyper.hpp:538-541`).
+    pub fn set_read_length(&mut self, rl: i32) {
+        self.read_length = rl;
     }
 
     /// Ported from `Genotyper::SetMinSquaremAlpha` (`Genotyper.hpp:554-557`).
@@ -1730,6 +2887,1016 @@ impl Genotyper {
 
         ret
     }
+
+    /// Ported from `Genotyper::IsReadsInAlleleIdxOptimal` (`Genotyper.hpp:
+    /// 198-203`): `true` if the `k`-th `(readIdx, idxWithinReadAssignments)`
+    /// entry in `reads_in_allele` refers to a top-quality (`qual == 1.0`)
+    /// read assignment.
+    #[must_use]
+    #[allow(clippy::float_cmp)] // exact C++ `== 1` on qual, not a fuzzy float comparison.
+    fn is_reads_in_allele_idx_optimal(&self, reads_in_allele: &[(i32, i32)], k: usize) -> bool {
+        let (read_idx, within_idx) = reads_in_allele[k];
+        self.read_assignments[usize::try_from(read_idx).unwrap()]
+            [usize::try_from(within_idx).unwrap()]
+        .qual
+            == 1.0
+    }
+
+    /// Ported from `Genotyper::GetAverageReadAssignmentCnt`
+    /// (`Genotyper.hpp:941-955`): the mean number of allele assignments
+    /// per (coalesced) read group, among groups with at least one
+    /// assignment. Diagnostic-only (mirrors `Genotyper.cpp:635-636`'s log
+    /// line) -- not consumed by [`Genotyper::select_alleles_for_genes`].
+    #[must_use]
+    pub fn get_average_read_assignment_cnt(&self) -> f64 {
+        let mut sum = 0.0f64;
+        let mut cnt = 0.0f64;
+        for ra in &self.read_assignments {
+            if !ra.is_empty() {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    sum += ra.len() as f64;
+                }
+                cnt += 1.0;
+            }
+        }
+        sum / cnt
+    }
+
+    /// Ported from `Genotyper::GetGeneAlleleTypes` (`Genotyper.hpp:1053-1069`):
+    /// the number of distinct allele ranks (0, 1, 2, ...) selected for gene
+    /// `gene_idx` so far -- `max(rank) + 1`, or `0` if no allele has been
+    /// selected for this gene yet.
+    #[must_use]
+    pub fn get_gene_allele_types(&self, gene_idx: usize) -> i32 {
+        let selected = &self.selected_alleles[gene_idx];
+        if selected.is_empty() {
+            return 0;
+        }
+        let mut ret = 0;
+        for &(_, rank) in selected {
+            if rank > ret {
+                ret = rank;
+            }
+        }
+        ret + 1
+    }
+
+    /// Ported from `Genotyper::RemoveLowLikelihoodAlleleInEquivalentClass`
+    /// (`Genotyper.hpp:1371-1460`): within each equivalence class, keeps
+    /// only the member allele(s) whose coverage-range-implied likelihood
+    /// (`(effectiveLen / consensusLen) ^ ecAbundance`) is within a `0.05`
+    /// relative cutoff of the class's maximum likelihood. `consensus_len_of`
+    /// mirrors `refSet.GetSeqConsensusLen` (same "caller supplies
+    /// reference-derived input" pattern as [`Genotyper::init_allele_info`]).
+    /// Called once (`Genotyper.cpp:647`) between quantification and
+    /// [`Genotyper::select_alleles_for_genes`].
+    ///
+    /// # FLOATS
+    ///
+    /// Uses `pow` (`f64::powf`) on already-computed `ecAbundance` -- a
+    /// transcendental call, so (like [`alnorm`]) this targets close, not
+    /// bit-identical, agreement with the C++ oracle; see [`alnorm`]'s FLOATS
+    /// note for the same rationale.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any equivalence class contains an out-of-range allele
+    /// index, or if `self.reads_in_allele`/`self.read_assignments` have not
+    /// been populated (i.e. [`Genotyper::finalize_read_assignments`] was not
+    /// called first).
+    pub fn remove_low_likelihood_allele_in_equivalent_class(
+        &mut self,
+        consensus_len_of: impl Fn(usize) -> i32,
+    ) {
+        // Relative-likelihood cutoff (Genotyper.hpp:1441); hoisted to the
+        // top of the function only to satisfy clippy::items_after_statements
+        // (see read_assignment_to_fragment_assignment's MATCH_CNT_RELAX for
+        // the same convention).
+        const CUTOFF: f64 = 0.05;
+
+        for ec in &mut self.equivalent_class_to_alleles {
+            let size = ec.len();
+            let mut min_starts: Vec<i32> =
+                ec.iter().map(|&idx| consensus_len_of(usize::try_from(idx).unwrap())).collect();
+            let mut max_ends: Vec<i32> = vec![-1; size];
+            let mut allele_idx_to_idx: HashMap<i32, usize> = HashMap::new();
+            for (j, &allele_idx) in ec.iter().enumerate() {
+                allele_idx_to_idx.insert(allele_idx, j);
+            }
+
+            // Setting up the range of coverage for each allele.
+            let represent_allele_idx = usize::try_from(ec[0]).unwrap();
+            let assigned_reads = self.reads_in_allele[represent_allele_idx].clone();
+            for &(read_idx, _) in &assigned_reads {
+                let read_idx_usize = usize::try_from(read_idx).unwrap();
+                for assign in &self.read_assignments[read_idx_usize] {
+                    let Some(&idx) = allele_idx_to_idx.get(&assign.allele_idx) else { continue };
+                    if assign.start < min_starts[idx] {
+                        min_starts[idx] = assign.start;
+                    }
+                    if assign.end > max_ends[idx] {
+                        max_ends[idx] = assign.end;
+                    }
+                }
+            }
+
+            // Compute the likelihood.
+            let mut max_likelihood = -1.0f64;
+            let mut likelihoods = vec![0.0f64; size];
+            for j in 0..size {
+                let allele_idx = usize::try_from(ec[j]).unwrap();
+                let len = consensus_len_of(allele_idx);
+                let mut effective_len = max_ends[j] - min_starts[j] + 1;
+                if effective_len > len {
+                    effective_len = len;
+                }
+                let ll = (f64::from(effective_len) / f64::from(len))
+                    .powf(self.allele_info[allele_idx].ec_abundance);
+                if ll > max_likelihood {
+                    max_likelihood = ll;
+                }
+                likelihoods[j] = ll;
+            }
+
+            // Store the kept alleles.
+            let mut kept = Vec::new();
+            for j in 0..size {
+                #[allow(clippy::float_cmp)]
+                let is_max = likelihoods[j] == max_likelihood;
+                if likelihoods[j] / max_likelihood >= CUTOFF || is_max {
+                    kept.push(ec[j]);
+                }
+            }
+            *ec = kept;
+        }
+    }
+
+    /// Ported from `Genotyper::SelectAllelesForGenes` (`Genotyper.hpp:1462-
+    /// 2090`) -- the genotyping decision: ranks equivalence classes by
+    /// abundance (descending), assigns each EC's member alleles to their
+    /// gene's next available rank (0 = first allele, 1 = second, 2+ =
+    /// "secondary" candidates) subject to an abundance-fraction filter (with
+    /// a rescue pass for filtered alleles that share a selected allele's
+    /// major-allele series), then iteratively searches for the best
+    /// rank-0/rank-1 haplotype PAIR per gene (maximizing read coverage, up
+    /// to `iterMax = 1000` passes), and finally scores each rank's
+    /// `genotypeQuality` via [`alnorm`].
+    ///
+    /// `seq_weight_of` mirrors `refSet.GetSeqWeight` (`Genotyper.hpp:1926`,
+    /// same "caller supplies reference-derived input" pattern used
+    /// throughout this module).
+    ///
+    /// # FLOATS
+    ///
+    /// Uses [`alnorm`] (a polynomial CDF approximation, itself using `exp`)
+    /// and `log`/`sqrt` on already-computed abundances -- transcendental
+    /// calls, so (like [`alnorm`] and
+    /// [`Genotyper::remove_low_likelihood_allele_in_equivalent_class`]'s
+    /// `pow`) this targets close, not bit-identical, `genotypeQuality`
+    /// agreement with the C++ oracle. The CALLED alleles themselves
+    /// (`selected_alleles`' membership and rank assignment) are decided by
+    /// integer/exact-`f64`-comparison logic with no transcendental
+    /// functions, so they are expected to match the oracle exactly -- see
+    /// `crates/fg-t1k-sys/tests/diff_genotype_e2e.rs`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any `equivalent_class_to_alleles` entry is empty (would
+    /// indicate [`Genotyper::build_allele_equivalent_class`] produced a
+    /// malformed EC -- not expected).
+    #[allow(clippy::too_many_lines, clippy::needless_range_loop)]
+    pub fn select_alleles_for_genes(&mut self, seq_weight_of: impl Fn(usize) -> i32) {
+        let gene_cnt_usize = usize::try_from(self.gene_cnt).expect("gene_cnt is non-negative");
+        let read_cnt_usize = usize::try_from(self.read_cnt).expect("read_cnt is non-negative");
+
+        let mut read_covered = vec![false; read_cnt_usize];
+        self.selected_alleles = vec![Vec::new(); gene_cnt_usize];
+
+        // Compute the abundance for equivalent classes, sorted descending
+        // (CompSortPairIntDoubleBDec, Genotyper.hpp:152-156: descending `.b`
+        // -- ecAbundance -- ties broken ascending `.a` -- ec index; a total
+        // order, so `sort_by`'s stability never matters).
+        let ec_cnt = self.equivalent_class_to_alleles.len();
+        let mut ec_abundance_list: Vec<(usize, f64)> = (0..ec_cnt)
+            .map(|i| {
+                (
+                    i,
+                    self.allele_info
+                        [usize::try_from(self.equivalent_class_to_alleles[i][0]).unwrap()]
+                    .ec_abundance,
+                )
+            })
+            .collect();
+        ec_abundance_list.sort_by(|a, b| {
+            // Descending by abundance (`.1`), ties broken ascending by EC
+            // index (`.0`) -- CompSortPairIntDoubleBDec (Genotyper.hpp:152-
+            // 156). Exact `!=` matches the C++'s own exact `!=` on already-
+            // computed abundances, not a fuzzy comparison.
+            #[allow(clippy::float_cmp)]
+            let abundance_differs = a.1 != b.1;
+            if abundance_differs { b.1.partial_cmp(&a.1).unwrap() } else { a.0.cmp(&b.0) }
+        });
+
+        let mut filtered_alleles: Vec<i32> = Vec::new();
+
+        for &(ec, _) in &ec_abundance_list {
+            let members = self.equivalent_class_to_alleles[ec].clone();
+            let allele_idx0 = usize::try_from(members[0]).unwrap();
+
+            if self.allele_info[allele_idx0].ec_abundance <= 1e-6 {
+                break;
+            }
+
+            // Check whether there are uncovered reads.
+            let read_list = self.reads_in_allele[allele_idx0].clone();
+            let mut covered = 0.0f64;
+            let mut total_assigned_weight = 0.0f64;
+            for (j, &(read_idx, _)) in read_list.iter().enumerate() {
+                if !self.is_reads_in_allele_idx_optimal(&read_list, j) {
+                    continue;
+                }
+                let weight =
+                    f64::from(self.read_assignments[usize::try_from(read_idx).unwrap()][0].weight);
+                if read_covered[usize::try_from(read_idx).unwrap()] {
+                    covered += weight;
+                }
+                total_assigned_weight += weight;
+            }
+            let _ = covered; // matches stock: computed, the "no uncovered reads" early-continue is commented out.
+
+            // Add these alleles to the gene allele.
+            let mut genes_to_add: Vec<i32> = Vec::new();
+            let mut alleles_to_add: Vec<i32> = Vec::new();
+            for &allele_idx in &members {
+                let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                let gene_idx =
+                    usize::try_from(self.allele_info[allele_idx_usize].gene_idx).unwrap();
+                let major_idx =
+                    usize::try_from(self.allele_info[allele_idx_usize].major_allele_idx).unwrap();
+
+                let ec_abund = self.allele_info[allele_idx_usize].ec_abundance;
+                let gene_max = self.gene_max_major_allele_abundance[gene_idx];
+                let major_abund = self.major_allele_abundance[major_idx];
+
+                let mut filter = ec_abund < self.filter_frac * gene_max
+                    && (ec_abund * 3.0 >= major_abund
+                        || major_abund < 3.0 * self.filter_frac * gene_max);
+
+                if !filter {
+                    let selected = &self.selected_alleles[gene_idx];
+                    #[allow(clippy::float_cmp)]
+                    let covered_equals_total = covered == total_assigned_weight;
+                    if covered_equals_total
+                        && (ec_abund < 0.25 * gene_max
+                            || selected.is_empty()
+                            || ec_abund
+                                < 0.5
+                                    * self.allele_info
+                                        [usize::try_from(selected.last().unwrap().0).unwrap()]
+                                    .ec_abundance)
+                    {
+                        filter = true;
+                    }
+                }
+
+                if filter {
+                    filtered_alleles.push(allele_idx);
+                    continue;
+                }
+
+                let gene_idx_i32 = i32::try_from(gene_idx).unwrap();
+                if !genes_to_add.contains(&gene_idx_i32) {
+                    genes_to_add.push(gene_idx_i32);
+                }
+                alleles_to_add.push(allele_idx);
+            }
+
+            let quality = if genes_to_add.len() > 1 { 0 } else { 60 };
+
+            if !genes_to_add.is_empty() {
+                for &(read_idx, within_idx) in &read_list {
+                    let read_idx_usize = usize::try_from(read_idx).unwrap();
+                    let within_idx_usize = usize::try_from(within_idx).unwrap();
+                    #[allow(clippy::float_cmp)]
+                    let qual_is_one =
+                        self.read_assignments[read_idx_usize][within_idx_usize].qual == 1.0;
+                    if qual_is_one {
+                        read_covered[read_idx_usize] = true;
+                    }
+                }
+            }
+
+            let mut gene_allele_types: HashMap<usize, i32> = HashMap::new();
+            for &allele_idx in &alleles_to_add {
+                let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                let gene_idx =
+                    usize::try_from(self.allele_info[allele_idx_usize].gene_idx).unwrap();
+                let major_idx = self.allele_info[allele_idx_usize].major_allele_idx;
+
+                let mut allele_rank: i32 = -1;
+                for &(a, b) in &self.selected_alleles[gene_idx] {
+                    if self.allele_info[usize::try_from(a).unwrap()].major_allele_idx == major_idx {
+                        allele_rank = b;
+                        break;
+                    }
+                }
+                if allele_rank == -1 {
+                    allele_rank = *gene_allele_types
+                        .entry(gene_idx)
+                        .or_insert_with(|| self.get_gene_allele_types(gene_idx));
+                }
+
+                self.allele_info[allele_idx_usize].genotype_quality = quality;
+                self.allele_info[allele_idx_usize].allele_rank = allele_rank;
+
+                let ec_abund = self.allele_info[allele_idx_usize].ec_abundance;
+                let gene_max = self.gene_max_major_allele_abundance[gene_idx];
+                let major_idx_usize = usize::try_from(major_idx).unwrap();
+                let major_abund = self.major_allele_abundance[major_idx_usize];
+                if ec_abund < self.filter_frac * gene_max
+                    && (ec_abund * 3.0 >= major_abund
+                        || major_abund < 3.0 * self.filter_frac * gene_max)
+                {
+                    self.allele_info[allele_idx_usize].genotype_quality = 0;
+                }
+
+                self.selected_alleles[gene_idx].push((allele_idx, allele_rank));
+            }
+        }
+
+        // Rescue some filtered alleles if they are in some valid major
+        // allele series (Genotyper.hpp:1669-1695).
+        for &allele_idx in &filtered_alleles {
+            let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+            let gene_idx = usize::try_from(self.allele_info[allele_idx_usize].gene_idx).unwrap();
+            if self.selected_alleles[gene_idx].is_empty() {
+                continue;
+            }
+            let major_idx = self.allele_info[allele_idx_usize].major_allele_idx;
+            let mut rank: i32 = -1;
+            for &(a, b) in &self.selected_alleles[gene_idx] {
+                if self.allele_info[usize::try_from(a).unwrap()].major_allele_idx == major_idx {
+                    rank = b;
+                    break;
+                }
+            }
+            if rank != -1 {
+                self.selected_alleles[gene_idx].push((allele_idx, rank));
+            }
+        }
+
+        self.select_alleles_for_genes_haplotype_search(&mut read_covered, &seq_weight_of);
+        self.select_alleles_for_genes_quality_scores();
+    }
+
+    /// The `iterMax = 1000` best-haplotype-pair search
+    /// (`Genotyper.hpp:1697-1996`), factored out of
+    /// [`Genotyper::select_alleles_for_genes`] purely for readability (this
+    /// port has no single-huge-function constraint the C++ does). For each
+    /// gene with more than 2 selected allele types, searches every rank
+    /// pair `(j, k)` (`j <= 1`, `k > j`) for the pair that covers the most
+    /// (adjust-weighted) previously-uncovered reads, rearranges the winning
+    /// pair to ranks 0/1, and repeats until no gene changes (or `iterMax`
+    /// iterations elapse).
+    ///
+    /// `coveredReads[key] |= 1`/`|= 2` bit tracking in the C++
+    /// (`Genotyper.hpp:1830,1851`) is dead weight here: the ONLY use of
+    /// those bits is the fully commented-out `it->second & ...` branches
+    /// (`Genotyper.hpp:1889-1907`) -- the live code
+    /// (`coveredReadCnt += readAssignments[it->first][0].adjustWeight`,
+    /// `Genotyper.hpp:1893`) sums over every KEY in the map unconditionally,
+    /// never reading `it->second`. This port therefore tracks the covered
+    /// read-index SET directly (a plain integer set, via a small sorted
+    /// `Vec` -- read counts per gene are small enough that this beats a
+    /// `HashSet`'s overhead) rather than reproducing the unread bitmask.
+    #[allow(clippy::needless_range_loop, clippy::too_many_lines)]
+    fn select_alleles_for_genes_haplotype_search(
+        &mut self,
+        read_covered: &mut [bool],
+        seq_weight_of: &impl Fn(usize) -> i32,
+    ) {
+        const ITER_MAX: i32 = 1000;
+        let gene_cnt_usize = usize::try_from(self.gene_cnt).expect("gene_cnt is non-negative");
+
+        let mut read_coverage = vec![0i32; read_covered.len()];
+        let mut used_ec: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for i in 0..gene_cnt_usize {
+            used_ec.clear();
+            for &(allele_idx, rank) in &self.selected_alleles[i].clone() {
+                if rank > 1 {
+                    continue;
+                }
+                let ec = self.allele_info[usize::try_from(allele_idx).unwrap()].equivalent_class;
+                if used_ec.contains(&ec) {
+                    continue;
+                }
+                used_ec.insert(ec);
+                let reads = self.reads_in_allele[usize::try_from(allele_idx).unwrap()].clone();
+                for r in 0..reads.len() {
+                    if !self.is_reads_in_allele_idx_optimal(&reads, r) {
+                        continue;
+                    }
+                    let read_idx = usize::try_from(reads[r].0).unwrap();
+                    read_coverage[read_idx] += 1;
+                }
+            }
+        }
+
+        // The weight for each missing-coverage value, per gene
+        // (Genotyper.hpp:1731-1770).
+        let mut missing_coverage_allele_type_weight: Vec<HashMap<i32, f64>> =
+            Vec::with_capacity(gene_cnt_usize);
+        for i in 0..gene_cnt_usize {
+            let allele_type_cnt = self.get_gene_allele_types(i);
+            let allele_type_cnt_usize = usize::try_from(allele_type_cnt).unwrap_or(0);
+            let mut allele_type_info: Vec<(i32, f64)> = vec![(-1, 0.0); allele_type_cnt_usize];
+            for &(allele_idx, allele_type) in &self.selected_alleles[i] {
+                let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                let allele_type_usize = usize::try_from(allele_type).unwrap();
+                allele_type_info[allele_type_usize].1 +=
+                    self.allele_info[allele_idx_usize].abundance;
+                let mc = self.allele_info[allele_idx_usize].missing_coverage;
+                if allele_type_info[allele_type_usize].0 == -1
+                    || mc < allele_type_info[allele_type_usize].0
+                {
+                    allele_type_info[allele_type_usize].0 = mc;
+                }
+            }
+            let mut weight: HashMap<i32, f64> = HashMap::new();
+            for &(mc, abund) in &allele_type_info {
+                let entry = weight.entry(mc).or_insert(0.0);
+                if abund > *entry {
+                    *entry = abund;
+                }
+            }
+            missing_coverage_allele_type_weight.push(weight);
+        }
+
+        for _iter in 0..ITER_MAX {
+            let mut updated_gene_cnt = 0;
+            for i in 0..gene_cnt_usize {
+                let allele_type_cnt = self.get_gene_allele_types(i);
+                if allele_type_cnt <= 2 {
+                    continue;
+                }
+                let selected = self.selected_alleles[i].clone();
+                let mut max_cover = 0.0f64;
+                let mut max_cover_abundance = 0.0f64;
+
+                // Remove the effects of the current gene.
+                used_ec.clear();
+                for &(allele_idx, rank) in &selected {
+                    if rank > 1 {
+                        continue;
+                    }
+                    let ec =
+                        self.allele_info[usize::try_from(allele_idx).unwrap()].equivalent_class;
+                    if used_ec.contains(&ec) {
+                        continue;
+                    }
+                    used_ec.insert(ec);
+                    let reads = self.reads_in_allele[usize::try_from(allele_idx).unwrap()].clone();
+                    for r in 0..reads.len() {
+                        if !self.is_reads_in_allele_idx_optimal(&reads, r) {
+                            continue;
+                        }
+                        let read_idx = usize::try_from(reads[r].0).unwrap();
+                        read_coverage[read_idx] -= 1;
+                    }
+                }
+
+                let mut best_types: Vec<(i32, i32)> = Vec::new();
+                let j_upper = (allele_type_cnt - 1).min(2); // `j < alleleTypeCnt - 1 && j <= 1`.
+                for j in 0..j_upper {
+                    used_ec.clear();
+                    let mut covered_from_a: Vec<i32> = Vec::new();
+                    let mut allele_j = 0usize;
+                    for (l, &(allele_idx, rank)) in selected.iter().enumerate() {
+                        if rank != j {
+                            continue;
+                        }
+                        let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                        let ec = self.allele_info[allele_idx_usize].equivalent_class;
+                        if used_ec.contains(&ec) {
+                            continue;
+                        }
+                        used_ec.insert(ec);
+                        let reads = self.reads_in_allele[allele_idx_usize].clone();
+                        for r in 0..reads.len() {
+                            let read_idx = usize::try_from(reads[r].0).unwrap();
+                            if read_coverage[read_idx] == 0
+                                && self.is_reads_in_allele_idx_optimal(&reads, r)
+                                && !covered_from_a.contains(&reads[r].0)
+                            {
+                                covered_from_a.push(reads[r].0);
+                            }
+                        }
+                        allele_j = l;
+                    }
+
+                    for k in (j + 1)..allele_type_cnt {
+                        let mut covered_reads = covered_from_a.clone();
+                        used_ec.clear();
+                        let mut allele_k = 0usize;
+                        for (l, &(allele_idx, rank)) in selected.iter().enumerate() {
+                            if rank != k {
+                                continue;
+                            }
+                            let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                            let ec = self.allele_info[allele_idx_usize].equivalent_class;
+                            if used_ec.contains(&ec) {
+                                continue;
+                            }
+                            used_ec.insert(ec);
+                            let reads = self.reads_in_allele[allele_idx_usize].clone();
+                            for r in 0..reads.len() {
+                                let read_idx = usize::try_from(reads[r].0).unwrap();
+                                if read_coverage[read_idx] == 0
+                                    && self.is_reads_in_allele_idx_optimal(&reads, r)
+                                    && !covered_reads.contains(&reads[r].0)
+                                {
+                                    covered_reads.push(reads[r].0);
+                                }
+                            }
+                            allele_k = l;
+                        }
+
+                        let mut abundance_j = 0.0f64;
+                        let mut abundance_k = 0.0f64;
+                        let mut j_missing_coverage: i32 = -1;
+                        let mut k_missing_coverage: i32 = -1;
+                        for &(allele_idx, rank) in &selected {
+                            let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                            if rank == j {
+                                abundance_j += self.allele_info[allele_idx_usize].abundance;
+                                let mc = self.allele_info[allele_idx_usize].missing_coverage;
+                                if j_missing_coverage == -1 || mc < j_missing_coverage {
+                                    j_missing_coverage = mc;
+                                }
+                            } else if rank == k {
+                                abundance_k += self.allele_info[allele_idx_usize].abundance;
+                                let mc = self.allele_info[allele_idx_usize].missing_coverage;
+                                if k_missing_coverage == -1 || mc < k_missing_coverage {
+                                    k_missing_coverage = mc;
+                                }
+                            }
+                        }
+                        let abundance_sum = abundance_j * abundance_k;
+
+                        // Summation-order note (Genotyper.hpp:1887-1893): C++
+                        // accumulates `coveredReadCnt` by iterating a
+                        // `std::map<int, int> coveredReads`, whose iteration
+                        // order is always ascending by (integer) key --
+                        // i.e. ascending read index -- regardless of insertion
+                        // order. `covered_reads` here is a `Vec<i32>` built by
+                        // concatenating each qualifying allele's
+                        // `reads_in_allele` list (each individually ascending,
+                        // since it is built by a single ascending pass over
+                        // `read_assignments`) in `selected`-iteration order;
+                        // when more than one allele contributes to the same
+                        // rank (multiple equivalence classes at rank `j`/`k`),
+                        // their read-index ranges are not guaranteed to be
+                        // globally interleaved in ascending order, so this
+                        // Vec's summation order can differ from C++'s map
+                        // order. Because `f64` `+` is not associative, this
+                        // CAN produce a sub-ULP difference in `covered_read_cnt`
+                        // versus the oracle. This is not reordered to match
+                        // C++ exactly (would require a `BTreeMap`/sort here,
+                        // a larger change than this fidelity note warrants);
+                        // the resulting drift is far below the coverage
+                        // margins that drive the `> max_cover`/`== max_cover`
+                        // choice below on every fixture observed so far.
+                        let mut covered_read_cnt = 0.0f64;
+                        for &read_idx in &covered_reads {
+                            covered_read_cnt += f64::from(
+                                self.read_assignments[usize::try_from(read_idx).unwrap()][0]
+                                    .adjust_weight,
+                            );
+                        }
+
+                        if allele_type_cnt > 3
+                            || j_missing_coverage >= 10
+                            || k_missing_coverage >= 10
+                        {
+                            let mut weight_j = missing_coverage_allele_type_weight[i]
+                                .get(&j_missing_coverage)
+                                .copied()
+                                .unwrap_or(0.0);
+                            let mut weight_k = missing_coverage_allele_type_weight[i]
+                                .get(&k_missing_coverage)
+                                .copied()
+                                .unwrap_or(0.0);
+                            if allele_type_cnt <= 3 {
+                                if weight_j >= 1.0 {
+                                    weight_j = weight_j.log10();
+                                }
+                                if weight_k >= 1.0 {
+                                    weight_k = weight_k.log10();
+                                }
+                            }
+                            let allele_j_idx = usize::try_from(selected[allele_j].0).unwrap();
+                            covered_read_cnt = covered_read_cnt
+                                - f64::from(j_missing_coverage)
+                                    * weight_j
+                                    * f64::from(self.read_length)
+                                    / 150.0
+                                - f64::from(k_missing_coverage)
+                                    * weight_k
+                                    * f64::from(self.read_length)
+                                    / 150.0
+                                + f64::from(seq_weight_of(allele_j_idx));
+                        }
+                        let _ = allele_k;
+
+                        #[allow(clippy::float_cmp)]
+                        let tie = covered_read_cnt == max_cover;
+                        if best_types.is_empty()
+                            || covered_read_cnt > max_cover
+                            || (tie && abundance_sum > max_cover_abundance)
+                        {
+                            max_cover = covered_read_cnt;
+                            max_cover_abundance = abundance_sum;
+                            best_types.clear();
+                            best_types.push((j, k));
+                        } else if tie {
+                            best_types.push((j, k));
+                        }
+                    }
+                }
+
+                let best_type = best_types[0];
+                if best_type != (0, 1) {
+                    updated_gene_cnt += 1;
+                    for &(allele_idx, rank) in &selected {
+                        let new_rank = if rank == best_type.0 {
+                            0
+                        } else if rank == best_type.1 {
+                            1
+                        } else if rank < best_type.0 {
+                            rank + 2
+                        } else if rank < best_type.1 {
+                            rank + 1
+                        } else {
+                            continue;
+                        };
+                        let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                        for entry in &mut self.selected_alleles[i] {
+                            if entry.0 == allele_idx {
+                                entry.1 = new_rank;
+                            }
+                        }
+                        self.allele_info[allele_idx_usize].allele_rank = new_rank;
+                    }
+                }
+
+                // Update read coverage.
+                used_ec.clear();
+                for &(allele_idx, rank) in &self.selected_alleles[i].clone() {
+                    if rank > 1 {
+                        continue;
+                    }
+                    let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                    let ec = self.allele_info[allele_idx_usize].equivalent_class;
+                    if used_ec.contains(&ec) {
+                        continue;
+                    }
+                    used_ec.insert(ec);
+                    let reads = self.reads_in_allele[allele_idx_usize].clone();
+                    for r in 0..reads.len() {
+                        if self.is_reads_in_allele_idx_optimal(&reads, r) {
+                            let read_idx = usize::try_from(reads[r].0).unwrap();
+                            read_coverage[read_idx] += 1;
+                        }
+                    }
+                }
+            }
+
+            if updated_gene_cnt == 0 {
+                break;
+            }
+        }
+    }
+
+    /// The `alnorm`-based `genotypeQuality` scoring pass
+    /// (`Genotyper.hpp:2010-2088`), factored out of
+    /// [`Genotyper::select_alleles_for_genes`] for readability (see
+    /// [`Genotyper::select_alleles_for_genes_haplotype_search`]'s doc
+    /// comment for the same rationale). For each gene, computes a
+    /// null-hypothesis mean abundance per rank (self allele-balance noise
+    /// plus `crossGeneRate`-weighted noise from every OTHER gene, scaled by
+    /// `geneSimilarity`), then scores each rank via
+    /// `-log10(alnorm(2*(sqrt(rankAbund) - sqrt(nullMean)), upper=true))`,
+    /// clamped to `[0, 60]` and zeroed if the rank's abundance is below
+    /// `filter_cov` -- overwriting each MEMBER allele's `genotype_quality`
+    /// (but only when it was `> 0`, i.e. not already zeroed by the
+    /// abundance-fraction filter in [`Genotyper::select_alleles_for_genes`]).
+    #[allow(clippy::needless_range_loop)]
+    fn select_alleles_for_genes_quality_scores(&mut self) {
+        const CROSS_ALLELE_RATE: f64 = 0.01;
+        let gene_cnt_usize = usize::try_from(self.gene_cnt).expect("gene_cnt is non-negative");
+
+        let mut gene_abundances = vec![0.0f64; gene_cnt_usize];
+        for i in 0..gene_cnt_usize {
+            for &(allele_idx, _) in &self.selected_alleles[i] {
+                gene_abundances[i] +=
+                    self.allele_info[usize::try_from(allele_idx).unwrap()].abundance;
+            }
+        }
+
+        for i in 0..gene_cnt_usize {
+            let rank_cnt = usize::try_from(self.get_gene_allele_types(i)).unwrap_or(0);
+            let mut allele_rank_abund = vec![0.0f64; rank_cnt];
+            for &(allele_idx, rank) in &self.selected_alleles[i] {
+                allele_rank_abund[usize::try_from(rank).unwrap()] +=
+                    self.allele_info[usize::try_from(allele_idx).unwrap()].abundance;
+            }
+
+            let mut cross_gene_noise = 0.0f64;
+            for j in 0..gene_cnt_usize {
+                if i == j {
+                    continue;
+                }
+                cross_gene_noise +=
+                    self.cross_gene_rate * self.gene_similarity[j][i] * gene_abundances[j];
+            }
+
+            for j in 0..rank_cnt {
+                let null_mean = (gene_abundances[i] - allele_rank_abund[j]) * CROSS_ALLELE_RATE
+                    + cross_gene_noise;
+                let mut score = 0.0f64;
+                if allele_rank_abund[j] != 0.0 {
+                    score = -(alnorm(2.0 * (allele_rank_abund[j].sqrt() - null_mean.sqrt()), true))
+                        .ln()
+                        / 10.0f64.ln();
+                }
+                // Not `.clamp(0.0, 60.0)`: matches the C++'s two independent
+                // `if` checks exactly (`Genotyper.hpp:2071-2074`), which --
+                // unlike `f64::clamp` -- do not panic/misbehave if `score`
+                // is ever `NaN` (e.g. a degenerate `alnorm`/`ln` input).
+                #[allow(clippy::manual_clamp)]
+                {
+                    if score > 60.0 {
+                        score = 60.0;
+                    }
+                    if score < 0.0 {
+                        score = 0.0;
+                    }
+                }
+                if allele_rank_abund[j] < self.filter_cov {
+                    score = 0.0;
+                }
+
+                let j_i32 = i32::try_from(j).unwrap();
+                for &(allele_idx, rank) in &self.selected_alleles[i].clone() {
+                    let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                    if rank == j_i32 && self.allele_info[allele_idx_usize].genotype_quality > 0 {
+                        #[allow(clippy::cast_possible_truncation)]
+                        {
+                            self.allele_info[allele_idx_usize].genotype_quality = score as i32;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ported from `Genotyper::IsAlleleSameInExon` (`Genotyper.hpp:133-142`):
+    /// `true` if `name_a`/`name_b` share the same `fieldsType = 1`
+    /// major-allele string (mirrors [`Genotyper::parse_allele_name`] with
+    /// `fields_type = 1`; despite the name, this does NOT compare actual
+    /// exon sequence -- it is purely a name-parsing comparison, matching the
+    /// C++ exactly).
+    #[must_use]
+    fn is_allele_same_in_exon(&self, name_a: &str, name_b: &str) -> bool {
+        self.parse_allele_name(name_a, 1).1 == self.parse_allele_name(name_b, 1).1
+    }
+
+    /// Ported from `Genotyper::GetAlleleDescription` (`Genotyper.hpp:2103-
+    /// 2178`): formats gene `gene_idx`'s called alleles into the three
+    /// `_genotype.tsv` fields (allele-1, allele-2, secondary-candidates),
+    /// one call per gene from the CLI driver's output-writing loop
+    /// (`Genotyper.cpp:660-670`). Returns `ret` (the C++'s `calledAlleleCnt`
+    /// return value: `0`, `1`, or `2`, counting how many of rank 0/1 got a
+    /// non-empty major-allele name).
+    ///
+    /// # The secondary-candidates field only ever shows the LAST `type >= 2`
+    /// group
+    ///
+    /// The C++ resets `secondaryAlleles[0] = '\0'` unconditionally at the
+    /// top of EVERY loop iteration whose `buffer` is `secondaryAlleles`
+    /// (i.e. every `type >= 2` -- `Genotyper.hpp:2133`, `buffer[0] = '\0'`,
+    /// reached regardless of `type`), so each `type >= 2` iteration
+    /// OVERWRITES whatever the previous `type >= 2` iteration wrote. When
+    /// `GetGeneAlleleTypes(gene_idx) > 3` (more than one secondary
+    /// candidate group), only the group from the HIGHEST `type` value
+    /// survives in the final string -- a genuine T1K quirk, not a typo in
+    /// this port; preserved exactly.
+    ///
+    /// # Field formatting
+    ///
+    /// Each populated field is `{majorAlleleNames}<sep>{abundance:.6}<sep>{qual}`
+    /// where `<sep>` is `\t` for the primary two fields (allele1/allele2)
+    /// and `;` for the secondary field; multiple major alleles at the same
+    /// rank are joined with `,` (same rank via a shared equivalence class)
+    /// or `|` (first-vs-later DISTINCT major alleles at the secondary rank
+    /// only -- see the C++'s `else // only happens for secondary alleles`
+    /// comment, `Genotyper.hpp:2164`). An unpopulated rank-0/1 field
+    /// (`localQual < 0`) is instead the literal `.\t0\t-1` (matching
+    /// `sprintf(buffer + strlen(buffer), ".\t0\t-1")`, `Genotyper.hpp:2172`
+    /// -- note this ignores `sep`, always emitting `\t` even though `sep`
+    /// may already be `;` by that point).
+    ///
+    /// `%lf`'s default C `printf` precision is 6 fractional digits; `{:.6}`
+    /// matches that exactly for the finite, non-huge magnitudes real
+    /// abundances take (this port does not reproduce `%lf`'s
+    /// arbitrary-magnitude/`inf`/`nan` formatting quirks, not reachable for
+    /// a real abundance).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.major_allele_cnt` is negative, or if `gene_idx` is
+    /// out of range for `self.selected_alleles`.
+    #[must_use]
+    pub fn get_allele_description(&self, gene_idx: usize) -> (String, String, String, i32) {
+        let major_allele_cnt_usize =
+            usize::try_from(self.major_allele_cnt).expect("major_allele_cnt is non-negative");
+        let mut used = vec![false; major_allele_cnt_usize];
+        let mut ret = 0i32;
+
+        let mut type_cnt = self.get_gene_allele_types(gene_idx);
+        if type_cnt < 2 {
+            type_cnt = 2;
+        }
+
+        let mut allele1 = String::new();
+        let mut allele2 = String::new();
+        let mut secondary_alleles = String::new();
+        let mut qualities: [i32; 2] = [-1, -1];
+
+        for type_ in 0..type_cnt {
+            let mut abundance = 0.0f64;
+            // `sep` for THIS iteration: '\t' for type <= 1, ';' for type > 1
+            // (Genotyper.hpp:2119,2130-2134: `sep` is only ever reassigned
+            // to ';' once `type > 1` and never reset back).
+            let sep = if type_ > 1 { ';' } else { '\t' };
+            let mut added = false;
+            let mut buffer = String::new(); // Reset every iteration -- see doc comment for the type>=2 quirk.
+
+            let mut local_qual: i32 = -1;
+            if type_ == 1 && qualities[0] == 0 {
+                used.fill(false);
+            }
+            for &(allele_idx, rank) in &self.selected_alleles[gene_idx] {
+                if rank != type_ {
+                    continue;
+                }
+                let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                let major_allele_idx =
+                    usize::try_from(self.allele_info[allele_idx_usize].major_allele_idx).unwrap();
+                abundance += self.allele_info[allele_idx_usize].abundance;
+                if !used[major_allele_idx] {
+                    local_qual = self.allele_info[allele_idx_usize].genotype_quality;
+                    if type_ <= 1 {
+                        ret = type_ + 1;
+                    }
+                    if added {
+                        buffer.push(',');
+                        buffer.push_str(&self.major_allele_idx_to_name[major_allele_idx]);
+                    } else {
+                        if buffer.is_empty() {
+                            buffer.push_str(&self.major_allele_idx_to_name[major_allele_idx]);
+                        } else {
+                            buffer.push('|');
+                            buffer.push_str(&self.major_allele_idx_to_name[major_allele_idx]);
+                        }
+                        added = true;
+                    }
+                    used[major_allele_idx] = true;
+                }
+            }
+
+            if local_qual >= 0 {
+                buffer.push_str(&format!("{sep}{abundance:.6}{sep}{local_qual}"));
+            } else if type_ <= 1 {
+                buffer.push_str(".\t0\t-1");
+            }
+            if type_ <= 1 {
+                qualities[usize::try_from(type_).unwrap()] = local_qual;
+            }
+
+            match type_ {
+                0 => allele1 = buffer,
+                1 => allele2 = buffer,
+                _ => secondary_alleles = buffer,
+            }
+        }
+
+        (allele1, allele2, secondary_alleles, ret)
+    }
+
+    /// Ported from `Genotyper::OutputRepresentativeAlleles` (`Genotyper.hpp:
+    /// 2180-2229`): writes `_allele.tsv` -- one `{alleleName} {quality}` line
+    /// per representative allele (up to 2 per gene: rank-0 and rank-1,
+    /// picking the highest-`ecAbundance` member when a rank has several,
+    /// ties broken by the LOWER allele index -- `Genotyper.hpp:2193-2199`),
+    /// with a rescue for a homozygous-looking rank-0-only gene: if no rank-1
+    /// allele was selected, but ANOTHER rank-0 allele exists that is neither
+    /// in the SAME equivalence class as the chosen representative NOR
+    /// [`Genotyper::is_allele_same_in_exon`] with it, that allele (the
+    /// highest-`ecAbundance` such candidate, ties broken by LOWER allele
+    /// index) becomes the rank-1 representative too (`Genotyper.hpp:2201-
+    /// 2221`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` cannot be created/written.
+    pub fn output_representative_alleles(
+        &self,
+        path: &std::path::Path,
+        seq_name_of: impl Fn(usize) -> String,
+    ) {
+        use std::io::Write as _;
+
+        let gene_cnt_usize = usize::try_from(self.gene_cnt).expect("gene_cnt is non-negative");
+        let mut out = std::fs::File::create(path)
+            .unwrap_or_else(|e| panic!("creating {}: {e}", path.display()));
+
+        for i in 0..gene_cnt_usize {
+            let mut representatives: [Option<i32>; 2] = [None, None];
+            for &(allele_idx, tag) in &self.selected_alleles[i] {
+                if tag > 1
+                    || self.allele_info[usize::try_from(allele_idx).unwrap()].genotype_quality < 1
+                {
+                    continue;
+                }
+                let tag_usize = usize::try_from(tag).unwrap();
+                let candidate_ec_abund =
+                    self.allele_info[usize::try_from(allele_idx).unwrap()].ec_abundance;
+                let better = match representatives[tag_usize] {
+                    None => true,
+                    Some(cur) => {
+                        let cur_ec_abund =
+                            self.allele_info[usize::try_from(cur).unwrap()].ec_abundance;
+                        #[allow(clippy::float_cmp)]
+                        let tie = cur_ec_abund == candidate_ec_abund;
+                        cur_ec_abund < candidate_ec_abund || (tie && cur > allele_idx)
+                    }
+                };
+                if better {
+                    representatives[tag_usize] = Some(allele_idx);
+                }
+            }
+
+            if representatives[1].is_none() {
+                if let Some(rep0) = representatives[0] {
+                    let rep0_usize = usize::try_from(rep0).unwrap();
+                    let rep0_ec = self.allele_info[rep0_usize].equivalent_class;
+                    let rep0_name = seq_name_of(rep0_usize).to_string();
+                    let mut max = -1.0f64;
+                    let mut max_allele_idx: Option<i32> = None;
+                    for &(allele_idx, tag) in &self.selected_alleles[i] {
+                        if tag != 0 {
+                            continue;
+                        }
+                        let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                        if self.allele_info[allele_idx_usize].equivalent_class == rep0_ec
+                            || self
+                                .is_allele_same_in_exon(&seq_name_of(allele_idx_usize), &rep0_name)
+                        {
+                            continue;
+                        }
+                        let ec_abund = self.allele_info[allele_idx_usize].ec_abundance;
+                        #[allow(clippy::float_cmp)]
+                        let tie = ec_abund == max;
+                        let better = ec_abund > max
+                            || (tie && max_allele_idx.is_some_and(|cur| allele_idx < cur));
+                        if better {
+                            max = ec_abund;
+                            max_allele_idx = Some(allele_idx);
+                        }
+                    }
+                    #[allow(clippy::float_cmp)]
+                    // exact C++ `!= -1` sentinel check, not a fuzzy comparison.
+                    let found_candidate = max != -1.0;
+                    if found_candidate {
+                        representatives[1] = max_allele_idx;
+                    }
+                }
+            }
+
+            for rep in representatives.into_iter().flatten() {
+                let rep_usize = usize::try_from(rep).unwrap();
+                writeln!(
+                    out,
+                    "{} {}",
+                    seq_name_of(rep_usize),
+                    self.allele_info[rep_usize].genotype_quality
+                )
+                .unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2658,5 +4825,390 @@ mod tests {
         // All four alleles retain nonzero abundance -- no gene contaminated
         // another gene's calls.
         assert!(g.allele_info.iter().all(|a| a.abundance > 0.0));
+    }
+
+    // --- alnorm ---
+
+    #[test]
+    fn alnorm_at_zero_is_one_half() {
+        // Symmetric around 0: both upper and lower tails are exactly 0.5.
+        assert!((alnorm(0.0, false) - 0.5).abs() < 1e-9);
+        assert!((alnorm(0.0, true) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn alnorm_matches_known_standard_normal_quantiles() {
+        // Standard textbook values: Phi(1.96) ~= 0.975, Phi(-1.96) ~= 0.025.
+        assert!((alnorm(1.96, false) - 0.975).abs() < 1e-3);
+        assert!((alnorm(-1.96, false) - 0.025).abs() < 1e-3);
+        // Upper tail is the complement of the lower tail.
+        assert!((alnorm(1.96, true) - 0.025).abs() < 1e-3);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact literal-constant branch (`value = 0.0`/`1.0`), not a fuzzy comparison.
+    fn alnorm_far_tail_saturates_to_bounds() {
+        // z > ltone (7.0) and beyond utzero (18.66): exact 0.0/1.0 branch.
+        assert_eq!(alnorm(20.0, true), 0.0);
+        assert_eq!(alnorm(20.0, false), 1.0);
+        assert_eq!(alnorm(-20.0, false), 0.0);
+    }
+
+    // --- parse_exon_comment ---
+
+    #[test]
+    fn parse_exon_comment_pairs_up_skipping_leading_number() {
+        // Mirrors kir_rna_seq.fa's real header comment shape.
+        let exons = parse_exon_comment("8 50 83 84 119 120 419 420", 500);
+        assert_eq!(exons, vec![(50, 83), (84, 119), (120, 419)]);
+    }
+
+    #[test]
+    fn parse_exon_comment_no_digits_falls_back_to_whole_sequence() {
+        assert_eq!(parse_exon_comment("", 100), vec![(0, 99)]);
+        assert_eq!(parse_exon_comment("no numbers here", 100), vec![(0, 99)]);
+    }
+
+    #[test]
+    fn parse_exon_comment_single_number_yields_empty_exon_list() {
+        // size == 1 (only the discarded leading number): the C++ for-loop
+        // `for (i = 1 ; i < 1 ; i += 2)` runs zero iterations -- an EMPTY
+        // list, not the whole-sequence fallback (see doc comment).
+        assert_eq!(parse_exon_comment("42", 100), Vec::<(i32, i32)>::new());
+    }
+
+    // --- AlleleRef / get_seq_missing_base_coverage ---
+
+    #[test]
+    fn get_seq_missing_base_coverage_counts_low_coverage_exon_bases() {
+        let mut allele_ref = AlleleRef::new(b"ACGTACGTAC".to_vec(), None); // whole-seq exon [0,9]
+        // Give most positions high coverage, one position near-zero.
+        for pw in &mut allele_ref.pos_weight {
+            pw.count[0] = 10; // every position "looks like" high-A coverage for this synthetic test
+        }
+        allele_ref.pos_weight[3].count = [0, 0, 0, 0]; // one position with a T base but 0 T-count
+        // Position 3 is 'T' (0-indexed "ACGTACGTAC"), whose own base-count
+        // is 0 (not the synthetic count[0]=10 written above) -- so it reads
+        // as a true low-coverage exon base.
+        let missing = get_seq_missing_base_coverage(&allele_ref, 0.01);
+        assert!(missing >= 1, "expected at least one low-coverage base, got {missing}");
+    }
+
+    #[test]
+    fn allele_ref_is_exon_respects_parsed_intervals() {
+        let allele_ref = AlleleRef::new(vec![b'A'; 20], Some("0 5 9 12 19"));
+        // exons: (5,9), (12,19) (leading 0 discarded).
+        assert!(!allele_ref.is_exon(0));
+        assert!(allele_ref.is_exon(5));
+        assert!(allele_ref.is_exon(9));
+        assert!(!allele_ref.is_exon(10));
+        assert!(allele_ref.is_exon(19));
+    }
+
+    // --- extend_overlap ---
+
+    fn simple_overlap(
+        seq_idx: u32,
+        read_start: i32,
+        read_end: i32,
+        seq_start: i32,
+        seq_end: i32,
+        strand: i8,
+    ) -> overlap::Overlap {
+        overlap::Overlap {
+            seq_idx,
+            read_start,
+            read_end,
+            seq_start,
+            seq_end,
+            strand,
+            match_cnt: 2 * (read_end - read_start + 1),
+            similarity: 1.0,
+        }
+    }
+
+    #[test]
+    fn extend_overlap_perfect_match_extends_to_full_read() {
+        // Allele consensus == read exactly; the k-mer-chained core overlap
+        // already spans the read, so left/right overhang is 0 and the
+        // extended overlap is unchanged, still perfect similarity.
+        let consensus = b"ACGTACGTACGT";
+        let read = b"ACGTACGTACGT";
+        let core = simple_overlap(0, 0, 11, 0, 11, 1);
+        let extended =
+            extend_overlap(read, consensus, &core, 0.8).expect("should pass ref_seq_similarity");
+        assert_eq!(extended.read_start, 0);
+        assert_eq!(extended.read_end, 11);
+        #[allow(clippy::float_cmp)]
+        let is_one = extended.similarity == 1.0;
+        assert!(is_one);
+    }
+
+    #[test]
+    fn extend_overlap_extends_partial_core_overlap_using_overhangs() {
+        // Core overlap only covers the middle of both read and allele; the
+        // full read/allele are identical, so extension should walk out to
+        // the full span with perfect similarity.
+        let consensus = b"AAAACGTACGTAAAA";
+        let read = b"AAAACGTACGTAAAA";
+        let core = simple_overlap(0, 4, 10, 4, 10, 1);
+        let extended = extend_overlap(read, consensus, &core, 0.8).unwrap();
+        assert_eq!(extended.read_start, 0);
+        assert_eq!(extended.read_end, 14);
+        assert_eq!(extended.seq_start, 0);
+        assert_eq!(extended.seq_end, 14);
+    }
+
+    #[test]
+    fn extend_overlap_below_similarity_threshold_returns_none() {
+        // Core overlap's own matchCnt reflects a fully-mismatched middle
+        // (as a real LIS-chained core overlap would compute) -- extension
+        // only walks the OUTER overhangs (a perfect match here), so the
+        // combined similarity should still fall below a demanding
+        // threshold thanks to the core's low matchCnt.
+        let consensus = b"AAAATTTTTTTTAAAA";
+        let read = b"AAAACCCCCCCCAAAA";
+        let mut core = simple_overlap(0, 4, 11, 4, 11, 1); // the mismatching middle only
+        core.match_cnt = 0; // no real matches in the core region
+        let extended = extend_overlap(read, consensus, &core, 0.99);
+        assert!(extended.is_none() || extended.unwrap().similarity < 0.99);
+    }
+
+    // --- assign_read ---
+
+    #[test]
+    fn assign_read_returns_none_for_empty_overlaps() {
+        let mut refs = vec![AlleleRef::new(b"ACGTACGT".to_vec(), None)];
+        let result = assign_read(b"ACGTACGT", &[], &mut refs, 0.8, 1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn assign_read_marks_base_coverage_for_matched_positions() {
+        let consensus = b"ACGTACGTACGT".to_vec();
+        let mut refs = vec![AlleleRef::new(consensus.clone(), None)];
+        let read = b"ACGTACGTACGT";
+        let core = simple_overlap(0, 0, 11, 0, 11, 1);
+
+        let result = assign_read(read, std::slice::from_ref(&core), &mut refs, 0.8, 1);
+        assert!(result.is_some());
+        // Every position should now have nonzero coverage for its own base.
+        for (i, &base) in consensus.iter().enumerate() {
+            let base_code = nuc_to_num(base).unwrap();
+            assert!(
+                refs[0].pos_weight[i].count[base_code] > 0,
+                "position {i} (base {base}) should have coverage"
+            );
+        }
+    }
+
+    // --- read_assignment_to_fragment_assignment ---
+
+    fn extended(
+        seq_idx: u32,
+        read_start: i32,
+        read_end: i32,
+        seq_start: i32,
+        seq_end: i32,
+        strand: i8,
+    ) -> ExtendedOverlap {
+        ExtendedOverlap {
+            seq_idx,
+            read_start,
+            read_end,
+            seq_start,
+            seq_end,
+            strand,
+            match_cnt: 2 * (read_end - read_start + 1),
+            similarity: 1.0,
+            relaxed_match_cnt: 2 * (read_end - read_start + 1),
+            left_clip: 0,
+            right_clip: 0,
+        }
+    }
+
+    #[test]
+    fn read_assignment_to_fragment_assignment_single_end_passthrough() {
+        let overlaps1 = vec![extended(0, 0, 9, 0, 9, 1)];
+        let assign = read_assignment_to_fragment_assignment(
+            &overlaps1,
+            None,
+            false,
+            31,
+            |_| 100,
+            |_, _, _| false,
+        );
+        assert_eq!(assign.len(), 1);
+        assert_eq!(assign[0].seq_idx, 0);
+        assert!(!assign[0].has_mate_pair);
+        #[allow(clippy::float_cmp)]
+        let qual_is_one = assign[0].qual == 1.0;
+        assert!(qual_is_one);
+    }
+
+    #[test]
+    fn read_assignment_to_fragment_assignment_combines_compatible_mate_pair() {
+        // Mate 1 forward strand at [0,9], mate 2 reverse strand starting
+        // further along the allele -- a compatible, non-overlapping pair.
+        let overlaps1 = vec![extended(0, 0, 9, 0, 9, 1)];
+        let overlaps2 = vec![extended(0, 0, 9, 50, 59, -1)];
+        let assign = read_assignment_to_fragment_assignment(
+            &overlaps1,
+            Some(&overlaps2),
+            false,
+            31,
+            |_| 100,
+            |_, _, _| false,
+        );
+        assert_eq!(assign.len(), 1);
+        assert!(assign[0].has_mate_pair);
+        assert_eq!(assign[0].seq_start, 0);
+        assert_eq!(assign[0].seq_end, 59);
+    }
+
+    #[test]
+    fn read_assignment_to_fragment_assignment_incompatible_strand_yields_no_fragment() {
+        // Both mates on the SAME strand against the same allele: NOT a
+        // compatible pair, and (unlike the "one side has zero overlaps"
+        // branch) this "both sides non-empty" branch has no dangling
+        // fallback -- zero fragments are produced for this allele, matching
+        // `SeqSet::ReadAssignmentToFragmentAssignment`'s `else` branch
+        // (`SeqSet.hpp:2348-2381`) exactly: it only ever pushes a fragment
+        // when the strand/position compatibility check passes.
+        let overlaps1 = vec![extended(0, 0, 9, 0, 9, 1)];
+        let overlaps2 = vec![extended(0, 0, 9, 50, 59, 1)];
+        let assign = read_assignment_to_fragment_assignment(
+            &overlaps1,
+            Some(&overlaps2),
+            false,
+            3,
+            |_| 100,
+            |_, _, _| false,
+        );
+        assert!(assign.is_empty());
+    }
+
+    #[test]
+    fn read_assignment_to_fragment_assignment_one_sided_empty_falls_back_to_dangling() {
+        // Mate 2 has NO overlaps at all (e.g. it failed to align anywhere):
+        // this DOES take the dangling fallback branch (`SeqSet.hpp:2330-
+        // 2347`), producing a single dangling (non-mate-paired,
+        // `o1FromR2 == false`) fragment for mate 1's overlap.
+        let overlaps1 = vec![extended(0, 0, 9, 0, 9, 1)];
+        let overlaps2: Vec<ExtendedOverlap> = Vec::new();
+        let assign = read_assignment_to_fragment_assignment(
+            &overlaps1,
+            Some(&overlaps2),
+            false,
+            3,
+            |_| 100,
+            |_, _, _| false,
+        );
+        assert_eq!(assign.len(), 1);
+        assert!(!assign[0].has_mate_pair);
+        assert!(!assign[0].o1_from_r2);
+    }
+
+    #[test]
+    fn read_assignment_to_fragment_assignment_dangling_short_span_is_dropped() {
+        // Same as above, but hit_len_required=31 (the real SeqSet default):
+        // the dangling-mate-pair filter's `span >= 3 * hitLenRequired`
+        // check must reject this short overlap entirely.
+        let overlaps1 = vec![extended(0, 0, 9, 0, 9, 1)];
+        let overlaps2 = vec![extended(0, 0, 9, 50, 59, 1)];
+        let assign = read_assignment_to_fragment_assignment(
+            &overlaps1,
+            Some(&overlaps2),
+            false,
+            31,
+            |_| 100,
+            |_, _, _| false,
+        );
+        assert!(assign.is_empty());
+    }
+
+    // --- select_alleles_for_genes / get_allele_description (small
+    // end-to-end scenario) ---
+
+    /// Builds a tiny two-allele-per-gene, single-gene Genotyper scenario
+    /// with a clear heterozygous call, entirely through the public
+    /// read-assignment API (no direct field poking) -- exercises
+    /// [`Genotyper::select_alleles_for_genes`] and
+    /// [`Genotyper::get_allele_description`] together.
+    #[test]
+    fn select_alleles_for_genes_calls_clear_heterozygous_pair() {
+        let names: Vec<String> =
+            ["A*01:01:01", "A*01:02:01"].iter().map(|s| (*s).to_string()).collect();
+        let consensus: Vec<Vec<u8>> = vec![
+            b"AAAACGTACGTACGTACGTACGTACGTACGTACGTAAAA".to_vec(),
+            b"TTTTCGTACGTACGTACGTACGTACGTACGTACGTTTTT".to_vec(),
+        ];
+        let weight = vec![1; 2];
+        let mut eff_len = vec![40, 40];
+
+        let mut g = Genotyper::new();
+        g.init_allele_info(&names, &consensus, &weight, &mut eff_len, 8);
+        g.init_read_assignments(20, 2000);
+
+        // 10 reads uniquely supporting allele 0, 10 uniquely supporting allele 1.
+        for i in 0..10 {
+            let frag = FragmentOverlap {
+                seq_idx: 0,
+                seq_start: 0,
+                seq_end: 10,
+                match_cnt: 22,
+                relaxed_match_cnt: 22,
+                similarity: 1.0,
+                has_mate_pair: false,
+                o1_from_r2: false,
+                qual: 1.0,
+                has_n: false,
+            };
+            g.set_read_assignments(i, &[frag], 0.8, |_, _, _| false);
+        }
+        for i in 10..20 {
+            let frag = FragmentOverlap {
+                seq_idx: 1,
+                seq_start: 0,
+                seq_end: 10,
+                match_cnt: 22,
+                relaxed_match_cnt: 22,
+                similarity: 1.0,
+                has_mate_pair: false,
+                o1_from_r2: false,
+                qual: 1.0,
+                has_n: false,
+            };
+            g.set_read_assignments(i, &[frag], 0.8, |_, _, _| false);
+        }
+
+        g.coalesce_read_assignments(0, 19);
+        g.finalize_read_assignments(&[0, 0]);
+        g.quantify_allele_equivalent_class(&eff_len, &weight);
+        g.remove_low_likelihood_allele_in_equivalent_class(|idx| eff_len[idx]);
+        g.select_alleles_for_genes(|idx| weight[idx]);
+
+        let (allele1, allele2, secondary, called_cnt) = g.get_allele_description(0);
+        assert_eq!(called_cnt, 2, "both alleles should be called");
+        assert!(allele1.starts_with("A*01:01") || allele1.starts_with("A*01:02"));
+        assert!(allele2.starts_with("A*01:01") || allele2.starts_with("A*01:02"));
+        assert_ne!(allele1, allele2, "the two called major alleles must differ");
+        assert!(secondary.is_empty(), "no secondary candidates expected in this scenario");
+    }
+
+    #[test]
+    fn get_gene_allele_types_reflects_max_selected_rank() {
+        let mut g = Genotyper::new();
+        g.gene_cnt = 1;
+        g.selected_alleles = vec![vec![(0, 0), (1, 1), (2, 2)]];
+        assert_eq!(g.get_gene_allele_types(0), 3);
+    }
+
+    #[test]
+    fn get_gene_allele_types_zero_when_nothing_selected() {
+        let mut g = Genotyper::new();
+        g.gene_cnt = 1;
+        g.selected_alleles = vec![Vec::new()];
+        assert_eq!(g.get_gene_allele_types(0), 0);
     }
 }
