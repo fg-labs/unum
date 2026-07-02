@@ -234,6 +234,62 @@ mod ffi {
             has_n: i32,
             ref_seq_similarity: f64,
         ) -> f64;
+
+        // --- Opaque-handle FFI for Genotyper's Task-5b quantification slice ---
+        pub fn fg_t1k_genotyper2_new(kmer_length: i32) -> *mut c_void;
+        pub fn fg_t1k_genotyper2_free(p: *mut c_void);
+        pub fn fg_t1k_genotyper2_add_ref_seq(
+            p: *mut c_void,
+            id: *const c_char,
+            seq: *const c_char,
+            weight: i32,
+        ) -> i32;
+        pub fn fg_t1k_genotyper2_init_allele_info(p: *mut c_void) -> i32;
+        pub fn fg_t1k_genotyper2_set_allele_name_structure(
+            p: *mut c_void,
+            allele_digit_units: i32,
+            allele_delimiter: c_char,
+        ) -> i32;
+        pub fn fg_t1k_genotyper2_init_read_assignments(
+            p: *mut c_void,
+            total_read_cnt: i32,
+            max_assign_cnt: i32,
+        ) -> i32;
+        #[allow(clippy::too_many_arguments)]
+        pub fn fg_t1k_genotyper2_set_read_assignments(
+            p: *mut c_void,
+            read_id: i32,
+            seq_idx: *const i32,
+            seq_start: *const i32,
+            seq_end: *const i32,
+            match_cnt: *const i32,
+            relaxed_match_cnt: *const i32,
+            similarity: *const f64,
+            has_mate_pair: *const i32,
+            o1_from_r2: *const i32,
+            qual: *const f64,
+            has_n: *const i32,
+            n: i32,
+            ref_seq_similarity: f64,
+        ) -> i32;
+        pub fn fg_t1k_genotyper2_coalesce_read_assignments(
+            p: *mut c_void,
+            begin: i32,
+            end: i32,
+        ) -> i32;
+        pub fn fg_t1k_genotyper2_finalize_read_assignments(p: *mut c_void) -> i32;
+        pub fn fg_t1k_genotyper2_quantify(p: *mut c_void) -> i32;
+
+        pub fn fg_t1k_genotyper2_read_cnt(p: *mut c_void) -> i32;
+        pub fn fg_t1k_genotyper2_ec_count(p: *mut c_void) -> i32;
+        pub fn fg_t1k_genotyper2_ec_member_count(p: *mut c_void, ec_idx: i32) -> i32;
+        pub fn fg_t1k_genotyper2_ec_member(p: *mut c_void, ec_idx: i32, member_idx: i32) -> i32;
+        pub fn fg_t1k_genotyper2_allele_equivalent_class(p: *mut c_void, allele_idx: i32) -> i32;
+        pub fn fg_t1k_genotyper2_allele_abundance(p: *mut c_void, allele_idx: i32) -> f64;
+        pub fn fg_t1k_genotyper2_allele_ec_abundance(p: *mut c_void, allele_idx: i32) -> f64;
+        pub fn fg_t1k_genotyper2_allele_missing_coverage(p: *mut c_void, allele_idx: i32) -> i32;
+        pub fn fg_t1k_genotyper2_seq_effective_len(p: *mut c_void, allele_idx: i32) -> i32;
+        pub fn fg_t1k_genotyper2_seq_weight(p: *mut c_void, allele_idx: i32) -> i32;
     }
 }
 #[cfg(feature = "t1k-sys")]
@@ -1357,5 +1413,285 @@ impl CppGenotyper {
              out-of-range value)"
         );
         ret
+    }
+}
+
+/// One scripted `_fragmentOverlap` entry fed to [`CppGenotyper2::set_read_assignments`]
+/// / [`fg_t1k_core::genotyper::Genotyper::set_read_assignments`] (Task 5b's
+/// differential test builds the identical list of these for both sides --
+/// see `crates/fg-t1k-sys/tests/diff_genotyper_em.rs`).
+#[cfg(feature = "t1k-sys")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScriptedOverlap {
+    pub seq_idx: i32,
+    pub seq_start: i32,
+    pub seq_end: i32,
+    pub match_cnt: i32,
+    pub relaxed_match_cnt: i32,
+    pub similarity: f64,
+    pub has_mate_pair: bool,
+    pub o1_from_r2: bool,
+    pub qual: f64,
+    pub has_n: bool,
+}
+
+/// Safe Rust wrapper around the opaque C++ `Genotyper*` handle, scoped to
+/// Task 5b's quantification slice (`fg_t1k_genotyper2_*`, see `shim.h`).
+///
+/// Owns the handle for its lifetime: [`CppGenotyper2::new`] allocates the
+/// C++ object, and `Drop` calls `fg_t1k_genotyper2_free` exactly once. The
+/// call sequence a differential test drives mirrors
+/// `Genotyper.cpp:main`'s own real pipeline order: [`CppGenotyper2::new`] ->
+/// repeated [`CppGenotyper2::add_ref_seq`] -> [`CppGenotyper2::init_allele_info`]
+/// -> [`CppGenotyper2::init_read_assignments`] -> repeated
+/// [`CppGenotyper2::set_read_assignments`] -> [`CppGenotyper2::coalesce_read_assignments`]
+/// -> [`CppGenotyper2::finalize_read_assignments`] -> [`CppGenotyper2::quantify`]
+/// -> the read-back accessors.
+#[cfg(feature = "t1k-sys")]
+pub struct CppGenotyper2 {
+    handle: *mut std::os::raw::c_void,
+}
+
+#[cfg(feature = "t1k-sys")]
+impl CppGenotyper2 {
+    /// Constructs a new C++ `Genotyper(kmerLength)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying `fg_t1k_genotyper2_new` call returns NULL
+    /// (i.e. the C++ constructor threw an exception).
+    #[must_use]
+    pub fn new(kmer_length: i32) -> Self {
+        let handle = unsafe { ffi::fg_t1k_genotyper2_new(kmer_length) };
+        assert!(
+            !handle.is_null(),
+            "fg_t1k_genotyper2_new({kmer_length}) returned NULL: C++ Genotyper construction failed"
+        );
+        Self { handle }
+    }
+
+    /// Mirrors `genotyper.refSet.InputRefSeq(id, seq, weight,
+    /// /*initExonInfo=*/true)`. `id`/`seq` must not contain an interior NUL
+    /// byte. Returns the 0-based seqIdx (== alleleIdx) this sequence was
+    /// assigned.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id`/`seq` contain an interior NUL byte, or if the
+    /// underlying C++ call threw.
+    pub fn add_ref_seq(&mut self, id: &str, seq: &str, weight: i32) -> i32 {
+        let c_id = std::ffi::CString::new(id).expect("id must not contain an interior NUL byte");
+        let c_seq = std::ffi::CString::new(seq).expect("seq must not contain an interior NUL byte");
+        let rc = unsafe {
+            ffi::fg_t1k_genotyper2_add_ref_seq(self.handle, c_id.as_ptr(), c_seq.as_ptr(), weight)
+        };
+        assert!(rc >= 0, "fg_t1k_genotyper2_add_ref_seq threw a C++ exception");
+        rc
+    }
+
+    /// Mirrors `Genotyper::InitAlleleInfo()`. Call after every ref seq has
+    /// been loaded via [`CppGenotyper2::add_ref_seq`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying C++ call threw.
+    pub fn init_allele_info(&mut self) {
+        let rc = unsafe { ffi::fg_t1k_genotyper2_init_allele_info(self.handle) };
+        assert!(rc == 0, "fg_t1k_genotyper2_init_allele_info threw a C++ exception");
+    }
+
+    /// Mirrors `Genotyper::SetAlleleNameStructure(allele_digit_units,
+    /// allele_delimiter)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying C++ call threw.
+    pub fn set_allele_name_structure(&mut self, allele_digit_units: i32, allele_delimiter: u8) {
+        #[allow(clippy::cast_possible_wrap)]
+        let delimiter_c_char = allele_delimiter as std::os::raw::c_char;
+        let rc = unsafe {
+            ffi::fg_t1k_genotyper2_set_allele_name_structure(
+                self.handle,
+                allele_digit_units,
+                delimiter_c_char,
+            )
+        };
+        assert!(rc == 0, "fg_t1k_genotyper2_set_allele_name_structure threw a C++ exception");
+    }
+
+    /// Mirrors `Genotyper::InitReadAssignments(total_read_cnt, max_assign_cnt)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying C++ call threw.
+    pub fn init_read_assignments(&mut self, total_read_cnt: i32, max_assign_cnt: i32) {
+        let rc = unsafe {
+            ffi::fg_t1k_genotyper2_init_read_assignments(
+                self.handle,
+                total_read_cnt,
+                max_assign_cnt,
+            )
+        };
+        assert!(rc == 0, "fg_t1k_genotyper2_init_read_assignments threw a C++ exception");
+    }
+
+    /// Mirrors `Genotyper::SetReadAssignments(read_id, assignment)`, building
+    /// the `std::vector<_fragmentOverlap>` from `assignment` on the C++
+    /// side, after `refSet.SetRefSeqSimilarity(ref_seq_similarity)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying C++ call threw.
+    pub fn set_read_assignments(
+        &mut self,
+        read_id: i32,
+        assignment: &[ScriptedOverlap],
+        ref_seq_similarity: f64,
+    ) {
+        let n = assignment.len();
+        let seq_idx: Vec<i32> = assignment.iter().map(|a| a.seq_idx).collect();
+        let seq_start: Vec<i32> = assignment.iter().map(|a| a.seq_start).collect();
+        let seq_end: Vec<i32> = assignment.iter().map(|a| a.seq_end).collect();
+        let match_cnt: Vec<i32> = assignment.iter().map(|a| a.match_cnt).collect();
+        let relaxed_match_cnt: Vec<i32> = assignment.iter().map(|a| a.relaxed_match_cnt).collect();
+        let similarity: Vec<f64> = assignment.iter().map(|a| a.similarity).collect();
+        let has_mate_pair: Vec<i32> =
+            assignment.iter().map(|a| i32::from(a.has_mate_pair)).collect();
+        let o1_from_r2: Vec<i32> = assignment.iter().map(|a| i32::from(a.o1_from_r2)).collect();
+        let qual: Vec<f64> = assignment.iter().map(|a| a.qual).collect();
+        let has_n: Vec<i32> = assignment.iter().map(|a| i32::from(a.has_n)).collect();
+
+        let rc = unsafe {
+            ffi::fg_t1k_genotyper2_set_read_assignments(
+                self.handle,
+                read_id,
+                seq_idx.as_ptr(),
+                seq_start.as_ptr(),
+                seq_end.as_ptr(),
+                match_cnt.as_ptr(),
+                relaxed_match_cnt.as_ptr(),
+                similarity.as_ptr(),
+                has_mate_pair.as_ptr(),
+                o1_from_r2.as_ptr(),
+                qual.as_ptr(),
+                has_n.as_ptr(),
+                i32::try_from(n).expect("assignment length fits in i32"),
+                ref_seq_similarity,
+            )
+        };
+        assert!(rc == 0, "fg_t1k_genotyper2_set_read_assignments threw a C++ exception");
+    }
+
+    /// Mirrors `Genotyper::CoalesceReadAssignments(begin, end)`. Returns the
+    /// C++ method's own return value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying C++ call threw (surfaced as an `i32::MIN`
+    /// sentinel).
+    pub fn coalesce_read_assignments(&mut self, begin: i32, end: i32) -> i32 {
+        let ret =
+            unsafe { ffi::fg_t1k_genotyper2_coalesce_read_assignments(self.handle, begin, end) };
+        assert!(
+            ret != i32::MIN,
+            "fg_t1k_genotyper2_coalesce_read_assignments threw a C++ exception"
+        );
+        ret
+    }
+
+    /// Mirrors `Genotyper::FinalizeReadAssignments()` (also runs the real
+    /// `GetSeqMissingBaseCoverage`/`BuildAlleleEquivalentClass`). Returns
+    /// the C++ method's own return value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying C++ call threw (surfaced as an `i32::MIN`
+    /// sentinel).
+    pub fn finalize_read_assignments(&mut self) -> i32 {
+        let ret = unsafe { ffi::fg_t1k_genotyper2_finalize_read_assignments(self.handle) };
+        assert!(
+            ret != i32::MIN,
+            "fg_t1k_genotyper2_finalize_read_assignments threw a C++ exception"
+        );
+        ret
+    }
+
+    /// Mirrors `Genotyper::QuantifyAlleleEquivalentClass()` -- the
+    /// SQUAREM-accelerated abundance EM, run to completion. Returns the
+    /// number of EM iterations run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying C++ call threw (surfaced as an `i32::MIN`
+    /// sentinel).
+    pub fn quantify(&mut self) -> i32 {
+        let ret = unsafe { ffi::fg_t1k_genotyper2_quantify(self.handle) };
+        assert!(ret != i32::MIN, "fg_t1k_genotyper2_quantify threw a C++ exception");
+        ret
+    }
+
+    /// Mirrors `Genotyper::readCnt`.
+    #[must_use]
+    pub fn read_cnt(&self) -> i32 {
+        unsafe { ffi::fg_t1k_genotyper2_read_cnt(self.handle) }
+    }
+
+    /// Mirrors `Genotyper::equivalentClassToAlleles.size()`.
+    #[must_use]
+    pub fn ec_count(&self) -> i32 {
+        unsafe { ffi::fg_t1k_genotyper2_ec_count(self.handle) }
+    }
+
+    /// Mirrors `Genotyper::equivalentClassToAlleles[ec_idx]` (the full
+    /// member-allele-index list, in C++ vector order).
+    #[must_use]
+    pub fn ec_members(&self, ec_idx: i32) -> Vec<i32> {
+        let cnt = unsafe { ffi::fg_t1k_genotyper2_ec_member_count(self.handle, ec_idx) };
+        (0..cnt)
+            .map(|i| unsafe { ffi::fg_t1k_genotyper2_ec_member(self.handle, ec_idx, i) })
+            .collect()
+    }
+
+    /// Mirrors `Genotyper::alleleInfo[allele_idx].equivalentClass`.
+    #[must_use]
+    pub fn allele_equivalent_class(&self, allele_idx: i32) -> i32 {
+        unsafe { ffi::fg_t1k_genotyper2_allele_equivalent_class(self.handle, allele_idx) }
+    }
+
+    /// Mirrors `Genotyper::alleleInfo[allele_idx].abundance`.
+    #[must_use]
+    pub fn allele_abundance(&self, allele_idx: i32) -> f64 {
+        unsafe { ffi::fg_t1k_genotyper2_allele_abundance(self.handle, allele_idx) }
+    }
+
+    /// Mirrors `Genotyper::alleleInfo[allele_idx].ecAbundance`.
+    #[must_use]
+    pub fn allele_ec_abundance(&self, allele_idx: i32) -> f64 {
+        unsafe { ffi::fg_t1k_genotyper2_allele_ec_abundance(self.handle, allele_idx) }
+    }
+
+    /// Mirrors `Genotyper::alleleInfo[allele_idx].missingCoverage`.
+    #[must_use]
+    pub fn allele_missing_coverage(&self, allele_idx: i32) -> i32 {
+        unsafe { ffi::fg_t1k_genotyper2_allele_missing_coverage(self.handle, allele_idx) }
+    }
+
+    /// Mirrors `Genotyper::refSet.GetSeqEffectiveLen(allele_idx)`.
+    #[must_use]
+    pub fn seq_effective_len(&self, allele_idx: i32) -> i32 {
+        unsafe { ffi::fg_t1k_genotyper2_seq_effective_len(self.handle, allele_idx) }
+    }
+
+    /// Mirrors `Genotyper::refSet.GetSeqWeight(allele_idx)`.
+    #[must_use]
+    pub fn seq_weight(&self, allele_idx: i32) -> i32 {
+        unsafe { ffi::fg_t1k_genotyper2_seq_weight(self.handle, allele_idx) }
+    }
+}
+
+#[cfg(feature = "t1k-sys")]
+impl Drop for CppGenotyper2 {
+    fn drop(&mut self) {
+        unsafe { ffi::fg_t1k_genotyper2_free(self.handle) }
     }
 }
