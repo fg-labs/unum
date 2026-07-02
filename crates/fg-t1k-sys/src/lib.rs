@@ -126,6 +126,48 @@ mod ffi {
             out_frag_stdev: *mut i32,
             out_read_len: *mut i32,
         ) -> i32;
+
+        /// Mirrors `AlignAlgo::GlobalAlignment`. `out_align` must point at a
+        /// caller-allocated buffer of at least `lent + lenp` bytes; on
+        /// return, `*out_len` holds the number of ops written (the shim
+        /// strips the C++ side's internal `-1` sentinel before returning).
+        /// Returns the alignment score, or `i32::MIN` if the underlying call
+        /// threw.
+        pub fn fg_t1k_alignalgo_global_alignment(
+            t: *const c_char,
+            lent: i32,
+            p: *const c_char,
+            lenp: i32,
+            band: i32,
+            out_align: *mut i8,
+            out_len: *mut i32,
+        ) -> i32;
+
+        /// Mirrors `AlignAlgo::GlobalAlignment_PosWeight`. `t_weights` must
+        /// point at `4 * lent` ints (four counts per reference position,
+        /// row-major). Same `out_align`/`out_len` sizing/semantics as
+        /// `fg_t1k_alignalgo_global_alignment`.
+        pub fn fg_t1k_alignalgo_global_alignment_pos_weight(
+            t_weights: *const i32,
+            lent: i32,
+            p: *const c_char,
+            lenp: i32,
+            out_align: *mut i8,
+            out_len: *mut i32,
+        ) -> i32;
+
+        /// Mirrors `SeqSet::GetAlignStats`. `align` need not be `-1`-
+        /// terminated (the shim appends the sentinel itself from `align`/
+        /// `align_len`). Returns 0 on success, -1 if the underlying call
+        /// threw.
+        pub fn fg_t1k_seqset_get_align_stats(
+            align: *const i8,
+            align_len: i32,
+            update: i32,
+            out_match_cnt: *mut i32,
+            out_mismatch_cnt: *mut i32,
+            out_indel_cnt: *mut i32,
+        ) -> i32;
     }
 }
 #[cfg(feature = "t1k-sys")]
@@ -867,6 +909,133 @@ impl Default for CppAlignments {
 impl Drop for CppAlignments {
     fn drop(&mut self) {
         unsafe { ffi::fg_t1k_alignments_free(self.handle) }
+    }
+}
+
+/// The `(score, align)` pair a `CppAlignAlgo::*` call returns, mirroring
+/// `fg_t1k_core::align_algo::AlignResult` field-for-field so differential
+/// tests can compare the two directly.
+#[cfg(feature = "t1k-sys")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CppAlignResult {
+    pub score: i32,
+    pub align: Vec<i8>,
+}
+
+/// Scratch buffer size for `out_align`: large enough for any realistic
+/// `lent + lenp` in this port's differential tests (every DP step consumes
+/// at least one base from `t` or `p`, so `lent + lenp` upper-bounds the op
+/// count; see `shim.h`'s `fg_t1k_alignalgo_global_alignment*` doc comments).
+#[cfg(feature = "t1k-sys")]
+const ALIGN_ALGO_BUFFER_SIZE: usize = 100_001;
+
+/// Free-function FFI wrappers for `AlignAlgo::GlobalAlignment`/
+/// `GlobalAlignment_PosWeight` and `SeqSet::GetAlignStats` (see `shim.h`'s
+/// `fg_t1k_alignalgo_*`/`fg_t1k_seqset_get_align_stats` doc comments for the
+/// documented scope). Unlike `CppKmerCode`/`CppSeqSet`/etc. above, these are
+/// plain functions -- `AlignAlgo::GlobalAlignment*` are `static` C++ methods
+/// with no instance state to own.
+#[cfg(feature = "t1k-sys")]
+pub struct CppAlignAlgo;
+
+#[cfg(feature = "t1k-sys")]
+impl CppAlignAlgo {
+    /// Mirrors `AlignAlgo::GlobalAlignment(t, lent, p, lenp, align, band)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw (surfaced as an `i32::MIN`
+    /// score sentinel), or if `t`/`p` do not fit `i32` lengths.
+    // `lent`/`lenp` (not `t_len`/`p_len`) deliberately match AlignAlgo.hpp's
+    // own parameter names for line-comparability with the ported C++ (see
+    // fg_t1k_core::align_algo's module docs for the same convention).
+    #[allow(clippy::similar_names)]
+    #[must_use]
+    pub fn global_alignment(t: &[u8], p: &[u8], band: i32) -> CppAlignResult {
+        let lent = i32::try_from(t.len()).expect("t length must fit in an i32");
+        let lenp = i32::try_from(p.len()).expect("p length must fit in an i32");
+        let mut out_align = vec![0i8; ALIGN_ALGO_BUFFER_SIZE];
+        let mut out_len: i32 = 0;
+        let score = unsafe {
+            ffi::fg_t1k_alignalgo_global_alignment(
+                t.as_ptr().cast::<std::os::raw::c_char>(),
+                lent,
+                p.as_ptr().cast::<std::os::raw::c_char>(),
+                lenp,
+                band,
+                out_align.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
+        assert!(score != i32::MIN, "fg_t1k_alignalgo_global_alignment threw a C++ exception");
+        let len = usize::try_from(out_len).expect("out_len must be non-negative");
+        CppAlignResult { score, align: out_align[..len].to_vec() }
+    }
+
+    /// Mirrors `AlignAlgo::GlobalAlignment_PosWeight`. `t_weights` is a flat
+    /// `4 * lent`-element array of per-position base counts (four `i32`s per
+    /// reference position, matching `struct _posWeight { int count[4]; }`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw, if `t_weights.len()` is not a
+    /// multiple of 4, or if lengths do not fit `i32`.
+    // See global_alignment above for why `lent`/`lenp` are kept as-is.
+    #[allow(clippy::similar_names)]
+    #[must_use]
+    pub fn global_alignment_pos_weight(t_weights: &[i32], p: &[u8]) -> CppAlignResult {
+        assert!(t_weights.len() % 4 == 0, "t_weights.len() must be a multiple of 4");
+        let lent = i32::try_from(t_weights.len() / 4).expect("lent must fit in an i32");
+        let lenp = i32::try_from(p.len()).expect("p length must fit in an i32");
+        let mut out_align = vec![0i8; ALIGN_ALGO_BUFFER_SIZE];
+        let mut out_len: i32 = 0;
+        let score = unsafe {
+            ffi::fg_t1k_alignalgo_global_alignment_pos_weight(
+                t_weights.as_ptr(),
+                lent,
+                p.as_ptr().cast::<std::os::raw::c_char>(),
+                lenp,
+                out_align.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
+        assert!(
+            score != i32::MIN,
+            "fg_t1k_alignalgo_global_alignment_pos_weight threw a C++ exception"
+        );
+        let len = usize::try_from(out_len).expect("out_len must be non-negative");
+        CppAlignResult { score, align: out_align[..len].to_vec() }
+    }
+
+    /// Mirrors `SeqSet::GetAlignStats(align, update, matchCnt, mismatchCnt,
+    /// indelCnt)`. `align` need not be `-1`-terminated (the shim appends the
+    /// sentinel itself). If `update` is `false`, the returned counts start
+    /// from zero; if `true`, they accumulate onto `initial`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw, or if `align.len()` does not fit
+    /// an `i32`.
+    #[must_use]
+    pub fn get_align_stats(
+        align: &[i8],
+        update: bool,
+        initial: (i32, i32, i32),
+    ) -> (i32, i32, i32) {
+        let align_len = i32::try_from(align.len()).expect("align length must fit in an i32");
+        let (mut match_cnt, mut mismatch_cnt, mut indel_cnt) = initial;
+        let rc = unsafe {
+            ffi::fg_t1k_seqset_get_align_stats(
+                align.as_ptr(),
+                align_len,
+                i32::from(update),
+                &mut match_cnt,
+                &mut mismatch_cnt,
+                &mut indel_cnt,
+            )
+        };
+        assert!(rc == 0, "fg_t1k_seqset_get_align_stats threw a C++ exception");
+        (match_cnt, mismatch_cnt, indel_cnt)
     }
 }
 
