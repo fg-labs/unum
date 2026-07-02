@@ -228,6 +228,48 @@ int fg_t1k_alignalgo_global_alignment_pos_weight(const int* t_weights, int lent,
 // on success, -1 if the underlying call threw.
 int fg_t1k_seqset_get_align_stats(const signed char* align, int align_len, int update,
                                    int* out_match_cnt, int* out_mismatch_cnt, int* out_indel_cnt);
+
+// Free-function FFI for Genotyper's Task-5a deterministic slice (vendor/t1k/
+// Genotyper.hpp), scoped to exactly ParseAlleleName and ReadAssignmentWeight
+// -- see crates/fg-t1k-core/src/genotyper.rs module docs for the full port
+// scope. Both are private C++ methods reached via a `#define private
+// public` trick in shim.cpp (see that file for the full rationale); each
+// call constructs a fresh, throwaway `Genotyper(11)` (matching the
+// `Genotyper genotyper(11)` construction in Genotyper.cpp:207's real
+// `main`), so these are free functions rather than opaque-handle FFI like
+// fg_t1k_seqset_* above -- no persistent state needs to survive between
+// calls.
+//
+// Mirrors `Genotyper::ParseAlleleName(char* allele, char* gene, char*
+// majorAllele, int fieldsType)` (Genotyper.hpp:63-131) after calling
+// `SetAlleleNameStructure(alleleDigitUnits, alleleDelimiter)`
+// (Genotyper.hpp:548-552) to configure the same two fields the real
+// `Genotyper.cpp:336` sets from CLI flags before ever calling
+// ParseAlleleName. `allele` must be a NUL-terminated C string; `out_gene`/
+// `out_major` are caller-allocated buffers, each must be at least
+// `strlen(allele) + 1` bytes (ParseAlleleName never writes a byte beyond
+// `strlen(allele)` into either -- it only NUL-truncates a copy of `allele`
+// at an earlier offset). `alleleDelimiter` is `char` (NOT `unsigned char`)
+// to exactly match the C++ `char alleleDelimiter` field's signedness on the
+// build platform; pass `'\0'` for "not set" (`SetAlleleNameStructure`'s own
+// "no override" sentinel). Returns 0 on success, -1 if the underlying call
+// threw.
+int fg_t1k_genotyper_parse_allele_name(const char* allele, int fieldsType, int alleleDigitUnits,
+                                        char alleleDelimiter, char* out_gene, char* out_major);
+// Mirrors `Genotyper::ReadAssignmentWeight(const _fragmentOverlap& o)`
+// (Genotyper.hpp:205-230) after calling
+// `genotyper.refSet.SetRefSeqSimilarity(refSeqSimilarity)`
+// (SeqSet.hpp:835-838) so `o.similarity`'s comparison thresholds (which
+// derive from `refSet.GetRefSeqSimilarity()`, Genotyper.hpp:212) use the
+// caller's chosen value rather than `SeqSet`'s constructor default (`0.8`,
+// SeqSet.hpp:768). Every other `_fragmentOverlap` field is zero-initialized
+// (`ReadAssignmentWeight` reads only `.similarity`/`.hasN`, per this port's
+// scope -- see genotyper.rs's `FragmentOverlap` doc comment for why the
+// other fields are irrelevant here). Returns the real C++ weight (always in
+// `[0, 1]`), or `-1.0` (an otherwise-impossible return value for this
+// function) if the underlying call threw.
+double fg_t1k_genotyper_read_assignment_weight(double similarity, int hasN,
+                                                double refSeqSimilarity);
 #ifdef __cplusplus
 }
 #endif

@@ -6,6 +6,7 @@ pub mod alignments;
 pub mod bam_extract;
 pub mod extract;
 pub mod fastq;
+pub mod genotyper;
 pub mod kmer;
 pub mod kmer_count;
 pub mod kmer_index;
