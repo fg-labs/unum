@@ -15,18 +15,22 @@
 
 // SeqSet::GetAlignStats (SeqSet.hpp:438-453) is declared `private`, but this
 // shim needs to call it unmodified (not reimplemented) to serve as a real
-// differential oracle for fg_t1k_core::align_algo::get_align_stats. `#define
-// private public` around ONLY this include is the standard, minimally-
-// invasive technique for a test/differential harness to reach a private
-// member without editing the vendored header at all -- it only affects how
-// THIS translation unit's compiler front-end parses SeqSet's access
-// specifiers; it does not change vendor/t1k/SeqSet.hpp on disk, and every
-// other translation unit (the real T1K binaries, any other shim TU) still
-// sees `private` as private.
+// differential oracle for fg_t1k_core::align_algo::get_align_stats.
+// Genotyper::ParseAlleleName/ReadAssignmentWeight (Genotyper.hpp:63,205) are
+// likewise `private`, needed for the Task-5a differential (diff_genotyper_
+// model.rs). `#define private public` around ONLY these includes is the
+// standard, minimally-invasive technique for a test/differential harness to
+// reach a private member without editing the vendored header at all -- it
+// only affects how THIS translation unit's compiler front-end parses
+// SeqSet's/Genotyper's access specifiers; it does not change
+// vendor/t1k/SeqSet.hpp or vendor/t1k/Genotyper.hpp on disk, and every other
+// translation unit (the real T1K binaries, any other shim TU) still sees
+// `private` as private.
 #define private public
 #include "SeqSet.hpp"     // header-only; depends on KmerIndex.hpp + ReadFiles.hpp (zlib) + AlignAlgo.hpp
                            // (AlignAlgo.hpp is pulled in transitively by SeqSet.hpp; both
                            // AlignAlgo::* and struct _posWeight are usable directly)
+#include "Genotyper.hpp"  // header-only; depends on SeqSet.hpp + KmerCount.hpp + SimpleVector.hpp above
 #undef private
 
 #include "alignments.hpp" // header-only; compiled WITH -DHTSLIB (build.rs passes -DHTSLIB plus an
@@ -624,5 +628,48 @@ int fg_t1k_seqset_get_align_stats(const signed char* align, int align_len, int u
         return 0;
     } catch (...) {
         return -1;
+    }
+}
+
+// Free-function FFI for Genotyper's Task-5a deterministic slice (see shim.h
+// for the documented scope): ParseAlleleName and ReadAssignmentWeight. Both
+// are private members reached via the `#define private public` trick above
+// (see that comment for why this is safe/standard). Genotyper's constructor
+// (Genotyper(int kmerLength)) is lightweight enough that a fresh, throwaway
+// instance is constructed per call rather than exposing an opaque handle --
+// neither method touches any Genotyper state beyond
+// alleleDigitUnits/alleleDelimiter (ParseAlleleName) or refSet's
+// refSeqSimilarity (ReadAssignmentWeight), both of which this shim sets
+// explicitly from the caller's arguments before calling.
+int fg_t1k_genotyper_parse_allele_name(const char* allele, int fieldsType, int alleleDigitUnits,
+                                        char alleleDelimiter, char* out_gene, char* out_major) {
+    try {
+        Genotyper genotyper(11);
+        genotyper.SetAlleleNameStructure(alleleDigitUnits, alleleDelimiter);
+        // ParseAlleleName takes non-const char* but never mutates `allele`
+        // itself (SetAlleleNameStructure it is not); const_cast is safe
+        // here, matching the pattern used throughout this shim.
+        genotyper.ParseAlleleName(const_cast<char*>(allele), out_gene, out_major, fieldsType);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+double fg_t1k_genotyper_read_assignment_weight(double similarity, int hasN,
+                                                double refSeqSimilarity) {
+    try {
+        Genotyper genotyper(11);
+        genotyper.refSet.SetRefSeqSimilarity(refSeqSimilarity);
+
+        struct _fragmentOverlap o;
+        memset(&o, 0, sizeof(o));
+        o.similarity = similarity;
+        o.hasN = hasN != 0;
+
+        return genotyper.ReadAssignmentWeight(o);
+    } catch (...) {
+        return -1.0;  // Not a valid ReadAssignmentWeight result (always in [0, 1]);
+                       // an unambiguous "the call threw" sentinel for this f64-returning entry.
     }
 }

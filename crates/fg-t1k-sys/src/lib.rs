@@ -211,6 +211,29 @@ mod ffi {
             out_mismatch_cnt: *mut i32,
             out_indel_cnt: *mut i32,
         ) -> i32;
+
+        /// Mirrors `Genotyper::ParseAlleleName` after
+        /// `SetAlleleNameStructure(alleleDigitUnits, alleleDelimiter)`.
+        /// `out_gene`/`out_major` must each be at least `strlen(allele) + 1`
+        /// bytes. Returns 0 on success, -1 if the underlying call threw.
+        pub fn fg_t1k_genotyper_parse_allele_name(
+            allele: *const c_char,
+            fields_type: i32,
+            allele_digit_units: i32,
+            allele_delimiter: c_char,
+            out_gene: *mut c_char,
+            out_major: *mut c_char,
+        ) -> i32;
+
+        /// Mirrors `Genotyper::ReadAssignmentWeight` on a `_fragmentOverlap`
+        /// built from `similarity`/`has_n`, with `refSet.refSeqSimilarity`
+        /// set to `ref_seq_similarity`. Returns the real C++ weight (always
+        /// in `[0, 1]`), or `-1.0` if the underlying call threw.
+        pub fn fg_t1k_genotyper_read_assignment_weight(
+            similarity: f64,
+            has_n: i32,
+            ref_seq_similarity: f64,
+        ) -> f64;
     }
 }
 #[cfg(feature = "t1k-sys")]
@@ -1248,4 +1271,91 @@ fn c_buf_to_vec(buf: &[u8]) -> Vec<u8> {
 fn bool_or_panic(rc: i32, method: &str) -> bool {
     assert!(rc >= 0, "fg_t1k_alignments_{method} threw a C++ exception");
     rc != 0
+}
+
+/// Free-function FFI wrappers for `Genotyper::ParseAlleleName`/
+/// `ReadAssignmentWeight` (Task 5a's deterministic differential oracle; see
+/// `shim.h`'s `fg_t1k_genotyper_*` doc comments for the documented scope).
+/// Unlike `CppSeqSet`/`CppAlignments` above, these are plain functions --
+/// each call constructs and discards its own throwaway `Genotyper`
+/// internally on the C++ side (see `shim.cpp`), so there is no persistent
+/// handle for a Rust wrapper to own.
+#[cfg(feature = "t1k-sys")]
+pub struct CppGenotyper;
+
+#[cfg(feature = "t1k-sys")]
+impl CppGenotyper {
+    /// Mirrors `Genotyper::ParseAlleleName(allele, gene, majorAllele,
+    /// fieldsType)` after `SetAlleleNameStructure(allele_digit_units,
+    /// allele_delimiter)`. `allele_delimiter` mirrors the C++ `char
+    /// alleleDelimiter` field; pass `b'\0'` for "not set" (the
+    /// `SetAlleleNameStructure` default/no-override sentinel).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `allele` contains an interior NUL byte, or if the underlying
+    /// C++ call threw.
+    #[must_use]
+    pub fn parse_allele_name(
+        allele: &str,
+        fields_type: i32,
+        allele_digit_units: i32,
+        allele_delimiter: u8,
+    ) -> (String, String) {
+        let c_allele =
+            std::ffi::CString::new(allele).expect("allele must not contain an interior NUL byte");
+        // ParseAlleleName does `strcpy(gene, allele); strcpy(majorAllele, allele)`
+        // then truncates each in place, so every output is at most `allele.len()`
+        // bytes plus a NUL. Size the buffers from the input length so an
+        // arbitrarily long allele can never overflow them -- the C++ writes
+        // before any Rust-side length check could run.
+        let buf_len = allele.len() + 1;
+        let mut out_gene = vec![0u8; buf_len];
+        let mut out_major = vec![0u8; buf_len];
+
+        #[allow(clippy::cast_possible_wrap)]
+        let delimiter_c_char = allele_delimiter as std::os::raw::c_char;
+        let rc = unsafe {
+            ffi::fg_t1k_genotyper_parse_allele_name(
+                c_allele.as_ptr(),
+                fields_type,
+                allele_digit_units,
+                delimiter_c_char,
+                out_gene.as_mut_ptr().cast::<std::os::raw::c_char>(),
+                out_major.as_mut_ptr().cast::<std::os::raw::c_char>(),
+            )
+        };
+        assert!(rc == 0, "fg_t1k_genotyper_parse_allele_name threw a C++ exception");
+
+        (
+            String::from_utf8(c_buf_to_vec(&out_gene)).expect("gene must be valid UTF-8"),
+            String::from_utf8(c_buf_to_vec(&out_major)).expect("majorAllele must be valid UTF-8"),
+        )
+    }
+
+    /// Mirrors `Genotyper::ReadAssignmentWeight` on a `_fragmentOverlap`
+    /// built from `similarity`/`has_n`, after
+    /// `refSet.SetRefSeqSimilarity(ref_seq_similarity)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying C++ call threw (surfaced as a `-1.0`
+    /// sentinel -- an otherwise-impossible return value, since the real
+    /// weight is always in `[0, 1]`).
+    #[must_use]
+    pub fn read_assignment_weight(similarity: f64, has_n: bool, ref_seq_similarity: f64) -> f64 {
+        let ret = unsafe {
+            ffi::fg_t1k_genotyper_read_assignment_weight(
+                similarity,
+                i32::from(has_n),
+                ref_seq_similarity,
+            )
+        };
+        assert!(
+            ret >= 0.0,
+            "fg_t1k_genotyper_read_assignment_weight threw a C++ exception (or returned an \
+             out-of-range value)"
+        );
+        ret
+    }
 }
