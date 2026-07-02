@@ -135,9 +135,12 @@ impl GeneCoordTable {
 ///
 /// # Errors
 ///
-/// Returns an error if `path` cannot be opened or read, or if a `gene` row
-/// has no `gene_name "..."` attribute (mirrors `AddGeneCoord.pl`'s
-/// `die "No gene_name", $_, "\n"`).
+/// Returns an error if `path` cannot be opened or read, if a `gene` row has
+/// no `gene_name "..."` attribute (mirrors `AddGeneCoord.pl`'s
+/// `die "No gene_name", $_, "\n"`), or if a `gene` row's start/end coordinate
+/// column is not a valid integer (rather than silently recording the
+/// `-1 -1` "unresolved" sentinel, which is reserved for genes with no `gene`
+/// row at all).
 pub fn load_gtf(path: &Path) -> Result<GeneCoordTable> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("opening GTF file {}", path.display()))?;
@@ -167,13 +170,26 @@ fn load_gtf_reader<R: BufRead>(reader: R) -> Result<GeneCoordTable> {
         let gene_name = gene_name_mapping.get(gtf_gene_name).copied().unwrap_or(gtf_gene_name);
 
         // First `gene` row for this (post-mapping) name wins; later rows for
-        // the same name are ignored.
-        coords.entry(gene_name.to_string()).or_insert_with(|| GeneCoord {
-            chrom: add_chr_prefix(cols[0]),
-            start: cols[3].parse().unwrap_or(UNRESOLVED_COORD),
-            end: cols[4].parse().unwrap_or(UNRESOLVED_COORD),
-            strand: cols[6].chars().next().unwrap_or(DEFAULT_STRAND),
-        });
+        // the same name are ignored. Parse the coordinates eagerly (only when
+        // this is the first row for the gene) and surface a malformed
+        // start/end as an error, rather than coercing it to the `-1`
+        // sentinel that means "gene absent from GTF".
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            coords.entry(gene_name.to_string())
+        {
+            let start: i64 = cols[3]
+                .parse()
+                .with_context(|| format!("unparsable gene start coordinate in GTF row: {line}"))?;
+            let end: i64 = cols[4]
+                .parse()
+                .with_context(|| format!("unparsable gene end coordinate in GTF row: {line}"))?;
+            entry.insert(GeneCoord {
+                chrom: add_chr_prefix(cols[0]),
+                start,
+                end,
+                strand: cols[6].chars().next().unwrap_or(DEFAULT_STRAND),
+            });
+        }
     }
 
     Ok(GeneCoordTable { coords })
@@ -332,6 +348,15 @@ chr19\tHAVANA\tgene\t54769793\t54784332\t.\t+\t.\tgene_name \"KIR2DL1\";
     #[test]
     fn gene_row_with_no_gene_name_attribute_errors() {
         let gtf = "chr19\tHAVANA\tgene\t1\t100\t.\t+\t.\tgene_id \"X\";\n";
+        assert!(load_gtf_reader(gtf.as_bytes()).is_err());
+    }
+
+    /// A `gene` row whose start/end coordinate column is not an integer is a
+    /// hard error, not silently coerced to the `-1 -1` "unresolved" sentinel
+    /// (which is reserved for genes with no `gene` row at all).
+    #[test]
+    fn gene_row_with_unparsable_coordinate_errors() {
+        let gtf = "chr19\tHAVANA\tgene\tnope\t100\t.\t+\t.\tgene_name \"KIR2DL1\";\n";
         assert!(load_gtf_reader(gtf.as_bytes()).is_err());
     }
 }
