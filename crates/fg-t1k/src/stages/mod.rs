@@ -10,6 +10,7 @@ use anyhow::Context;
 
 pub mod build;
 pub mod extract;
+pub mod genotype;
 
 /// Runs the full extract -> genotype -> analyze pipeline for `args`.
 ///

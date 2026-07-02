@@ -21,6 +21,11 @@ pub enum Commands {
     /// `fastq-extractor`). NOT YET wired into the `run`/`--engine` strangler router -- see
     /// `crate::stages::extract`'s module docs for that follow-up.
     Extract(ExtractArgs),
+
+    /// Call a genotype from candidate reads against a reference (the Rust port of
+    /// `genotyper`). NOT YET wired into the `run`/`--engine` strangler router -- see
+    /// `crate::stages::genotype`'s module docs for that follow-up.
+    Genotype(GenotypeArgs),
 }
 
 /// Arguments for the `run` subcommand, mirroring `run-t1k`'s flag names for the paired-end
@@ -146,4 +151,59 @@ pub struct ExtractArgs {
     /// value.
     #[arg(short = 's', default_value_t = fg_t1k_core::extract::DEFAULT_REF_SEQ_SIMILARITY)]
     pub similarity: f64,
+}
+
+/// Arguments for the `genotype` subcommand. Mirrors `genotyper`'s flag names (`Genotyper.cpp`'s
+/// `usage[]`) for the paired/single-end candidate-FASTQ-plus-reference-sequence-FASTA path this
+/// port targets (barcode/`-a`/`--alleleWhitelist`/`--outputReadAssignment` input are not exposed
+/// here -- see `crate::stages::genotype`'s module docs).
+#[derive(Args, Debug)]
+pub struct GenotypeArgs {
+    /// Path to the reference sequence FASTA file (e.g. `kir_rna_seq.fa`).
+    #[arg(short = 'f', value_name = "STRING")]
+    pub ref_seq_fasta: String,
+
+    /// Path to the first-mate candidate-read FASTQ file (paired mode; requires `-2`).
+    #[arg(short = '1', value_name = "STRING")]
+    pub mate1: Option<String>,
+
+    /// Path to the second-mate candidate-read FASTQ file (paired mode; requires `-1`).
+    #[arg(short = '2', value_name = "STRING")]
+    pub mate2: Option<String>,
+
+    /// Path to a single-end candidate-read FASTQ file (mutually exclusive with `-1`/`-2`).
+    #[arg(short = 'u', value_name = "STRING")]
+    pub single: Option<String>,
+
+    /// Prefix of the output files (`{prefix}_genotype.tsv`, `{prefix}_allele.tsv`).
+    #[arg(short = 'o', long = "prefix", default_value = "t1k", value_name = "STRING")]
+    pub prefix: String,
+
+    /// Number of threads. Accepted for CLI compatibility -- this port always runs
+    /// single-threaded internally (mirrors `Genotyper.cpp`'s `threadCnt <= 1` code path, the
+    /// only one this port reproduces; both paths are deterministically byte-identical for a
+    /// single genotyping run, so `-t 1` is the only value this CLI needs to accept for the
+    /// end-to-end differential to compare cleanly).
+    #[arg(short = 't', default_value_t = 1)]
+    pub threads: u32,
+
+    /// Maximal number of alleles per read.
+    #[arg(short = 'n', default_value_t = 2000)]
+    pub max_assign_cnt: i32,
+
+    /// Filter alignments with alignment similarity less than the specified value.
+    #[arg(short = 's', default_value_t = 0.8)]
+    pub similarity: f64,
+
+    /// Filter if abundance is less than the frac of the dominant allele.
+    #[arg(long = "frac", default_value_t = 0.15)]
+    pub filter_frac: f64,
+
+    /// Filter genes with average coverage less than the specified value.
+    #[arg(long = "cov", default_value_t = 1.0)]
+    pub filter_cov: f64,
+
+    /// The effect from other gene's expression.
+    #[arg(long = "crossGeneRate", default_value_t = 0.04)]
+    pub cross_gene_rate: f64,
 }
