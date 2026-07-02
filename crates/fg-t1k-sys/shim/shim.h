@@ -43,6 +43,41 @@ void fg_t1k_kmercount_free(void* p);
 int fg_t1k_kmercount_add_count(void* p, const char* read);
 int fg_t1k_kmercount_get_count(void* p, const char* kmer);
 double fg_t1k_kmercount_jaccard(void* a, void* b);
+
+// Opaque-handle FFI for KmerIndex: lets Rust drive a real C++ KmerIndex
+// instance (Insert/Search/Remove/BuildIndexFromRead) for lockstep
+// differential testing. The handle is an opaque `void*` (really a
+// `KmerIndex*`); callers must free it exactly once via
+// fg_t1k_kmerindex_free. `fg_t1k_kmerindex_new` returns NULL if construction
+// throws (KmerIndex's constructor does `new std::map<...>[1000003]`, a large
+// allocation that can throw std::bad_alloc) -- callers MUST check for a NULL
+// handle before using it.
+//
+// `idx`/`offset` are `uint32_t` to match T1K's `index_t` (`defs.h:15`:
+// `typedef uint32_t index_t`), the declared parameter/field type of
+// `_indexInfo` and `Insert`/`Remove`/`BuildIndexFromRead`'s `idx` and
+// `offset` parameters. `strand` stays `int`, matching `Insert`/`Remove`'s
+// `int strand` parameter -- it is accepted but never stored (the `strand`
+// field of `_indexInfo` is commented out in the vendored header).
+//
+// The KmerCode arguments are the same opaque handles produced by
+// fg_t1k_kmercode_new (see above), so a differential test can drive one
+// KmerCode instance and feed it to both the Rust and C++ KmerIndex sides in
+// lockstep, guaranteeing identical GetCode()/IsValid() inputs.
+void* fg_t1k_kmerindex_new(void);
+void fg_t1k_kmerindex_free(void* p);
+void fg_t1k_kmerindex_insert(void* idxp, void* kcp, uint32_t idx, uint32_t offset, int strand);
+void fg_t1k_kmerindex_remove(void* idxp, void* kcp, uint32_t idx, uint32_t offset, int strand);
+int fg_t1k_kmerindex_search_size(void* idxp, void* kcp);
+// Fills `*out_idx`/`*out_offset` with the `i`-th entry (0-based) of the most
+// recent Search result. `i` must be in `0..fg_t1k_kmerindex_search_size(...)`.
+void fg_t1k_kmerindex_search_get(void* idxp, void* kcp, int i, uint32_t* out_idx,
+                                  uint32_t* out_offset);
+// `s` need not be NUL-terminated; exactly `len` bytes are read (matches
+// `BuildIndexFromRead(KmerCode&, char* s, int len, int id, int shift = 0)`,
+// which never calls strlen on `s`).
+void fg_t1k_kmerindex_build_index_from_read(void* idxp, void* kcp, const char* s, int len,
+                                              int id, int shift);
 #ifdef __cplusplus
 }
 #endif

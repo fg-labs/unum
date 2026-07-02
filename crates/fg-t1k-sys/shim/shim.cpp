@@ -1,5 +1,6 @@
 #include "KmerCode.hpp"   // header-only; declares extern nucToNum/numToNuc
 #include "KmerCount.hpp"  // header-only; depends on KmerCode.hpp above
+#include "KmerIndex.hpp"  // header-only; depends on KmerCode.hpp + SimpleVector.hpp
 #include "shim.h"
 
 // nucToNum/numToNuc are extern in the headers, defined only in the T1K .cpp files
@@ -90,5 +91,67 @@ double fg_t1k_kmercount_jaccard(void* a, void* b) {
             *static_cast<const KmerCount*>(b));
     } catch (...) {
         return -1.0;
+    }
+}
+
+// Opaque-handle FFI for KmerIndex. KmerIndex's constructor allocates heavy
+// state (`new std::map<uint64_t, SimpleVector<_indexInfo>>[1000003]`), which
+// can throw std::bad_alloc; letting an exception unwind through this extern
+// "C" boundary is undefined behavior, so construction is wrapped in
+// try/catch and returns NULL on failure (mirrors fg_t1k_kmercount_new
+// above). Insert/Remove/Search only touch std::map/SimpleVector operations
+// that can also throw (bad_alloc), so those are guarded too, even though a
+// throw there is not expected in practice.
+void* fg_t1k_kmerindex_new(void) {
+    try {
+        return new KmerIndex();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void fg_t1k_kmerindex_free(void* p) { delete static_cast<KmerIndex*>(p); }
+
+void fg_t1k_kmerindex_insert(void* idxp, void* kcp, uint32_t idx, uint32_t offset, int strand) {
+    try {
+        static_cast<KmerIndex*>(idxp)->Insert(*static_cast<KmerCode*>(kcp), idx, offset, strand);
+    } catch (...) {
+        // No return value to signal failure through; Insert has no
+        // observable failure mode in the differential test's usage.
+    }
+}
+
+void fg_t1k_kmerindex_remove(void* idxp, void* kcp, uint32_t idx, uint32_t offset, int strand) {
+    try {
+        static_cast<KmerIndex*>(idxp)->Remove(*static_cast<KmerCode*>(kcp), idx, offset, strand);
+    } catch (...) {
+    }
+}
+
+int fg_t1k_kmerindex_search_size(void* idxp, void* kcp) {
+    try {
+        SimpleVector<struct _indexInfo>* list =
+            static_cast<KmerIndex*>(idxp)->Search(*static_cast<KmerCode*>(kcp));
+        return list->Size();
+    } catch (...) {
+        return -1;
+    }
+}
+
+void fg_t1k_kmerindex_search_get(void* idxp, void* kcp, int i, uint32_t* out_idx,
+                                  uint32_t* out_offset) {
+    SimpleVector<struct _indexInfo>* list =
+        static_cast<KmerIndex*>(idxp)->Search(*static_cast<KmerCode*>(kcp));
+    struct _indexInfo entry = (*list)[i];
+    *out_idx = entry.idx;
+    *out_offset = entry.offset;
+}
+
+void fg_t1k_kmerindex_build_index_from_read(void* idxp, void* kcp, const char* s, int len, int id,
+                                             int shift) {
+    try {
+        static_cast<KmerIndex*>(idxp)->BuildIndexFromRead(
+            *static_cast<KmerCode*>(kcp), const_cast<char*>(s), len, id, shift);
+    } catch (...) {
     }
 }

@@ -3,4 +3,5 @@
 
 pub mod kmer;
 pub mod kmer_count;
+pub mod kmer_index;
 pub mod refbuild;

@@ -47,6 +47,42 @@ mod ffi {
         pub fn fg_t1k_kmercount_add_count(p: *mut c_void, read: *const c_char) -> i32;
         pub fn fg_t1k_kmercount_get_count(p: *mut c_void, kmer: *const c_char) -> i32;
         pub fn fg_t1k_kmercount_jaccard(a: *mut c_void, b: *mut c_void) -> f64;
+
+        /// Constructs a C++ `KmerIndex()`. Returns NULL if construction
+        /// throws (the shim catches every exception at this boundary); the
+        /// caller MUST check for a NULL return before using the handle.
+        pub fn fg_t1k_kmerindex_new() -> *mut c_void;
+        pub fn fg_t1k_kmerindex_free(p: *mut c_void);
+        pub fn fg_t1k_kmerindex_insert(
+            idxp: *mut c_void,
+            kcp: *mut c_void,
+            idx: u32,
+            offset: u32,
+            strand: i32,
+        );
+        pub fn fg_t1k_kmerindex_remove(
+            idxp: *mut c_void,
+            kcp: *mut c_void,
+            idx: u32,
+            offset: u32,
+            strand: i32,
+        );
+        pub fn fg_t1k_kmerindex_search_size(idxp: *mut c_void, kcp: *mut c_void) -> i32;
+        pub fn fg_t1k_kmerindex_search_get(
+            idxp: *mut c_void,
+            kcp: *mut c_void,
+            i: i32,
+            out_idx: *mut u32,
+            out_offset: *mut u32,
+        );
+        pub fn fg_t1k_kmerindex_build_index_from_read(
+            idxp: *mut c_void,
+            kcp: *mut c_void,
+            s: *const c_char,
+            len: i32,
+            id: i32,
+            shift: i32,
+        );
     }
 }
 #[cfg(feature = "t1k-sys")]
@@ -216,5 +252,144 @@ impl CppKmerCount {
 impl Drop for CppKmerCount {
     fn drop(&mut self) {
         unsafe { ffi::fg_t1k_kmercount_free(self.handle) }
+    }
+}
+
+/// A single `(idx, offset)` entry, mirroring the FFI-exposed fields of the
+/// C++ `_indexInfo` struct (`KmerIndex.hpp:12-17`). Used only by
+/// [`CppKmerIndex::search`] to give differential tests an owned,
+/// order-preserving snapshot of a C++ `Search` result.
+#[cfg(feature = "t1k-sys")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CppIndexInfo {
+    pub idx: u32,
+    pub offset: u32,
+}
+
+/// Safe Rust wrapper around the opaque C++ `KmerIndex*` handle.
+///
+/// Owns the handle for its lifetime: [`CppKmerIndex::new`] allocates the C++
+/// object via `fg_t1k_kmerindex_new` and `Drop` calls `fg_t1k_kmerindex_free`
+/// exactly once. Construction checks the returned handle for NULL: the C++
+/// constructor allocates heavy state (`new std::map<uint64_t,
+/// SimpleVector<_indexInfo>>[1000003]`), which can throw `std::bad_alloc`;
+/// the shim catches that at the `extern "C"` boundary (an exception may not
+/// unwind across it) and returns NULL instead, so this wrapper must -- and
+/// does -- refuse to proceed with a NULL handle rather than silently
+/// dereferencing it later.
+///
+/// Every method takes a [`CppKmerCode`] (the same opaque-handle wrapper used
+/// for the KmerCode differential tests), so a test can drive one KmerCode
+/// instance and feed it to both the Rust and C++ KmerIndex sides in
+/// lockstep, guaranteeing identical `GetCode()`/`IsValid()` inputs.
+#[cfg(feature = "t1k-sys")]
+pub struct CppKmerIndex {
+    handle: *mut std::os::raw::c_void,
+}
+
+#[cfg(feature = "t1k-sys")]
+impl CppKmerIndex {
+    /// Constructs a new C++ `KmerIndex`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying `fg_t1k_kmerindex_new` call returns NULL
+    /// (i.e. the C++ constructor threw an exception, most plausibly
+    /// `std::bad_alloc`).
+    #[must_use]
+    pub fn new() -> Self {
+        let handle = unsafe { ffi::fg_t1k_kmerindex_new() };
+        assert!(
+            !handle.is_null(),
+            "fg_t1k_kmerindex_new() returned NULL: C++ KmerIndex construction failed"
+        );
+        Self { handle }
+    }
+
+    /// Mirrors `KmerIndex::Insert`. `strand` is accepted but ignored by the
+    /// C++ side (the `strand` field of `_indexInfo` is commented out).
+    pub fn insert(&mut self, kmer_code: &CppKmerCode, idx: u32, offset: u32, strand: i32) {
+        unsafe { ffi::fg_t1k_kmerindex_insert(self.handle, kmer_code.handle, idx, offset, strand) }
+    }
+
+    /// Mirrors `KmerIndex::Remove`. `strand` is accepted but ignored by the
+    /// C++ side, same as [`CppKmerIndex::insert`].
+    pub fn remove(&mut self, kmer_code: &CppKmerCode, idx: u32, offset: u32, strand: i32) {
+        unsafe { ffi::fg_t1k_kmerindex_remove(self.handle, kmer_code.handle, idx, offset, strand) }
+    }
+
+    /// Mirrors `KmerIndex::Search`, returning an owned, order-preserving
+    /// snapshot of the matched `SimpleVector<_indexInfo>` (or an empty `Vec`
+    /// if the k-mer is invalid or absent from the index -- matching the C++
+    /// `nullHit` sentinel).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `fg_t1k_kmerindex_search_size` returns a negative size
+    /// (which would indicate a shim-level bug; `SimpleVector::Size()` cannot
+    /// itself return a negative value).
+    #[must_use]
+    pub fn search(&self, kmer_code: &CppKmerCode) -> Vec<CppIndexInfo> {
+        let size_i32 = unsafe { ffi::fg_t1k_kmerindex_search_size(self.handle, kmer_code.handle) };
+        let size = usize::try_from(size_i32).unwrap_or_else(|_| {
+            panic!("fg_t1k_kmerindex_search_size returned a negative size: {size_i32}")
+        });
+        let mut out = Vec::with_capacity(size);
+        for i in 0..size_i32 {
+            let mut idx: u32 = 0;
+            let mut offset: u32 = 0;
+            unsafe {
+                ffi::fg_t1k_kmerindex_search_get(
+                    self.handle,
+                    kmer_code.handle,
+                    i,
+                    &mut idx,
+                    &mut offset,
+                );
+            }
+            out.push(CppIndexInfo { idx, offset });
+        }
+        out
+    }
+
+    /// Mirrors `KmerIndex::BuildIndexFromRead`. `s` need not be
+    /// NUL-terminated; exactly `s.len()` bytes are read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `s.len()` does not fit in an `i32` (mirrors the C++ side's
+    /// `int len` parameter).
+    pub fn build_index_from_read(
+        &mut self,
+        kmer_code: &mut CppKmerCode,
+        s: &[u8],
+        id: i32,
+        shift: i32,
+    ) {
+        let len = i32::try_from(s.len()).expect("read length must fit in an i32");
+        unsafe {
+            ffi::fg_t1k_kmerindex_build_index_from_read(
+                self.handle,
+                kmer_code.handle,
+                s.as_ptr().cast::<std::os::raw::c_char>(),
+                len,
+                id,
+                shift,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "t1k-sys")]
+impl Default for CppKmerIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "t1k-sys")]
+impl Drop for CppKmerIndex {
+    fn drop(&mut self) {
+        unsafe { ffi::fg_t1k_kmerindex_free(self.handle) }
     }
 }
