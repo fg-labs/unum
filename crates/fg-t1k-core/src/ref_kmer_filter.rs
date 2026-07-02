@@ -7,11 +7,13 @@
 //! that `FastqExtractor`/`BamExtractor` use to decide whether a read is
 //! worth keeping for downstream genotyping: reference load + index build
 //! (`SeqSet::InputRefFa`), k-mer hit collection (`SeqSet::GetHitsFromRead`),
-//! and the bucket-count gate at the top of `SeqSet::HasHitInSet`. It does
-//! **not** port `GetOverlapsFromHits`/`AlignAlgo` (banded Smith-Waterman
-//! alignment, LIS-based overlap extraction) -- that is out of scope here and
-//! planned for a later phase. See "Deliberately NOT ported" below for the
-//! precise, load-bearing consequence of that scope cut.
+//! and BOTH gates of `SeqSet::HasHitInSet` -- the bucket-count gate AND the
+//! `GetOverlapsFromHits`-based (LIS hit-chaining) mismatch-threshold
+//! confirmation (ported in [`crate::overlap`]). It does **not** port
+//! `AlignAlgo` (banded Smith-Waterman alignment) -- `GetOverlapsFromHits`,
+//! as called from `HasHitInSet`, never invokes it (see [`crate::overlap`]'s
+//! module docs); real alignment-based scoring is a separate, later-phase
+//! concern unrelated to this gate.
 //!
 //! # `kmerLength` is a caller-supplied parameter here, not a fixed constant
 //!
@@ -45,7 +47,7 @@
 //! the differential tests use `kmer_length = 9` to match that real-world
 //! value precisely.
 //!
-//! # Deliberately NOT ported: `GetOverlapsFromHits`/`AlignAlgo` confirmation
+//! # `HasHitInSet`'s two gates, both now ported
 //!
 //! Stock `SeqSet::HasHitInSet` (`SeqSet.hpp:1915-1990`) does two things in
 //! sequence:
@@ -53,27 +55,22 @@
 //!    `(strand-tag, seqIdx)`, and find the single largest bucket. If
 //!    `kmerLength * <largest bucket size> < hitLenRequired`, return `false`
 //!    immediately (`SeqSet.hpp:1929-1964`).
-//! 2. Otherwise, run `GetOverlapsFromHits` (LIS-based colinear hit chaining,
-//!    with `AlignAlgo`-based banded alignment to fill gaps between chained
-//!    hits and compute an exact `matchCnt`/similarity) on the winning
-//!    bucket, and only return `true` if at least one resulting overlap's
-//!    implied mismatch count is within `int(len * (1 - refSeqSimilarity)) *
-//!    kmerLength` (`SeqSet.hpp:1966-1983`).
+//! 2. Otherwise, run `GetOverlapsFromHits` (LIS-based colinear hit chaining;
+//!    NOT `AlignAlgo`-based -- see [`crate::overlap`]'s module docs) on the
+//!    winning bucket, and only return `true` if at least one resulting
+//!    overlap's implied mismatch count is within `int(len *
+//!    (1 - refSeqSimilarity)) * kmerLength` (`SeqSet.hpp:1966-1983`).
 //!
-//! [`RefKmerFilter::has_hit_in_set`] implements ONLY step 1 (the bucket-count
-//! gate) and returns `true` as soon as it passes -- step 2's alignment-based
-//! confirmation is out of scope for this port (see the module docs at the
-//! crate root / project `CLAUDE.md` "Phase 4" note). This means this port's
-//! `has_hit_in_set` is a **true superset** of stock's: for any read, if stock
-//! returns `true`, this port also returns `true` (step 1 passing is
-//! necessary for stock's `true`), but this port can return `true` in rare
-//! cases where stock's step 2 would additionally reject the read (e.g. the
-//! winning bucket's hits are numerous but not colinear/alignable -- repeat-
-//! driven false hits that don't actually chain into one consistent overlap).
-//! The differential test (`crates/fg-t1k-sys/tests/diff_refkmerfilter.rs`)
-//! deliberately chooses read categories designed to avoid this gap (clean
-//! reference substrings that trivially pass alignment, and clear non-matches
-//! that already fail step 1) rather than loosening any assertion.
+//! [`RefKmerFilter::has_hit_in_set`] implements BOTH gates: step 1 (the
+//! bucket-count gate) followed by step 2 (calling
+//! [`crate::overlap::get_overlaps_from_hits`] on the winning bucket's hits,
+//! reconstructed in original insertion order -- see that function's doc
+//! comment for why a stable filter of `scratch.hits` is exactly equivalent
+//! to stock's per-hit `buckets[tag][idx].PushBack(...)` construction). This
+//! makes `has_hit_in_set` byte/value-identical to stock's `HasHitInSet` (not
+//! merely a superset), confirmed by an adversarial differential
+//! (`crates/fg-t1k-sys/tests/diff_refkmerfilter.rs`) against the real C++
+//! oracle across curated AND arbitrary/random/noncolinear/tie-inducing reads.
 //!
 //! # Reused Phase-2 primitives
 //!
@@ -84,10 +81,12 @@
 //! exactly what `SeqSet::InputRefFa`'s `seqIndex.BuildIndexFromRead(...)`
 //! call needs (`SeqSet.hpp:902`); see `kmer_index`'s module docs for that
 //! dedup's exact semantics (already covered by Phase-2's differential
-//! tests, not re-derived here).
+//! tests, not re-derived here). Also reuses [`crate::overlap`]'s
+//! `get_overlaps_from_hits`/LIS port for `has_hit_in_set`'s gate 2.
 
 use crate::kmer::KmerCode;
 use crate::kmer_index::KmerIndex;
+use crate::overlap::{self, OverlapHit};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -102,25 +101,68 @@ use std::path::Path;
 /// loading).
 const DEFAULT_HIT_LEN_REQUIRED: i32 = 31;
 
+/// `SeqSet`'s default `radius` (`SeqSet.hpp:763`), used by
+/// [`RefKmerFilter::has_hit_in_set`]'s gate 2 (`overlap::get_overlaps_from_hits`'s
+/// `radius` parameter). Fixed at the `SeqSet(kmerLength)` constructor
+/// default for the same reason as [`DEFAULT_HIT_LEN_REQUIRED`]: no
+/// `SetRadius` call exists on the plain-construction path this port models.
+const DEFAULT_RADIUS: i32 = 10;
+
+/// `SeqSet`'s default `refSeqSimilarity` (`SeqSet.hpp:768`), used by
+/// [`RefKmerFilter::has_hit_in_set`]'s gate 2 mismatch-threshold computation
+/// (`SeqSet.hpp:1973`). Fixed at the `SeqSet(kmerLength)` constructor
+/// default; see [`DEFAULT_HIT_LEN_REQUIRED`]'s doc comment for why this port
+/// does not replicate any dynamic `Set*` call.
+const DEFAULT_REF_SEQ_SIMILARITY: f64 = 0.8;
+
+/// `SeqSet::isLongSeqSet`'s default (`SeqSet.hpp:765`). Always `false` on the
+/// plain-construction path this port models (no public setter reachable from
+/// `SeqSet(kmerLength)`; see `get_hits_from_read`'s doc comment for the same
+/// point made about `downSample`). Passed straight through to
+/// `overlap::get_overlaps_from_hits`'s `is_long_seq_set` parameter.
+const IS_LONG_SEQ_SET: bool = false;
+
 /// A single k-mer hit collected by [`RefKmerFilter::get_hits_from_read`],
 /// mirroring the FFI-relevant fields of T1K's `struct _hit`
-/// (`SeqSet.hpp:66-87`; `repeats` is not modeled -- it is only consumed by
-/// the out-of-scope `GetOverlapsFromHits`).
+/// (`SeqSet.hpp:66-87`), including `repeats` (`_hit::repeats`,
+/// `SeqSet.hpp:72`), populated exactly as stock does (`SeqSet.hpp:
+/// 1122,1143,1189,1210`: `repeats = size` of the `seqIndex.Search(...)`
+/// result, since `has_hit_in_set`'s `GetHitsFromRead` call always has
+/// `barcode == -1` and `puse == NULL`, `SeqSet.hpp:1923`) so
+/// [`overlap::get_overlaps_from_hits`]'s `filter == 1` branches (not
+/// reachable from `has_hit_in_set`, which always passes `filter == 0`, but
+/// ported generally -- see that module's docs) have a correct `repeats` to
+/// read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Hit {
     /// The reference sequence index this hit maps to (`_indexInfo::idx`).
     pub idx: u32,
     /// The offset within that reference sequence (`_indexInfo::offset`).
-    #[allow(dead_code)]
-    // Not consumed by `has_hit_in_set`'s gate-only slice; kept for parity/future use.
     pub offset: u32,
     /// The offset within the (possibly reverse-complemented) read where this
     /// k-mer window starts (`_hit::readOffset`).
-    #[allow(dead_code)]
     pub read_offset: i32,
     /// `1` for a forward-strand hit, `-1` for a reverse-complement-strand
     /// hit (`_hit::strand`).
     pub strand: i8,
+    /// How many times this hit's k-mer occurs across the whole reference
+    /// index (`_hit::repeats`) -- see this struct's doc comment.
+    pub repeats: i32,
+}
+
+impl Hit {
+    /// Converts to [`overlap::OverlapHit`], the standalone hit type
+    /// [`overlap::get_overlaps_from_hits`] operates on (see that module's
+    /// docs for why it doesn't reuse this crate's `Hit` directly).
+    fn to_overlap_hit(self) -> OverlapHit {
+        OverlapHit {
+            idx: self.idx,
+            offset: self.offset,
+            read_offset: self.read_offset,
+            strand: self.strand,
+            repeats: self.repeats,
+        }
+    }
 }
 
 /// Reusable scratch buffers for [`RefKmerFilter`]'s per-read query path
@@ -169,6 +211,11 @@ pub struct RefKmerFilter {
     /// [`DEFAULT_HIT_LEN_REQUIRED`]'s doc comment for why this is not
     /// dynamically computed the way `FastqExtractor.cpp`'s `main` does.
     hit_len_required: i32,
+    /// `SeqSet::refSeqSimilarity` (`SeqSet.hpp:231`), used by
+    /// [`RefKmerFilter::has_hit_in_set`]'s gate 2 mismatch-threshold
+    /// computation. Fixed at the `SeqSet(kmerLength)` constructor default;
+    /// see [`DEFAULT_REF_SEQ_SIMILARITY`]'s doc comment.
+    ref_seq_similarity: f64,
 }
 
 impl RefKmerFilter {
@@ -221,6 +268,7 @@ impl RefKmerFilter {
             seq_count,
             seq_names,
             hit_len_required: DEFAULT_HIT_LEN_REQUIRED,
+            ref_seq_similarity: DEFAULT_REF_SEQ_SIMILARITY,
         })
     }
 
@@ -268,34 +316,46 @@ impl RefKmerFilter {
         !is_low_complexity(read) && self.has_hit_in_set(read, scratch)
     }
 
-    /// Ported from the bucket-count gate at the top of `SeqSet::HasHitInSet`
-    /// (`SeqSet.hpp:1915-1964`). See the module docs for the precise,
-    /// deliberate scope cut versus stock's full function (which continues on
-    /// to an `AlignAlgo`-based confirmation step this port does not
-    /// implement).
+    /// Diagnostic-only: evaluates ONLY `HasHitInSet`'s bucket-count gate
+    /// (`SeqSet.hpp:1929-1964`, i.e. exactly what Task 3.1's
+    /// `has_hit_in_set` computed before this task added gate 2) and returns
+    /// whether it alone would accept `read`, WITHOUT running gate 2's
+    /// `GetOverlapsFromHits`-based confirmation.
     ///
-    /// Exposed as `pub(crate)` (rather than fully private) so
-    /// `crates/fg-t1k-sys`'s differential test can drive it directly if
-    /// useful, matching the established pattern of exposing internals to
-    /// same-workspace differential tests without making them part of the
-    /// public API surface.
+    /// This exists purely so a differential test can quantify how many reads
+    /// gate 2 actually rejects that gate 1 alone would have accepted (i.e.
+    /// how many reads exercise the fix this task makes) -- it is not used by
+    /// [`RefKmerFilter::has_hit_in_set`]/[`RefKmerFilter::is_good_candidate`]
+    /// itself (both call [`RefKmerFilter::bucket_count_gate`] directly, not
+    /// this wrapper). See `crates/fg-t1k-sys/tests/diff_refkmerfilter.rs`
+    /// for the consumer.
     #[must_use]
-    pub(crate) fn has_hit_in_set(&self, read: &[u8], scratch: &mut Scratch) -> bool {
+    pub fn passes_bucket_count_gate_only(&self, read: &[u8], scratch: &mut Scratch) -> bool {
+        self.bucket_count_gate(read, scratch).is_some()
+    }
+
+    /// Ported from the bucket-count gate at the top of `SeqSet::HasHitInSet`
+    /// (`SeqSet.hpp:1929-1964`): collects hits from both strands, buckets
+    /// them by `(strand-tag, seqIdx)`, and finds the single largest bucket.
+    /// Returns `None` if that gate rejects the read (mirrors stock's early
+    /// `return false`), otherwise `Some((winning_bucket, bucket_size))`.
+    fn bucket_count_gate(&self, read: &[u8], scratch: &mut Scratch) -> Option<((i8, u32), u32)> {
         let len = read.len();
         if len < self.kmer_length {
-            return false;
+            return None;
         }
 
         self.get_hits_from_read(read, scratch);
         if scratch.hits.is_empty() {
-            return false;
+            return None;
         }
 
         // Bucket sort: (tag, seqIdx) -> hit count, mirroring stock's
         // `buckets[tag][idx].PushBack(...)` (SeqSet.hpp:1935-1939), except
-        // we only need each bucket's SIZE for the gate (not its member
-        // hits, which only the excluded `GetOverlapsFromHits` step
-        // consumes), so a count map suffices.
+        // we only need each bucket's SIZE to pick the winner (gate 2 below
+        // reconstructs the winning bucket's actual MEMBER hits separately,
+        // by filtering `scratch.hits` -- see the comment at that call site),
+        // so a count map suffices here.
         scratch.buckets.clear();
         for hit in &scratch.hits {
             let tag = i8::from(hit.strand == 1);
@@ -305,12 +365,7 @@ impl RefKmerFilter {
         // add02ca touched-buckets selection -- see `select_best_bucket`'s
         // doc comment for why this is byte-identical in outcome to stock's
         // O(seqCnt) full-array scan (SeqSet.hpp:1941-1957).
-        let Some((_best_bucket, max)) = select_best_bucket(&scratch.buckets) else {
-            // Unreachable given the `hits.is_empty()` check above (at least
-            // one hit implies at least one non-empty bucket), but handled
-            // explicitly rather than via an `unwrap`/`expect` panic path.
-            return false;
-        };
+        let (best_bucket, max) = select_best_bucket(&scratch.buckets)?;
 
         // SeqSet.hpp:1959: `if (kmerLength * max < hitLenRequired) return false;`
         // Widened to i64 to avoid any theoretical `i32` overflow from the
@@ -320,14 +375,88 @@ impl RefKmerFilter {
         // question).
         let kmer_length_i64 = i64::try_from(self.kmer_length).unwrap_or(i64::MAX);
         if kmer_length_i64 * i64::from(max) < i64::from(self.hit_len_required) {
-            return false;
+            return None;
         }
 
-        // Stock continues here with GetOverlapsFromHits + an AlignAlgo-based
-        // mismatch-threshold confirmation (SeqSet.hpp:1966-1990) -- see the
-        // module docs' "Deliberately NOT ported" section for why this port
-        // stops at the bucket-count gate and returns `true` immediately.
-        true
+        Some((best_bucket, max))
+    }
+
+    /// Ported from `SeqSet::HasHitInSet` in full (`SeqSet.hpp:1915-1990`):
+    /// the bucket-count gate ([`RefKmerFilter::bucket_count_gate`]) followed
+    /// by the `GetOverlapsFromHits`-based mismatch-threshold confirmation.
+    /// See the module docs for the overall two-gate structure and
+    /// [`crate::overlap`]'s module docs for why gate 2 needs no
+    /// `AlignAlgo`/Smith-Waterman.
+    ///
+    /// Exposed as `pub(crate)` (rather than fully private) so
+    /// `crates/fg-t1k-sys`'s differential test can drive it directly if
+    /// useful, matching the established pattern of exposing internals to
+    /// same-workspace differential tests without making them part of the
+    /// public API surface.
+    #[must_use]
+    pub(crate) fn has_hit_in_set(&self, read: &[u8], scratch: &mut Scratch) -> bool {
+        let len = read.len();
+        let Some((best_bucket, _max)) = self.bucket_count_gate(read, scratch) else {
+            return false;
+        };
+
+        // Gate 2 (SeqSet.hpp:1966-1983): GetOverlapsFromHits on the winning
+        // bucket, then accept if any resulting overlap's implied mismatch
+        // count is within the similarity-derived threshold.
+        //
+        // Reconstructing the winning bucket's MEMBER hits: stock builds each
+        // `buckets[tag][idx]` by a single forward pass over the full hit
+        // list, `PushBack`-ing each hit into its `(tag, idx)` bucket in
+        // encounter order (SeqSet.hpp:1935-1939) -- i.e. a stable filter of
+        // the full hit list by `(tag, idx)`. `scratch.hits` (filled by
+        // `get_hits_from_read` just above) is exactly that full hit list, in
+        // the same forward-strand-then-reverse-strand encounter order stock
+        // produces it in, so filtering it by `(tag, idx) == best_bucket`
+        // here reproduces stock's bucket contents (and their order)
+        // exactly, without needing to build all `2 * seqCount` buckets
+        // up front.
+        let (best_tag, best_idx) = best_bucket;
+        let winning_bucket_hits: Vec<OverlapHit> = scratch
+            .hits
+            .iter()
+            .filter(|hit| i8::from(hit.strand == 1) == best_tag && hit.idx == best_idx)
+            .map(|hit| hit.to_overlap_hit())
+            .collect();
+
+        let overlaps = overlap::get_overlaps_from_hits(
+            &winning_bucket_hits,
+            self.hit_len_required,
+            0,           // filter: HasHitInSet always passes filter=0 (SeqSet.hpp:1968).
+            |_idx| true, // is_ref: every sequence loaded via from_reference_fasta is a reference (see module docs).
+            DEFAULT_RADIUS,
+            IS_LONG_SEQ_SET,
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            {
+                self.kmer_length as i32
+            },
+        );
+
+        // SeqSet.hpp:1973: `int mismatchThreshold = int(len * (1 -
+        // refSeqSimilarity)) * kmerLength;` -- truncates `len * (1 -
+        // refSeqSimilarity)` to `int` FIRST, THEN multiplies by
+        // `kmerLength` (NOT `int(len * (1 - refSeqSimilarity) *
+        // kmerLength)`); reproduced in that exact operand order below.
+        #[allow(clippy::cast_precision_loss)]
+        let len_f64 = len as f64;
+        #[allow(clippy::cast_possible_truncation)]
+        let truncated = (len_f64 * (1.0 - self.ref_seq_similarity)) as i32;
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let kmer_length_i32 = self.kmer_length as i32;
+        let mismatch_threshold = truncated * kmer_length_i32;
+
+        // SeqSet.hpp:1974-1981: `valid = true` if ANY overlap satisfies
+        // `len - overlaps[i].matchCnt / 2 <= mismatchThreshold` (integer
+        // `matchCnt / 2`, i.e. `matchCnt` counted TWICE per hitLen and
+        // halved back here -- see `overlap::Overlap::match_cnt`'s doc
+        // comment).
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let read_len_i32 = len as i32;
+        overlaps.iter().any(|o| read_len_i32 - o.match_cnt / 2 <= mismatch_threshold)
     }
 
     /// Ported from `SeqSet::GetHitsFromRead` (`SeqSet.hpp:1071-1229`),
@@ -418,12 +547,22 @@ impl RefKmerFilter {
                 // the equivalent cast in `kmer_index::build_index_from_read`.
                 #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
                 let read_offset = (i - (kl - 1)) as i32;
+                // `repeats = size` (SeqSet.hpp:1122): `HasHitInSet`'s
+                // `GetHitsFromRead` call always has `puse == NULL` and
+                // `barcode == -1` (SeqSet.hpp:1923), so neither the
+                // `puse`-filtered recount (SeqSet.hpp:1123-1132) nor the
+                // `barcode != -1` override (SeqSet.hpp:1134-1135) ever
+                // applies here -- `repeats` is simply this k-mer's total
+                // index hit count.
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                let repeats = size as i32;
                 for entry in found {
                     scratch.hits.push(Hit {
                         idx: entry.idx,
                         offset: entry.offset,
                         read_offset,
                         strand: 1,
+                        repeats,
                     });
                 }
             }
@@ -464,12 +603,17 @@ impl RefKmerFilter {
                 // the equivalent cast in `kmer_index::build_index_from_read`.
                 #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
                 let read_offset = (i - (kl - 1)) as i32;
+                // `repeats = size` -- see the forward-strand loop's identical
+                // comment above (SeqSet.hpp:1189, same reasoning).
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                let repeats = size as i32;
                 for entry in found {
                     scratch.hits.push(Hit {
                         idx: entry.idx,
                         offset: entry.offset,
                         read_offset,
                         strand: -1,
+                        repeats,
                     });
                 }
             }
