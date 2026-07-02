@@ -10,6 +10,7 @@
 #include "KmerCode.hpp"   // header-only; declares extern nucToNum/numToNuc
 #include "KmerCount.hpp"  // header-only; depends on KmerCode.hpp above
 #include "KmerIndex.hpp"  // header-only; depends on KmerCode.hpp + SimpleVector.hpp
+#include "SeqSet.hpp"     // header-only; depends on KmerIndex.hpp + ReadFiles.hpp (zlib) + AlignAlgo.hpp
 #include "shim.h"
 
 // nucToNum/numToNuc are extern in the headers, defined only in the T1K .cpp files
@@ -179,5 +180,103 @@ void fg_t1k_kmerindex_build_index_from_read(void* idxp, void* kcp, const char* s
         static_cast<KmerIndex*>(idxp)->BuildIndexFromRead(
             *static_cast<KmerCode*>(kcp), const_cast<char*>(s), len, id, shift);
     } catch (...) {
+    }
+}
+
+// IsLowComplexity is a free function defined identically in
+// FastqExtractor.cpp:89-111 and BamExtractor.cpp:144-166 (verbatim
+// byte-for-byte copies of each other) -- it is NOT a SeqSet method, and
+// neither of those two .cpp files is header-only (each has its own main()),
+// so we cannot #include either one here (same reasoning as the
+// nucToNum/numToNuc verbatim copies above: duplicate-symbol/duplicate-main
+// linkage). This is a verbatim copy of that function body, not a
+// reimplementation.
+static bool IsLowComplexity(char* seq) {
+    int cnt[5] = { 0, 0, 0, 0, 0 };
+    int i;
+    for (i = 0; seq[i]; ++i) {
+        if (seq[i] == 'N')
+            ++cnt[4];
+        else
+            ++cnt[nucToNum[seq[i] - 'A']];
+    }
+
+    if (cnt[0] >= i / 2 || cnt[1] >= i / 2 || cnt[2] >= i / 2 || cnt[3] >= i / 2 || cnt[4] >= i / 10)
+        return true;
+
+    int lowCnt = 0;
+    for (i = 0; i < 4; ++i)
+        if (cnt[i] <= 2)
+            ++lowCnt;
+    if (lowCnt >= 2)
+        return true;
+    return false;
+}
+
+// Opaque-handle FFI for SeqSet, scoped to the FastqExtractor/BamExtractor
+// read-candidate-filtering slice (reference load, GetHitsFromRead,
+// HasHitInSet, IsLowComplexity/IsGoodCandidate) -- see shim.h for the
+// documented scope. SeqSet's constructor is lightweight (no large fixed-size
+// allocation like KmerIndex's), but InputRefFa can throw (e.g. bad_alloc, or
+// a ReadFiles/zlib failure on a missing/corrupt FASTA), so both the
+// constructor and the reference-loading call are wrapped in try/catch,
+// matching the exception-safety rule used throughout this shim: no C++
+// exception may unwind across an `extern "C"` boundary.
+void* fg_t1k_seqset_new(int kmerLength) {
+    try {
+        return new SeqSet(kmerLength);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void fg_t1k_seqset_free(void* p) { delete static_cast<SeqSet*>(p); }
+
+int fg_t1k_seqset_load_ref(void* p, const char* fastaPath) {
+    try {
+        // InputRefFa takes `char*` (not `const char*`) but never mutates the
+        // buffer itself (it only opens `filename` for reading via
+        // ReadFiles::AddReadFile); const_cast is safe here.
+        static_cast<SeqSet*>(p)->InputRefFa(const_cast<char*>(fastaPath));
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_seqset_is_low_complexity(void* /*p*/, const char* seq) {
+    return IsLowComplexity(const_cast<char*>(seq)) ? 1 : 0;
+}
+
+int fg_t1k_seqset_has_hit_in_set(void* p, const char* read) {
+    try {
+        // HasHitInSet writes the read's reverse complement into `rcRead`
+        // (an output scratch buffer, not an input) via GetHitsFromRead's
+        // internal ReverseComplement call; T1K's own callers pass a
+        // 100001-byte stack buffer (FastqExtractor.cpp/BamExtractor.cpp), so
+        // a same-sized buffer here is more than sufficient for any realistic
+        // test read. Deliberately NOT `static`: this shim may be called
+        // concurrently from multiple test threads, and a `static` buffer
+        // would be shared mutable state across those calls (a data race);
+        // a plain local array gives each call its own stack-allocated copy.
+        char rcBuf[100001];
+        return static_cast<SeqSet*>(p)->HasHitInSet(const_cast<char*>(read), rcBuf) ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_seqset_is_good_candidate(void* p, const char* read) {
+    try {
+        // Not `static` -- see fg_t1k_seqset_has_hit_in_set above.
+        char rcBuf[100001];
+        SeqSet* seqSet = static_cast<SeqSet*>(p);
+        if (!IsLowComplexity(const_cast<char*>(read)) &&
+            seqSet->HasHitInSet(const_cast<char*>(read), rcBuf)) {
+            return 1;
+        }
+        return 0;
+    } catch (...) {
+        return -1;
     }
 }

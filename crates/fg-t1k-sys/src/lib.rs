@@ -83,6 +83,17 @@ mod ffi {
             id: i32,
             shift: i32,
         );
+
+        /// Constructs a C++ `SeqSet(kmerLength)`. Returns NULL if
+        /// construction throws (the shim catches every exception at this
+        /// boundary); the caller MUST check for a NULL return before using
+        /// the handle.
+        pub fn fg_t1k_seqset_new(kmer_length: i32) -> *mut c_void;
+        pub fn fg_t1k_seqset_free(p: *mut c_void);
+        pub fn fg_t1k_seqset_load_ref(p: *mut c_void, fasta_path: *const c_char) -> i32;
+        pub fn fg_t1k_seqset_is_low_complexity(p: *mut c_void, seq: *const c_char) -> i32;
+        pub fn fg_t1k_seqset_has_hit_in_set(p: *mut c_void, read: *const c_char) -> i32;
+        pub fn fg_t1k_seqset_is_good_candidate(p: *mut c_void, read: *const c_char) -> i32;
     }
 }
 #[cfg(feature = "t1k-sys")]
@@ -405,5 +416,115 @@ impl Default for CppKmerIndex {
 impl Drop for CppKmerIndex {
     fn drop(&mut self) {
         unsafe { ffi::fg_t1k_kmerindex_free(self.handle) }
+    }
+}
+
+/// Safe Rust wrapper around the opaque C++ `SeqSet*` handle.
+///
+/// Scoped to the FastqExtractor/BamExtractor read-candidate-filtering slice
+/// -- reference load (`InputRefFa`), the real (unmodified) `HasHitInSet`
+/// (including the `GetOverlapsFromHits`/`AlignAlgo`-based confirmation step
+/// that `fg_t1k_core::ref_kmer_filter::RefKmerFilter` does NOT reimplement;
+/// see that module's docs), and `IsLowComplexity`/`IsGoodCandidate` (both
+/// free functions in the vendored C++, not `SeqSet` methods, but exposed
+/// here via the same opaque handle for API symmetry with the Rust port).
+///
+/// Owns the handle for its lifetime: [`CppSeqSet::new`] allocates the C++
+/// object via `fg_t1k_seqset_new` and `Drop` calls `fg_t1k_seqset_free`
+/// exactly once. Construction checks the returned handle for NULL, matching
+/// [`CppKmerCode`]/[`CppKmerCount`]/[`CppKmerIndex`] above: the shim wraps
+/// the C++ constructor in a try/catch and returns NULL on any exception, so
+/// this wrapper must -- and does -- refuse to proceed with a NULL handle
+/// rather than silently dereferencing it later.
+#[cfg(feature = "t1k-sys")]
+pub struct CppSeqSet {
+    handle: *mut std::os::raw::c_void,
+}
+
+#[cfg(feature = "t1k-sys")]
+impl CppSeqSet {
+    /// Constructs a new C++ `SeqSet(kmerLength)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying `fg_t1k_seqset_new` call returns NULL (i.e.
+    /// the C++ constructor threw an exception).
+    #[must_use]
+    pub fn new(kmer_length: i32) -> Self {
+        let handle = unsafe { ffi::fg_t1k_seqset_new(kmer_length) };
+        assert!(
+            !handle.is_null(),
+            "fg_t1k_seqset_new({kmer_length}) returned NULL: C++ SeqSet construction failed"
+        );
+        Self { handle }
+    }
+
+    /// Mirrors `SeqSet::InputRefFa`, loading and indexing every FASTA record
+    /// in `fasta_path` (each sequence's 0-based load order becomes its
+    /// `seqIdx`, matching stock's `id = seqs.size()` at insertion time).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `fasta_path` is not valid UTF-8 representable as a
+    /// NUL-terminated C string, or if the underlying C++ call reports
+    /// failure (e.g. the file could not be opened).
+    pub fn load_ref(&mut self, fasta_path: &std::path::Path) {
+        let c_path = std::ffi::CString::new(fasta_path.to_str().expect("fasta_path must be UTF-8"))
+            .expect("fasta_path must not contain an interior NUL byte");
+        let rc = unsafe { ffi::fg_t1k_seqset_load_ref(self.handle, c_path.as_ptr()) };
+        assert!(rc == 0, "fg_t1k_seqset_load_ref({}) failed", fasta_path.display());
+    }
+
+    /// Mirrors the free function `IsLowComplexity`. `seq` must not contain
+    /// an interior NUL byte.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `seq` contains an interior NUL byte.
+    #[must_use]
+    pub fn is_low_complexity(&self, seq: &[u8]) -> bool {
+        let c_seq = std::ffi::CString::new(seq).expect("seq must not contain an interior NUL byte");
+        unsafe { ffi::fg_t1k_seqset_is_low_complexity(self.handle, c_seq.as_ptr()) != 0 }
+    }
+
+    /// Mirrors `SeqSet::HasHitInSet` IN FULL -- including the
+    /// `GetOverlapsFromHits`/`AlignAlgo`-based confirmation step this port's
+    /// Rust side does not reimplement (see `fg_t1k_core::ref_kmer_filter`
+    /// module docs). `read` must not contain an interior NUL byte.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `read` contains an interior NUL byte, or if the underlying
+    /// C++ call threw (surfaced as a `-1` sentinel from the shim).
+    #[must_use]
+    pub fn has_hit_in_set(&self, read: &[u8]) -> bool {
+        let c_read =
+            std::ffi::CString::new(read).expect("read must not contain an interior NUL byte");
+        let rc = unsafe { ffi::fg_t1k_seqset_has_hit_in_set(self.handle, c_read.as_ptr()) };
+        assert!(rc >= 0, "fg_t1k_seqset_has_hit_in_set threw a C++ exception");
+        rc != 0
+    }
+
+    /// Mirrors the free function `IsGoodCandidate`. `read` must not contain
+    /// an interior NUL byte.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `read` contains an interior NUL byte, or if the underlying
+    /// C++ call threw (surfaced as a `-1` sentinel from the shim).
+    #[must_use]
+    pub fn is_good_candidate(&self, read: &[u8]) -> bool {
+        let c_read =
+            std::ffi::CString::new(read).expect("read must not contain an interior NUL byte");
+        let rc = unsafe { ffi::fg_t1k_seqset_is_good_candidate(self.handle, c_read.as_ptr()) };
+        assert!(rc >= 0, "fg_t1k_seqset_is_good_candidate threw a C++ exception");
+        rc != 0
+    }
+}
+
+#[cfg(feature = "t1k-sys")]
+impl Drop for CppSeqSet {
+    fn drop(&mut self) {
+        unsafe { ffi::fg_t1k_seqset_free(self.handle) }
     }
 }
