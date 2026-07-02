@@ -31,21 +31,27 @@
 //!    (`FastqExtractor.cpp:411-418`, `SeqSet.hpp:2847-2857`); otherwise it
 //!    stays at `9`.
 //!
-//! [`RefKmerFilter::from_reference_fasta`] intentionally does not replicate
-//! this two-stage default-then-infer-then-maybe-rebuild dance -- it takes
+//! [`RefKmerFilter::from_reference_fasta`] itself does not replicate this
+//! two-stage default-then-infer-then-maybe-rebuild dance -- it takes
 //! `kmer_length` as an explicit parameter, matching a single plain
 //! `SeqSet(kmerLength)` construction followed by one `InputRefFa` call
 //! (`SeqSet.hpp:760-772,872-904`, no `InferKmerLength`/`UpdateKmerLength`
-//! call). `InferKmerLength`/`UpdateKmerLength` are not ported here; a future
-//! caller (a `fghla`-style CLI/pipeline layer) that wants stock's exact
-//! default-selection behavior can compute it itself before calling
-//! `from_reference_fasta`. For `fixtures/refbuild/golden/kir_rna_seq.fa`
-//! specifically (the fixture used by this module's differential tests),
-//! `InferKmerLength()` evaluates to `8` for that fixture's total reference
-//! length (8781 bases) -- NOT greater than the initial `9` -- so stock T1K
-//! would actually use `kmerLength = 9` unmodified for this exact fixture;
-//! the differential tests use `kmer_length = 9` to match that real-world
-//! value precisely.
+//! call during construction itself). [`RefKmerFilter::infer_kmer_length`]
+//! and [`RefKmerFilter::update_kmer_length`] (added for Task 3.2) now DO
+//! port `SeqSet::InferKmerLength`/`SeqSet::UpdateKmerLength` faithfully; a
+//! caller that wants stock's exact default-selection dance (e.g.
+//! [`crate::extract`]) calls `from_reference_fasta` at an initial k, then
+//! `infer_kmer_length`, then conditionally `update_kmer_length` -- see
+//! [`crate::extract`]'s module docs for that full sequence. For
+//! `fixtures/refbuild/golden/kir_rna_seq.fa` specifically (the fixture used
+//! by this module's own differential tests, distinct from
+//! `fixtures/example/ref/kir_rna_seq.fa` used by [`crate::extract`]'s
+//! tests), `InferKmerLength()` evaluates to `8` for that fixture's total
+//! reference length (8781 bases) -- NOT greater than the initial `9` -- so
+//! stock T1K would actually use `kmerLength = 9` unmodified for this exact
+//! fixture; the differential tests in THIS module use `kmer_length = 9`
+//! directly (not via the infer/update dance) to match that real-world value
+//! precisely.
 //!
 //! # `HasHitInSet`'s two gates, both now ported
 //!
@@ -205,6 +211,13 @@ pub struct RefKmerFilter {
     /// but cheap to keep and useful for a future caller that wants to report
     /// which reference sequence a candidate read matched.
     seq_names: Vec<String>,
+    /// 0-based-load-order raw reference sequences (`SeqSet::seqs[i].consensus`
+    /// equivalent), kept alongside `seq_names` so
+    /// [`RefKmerFilter::update_kmer_length`] can rebuild `seq_index` at a new
+    /// k-mer length without re-reading the source FASTA (mirrors
+    /// `SeqSet::UpdateKmerLength` re-iterating `seqs[i].consensus`,
+    /// `SeqSet.hpp:2847-2857`).
+    seqs: Vec<Vec<u8>>,
     /// `SeqSet::hitLenRequired` (`SeqSet.hpp:223`), used by
     /// [`RefKmerFilter::has_hit_in_set`]'s bucket-count gate. Fixed at the
     /// `SeqSet(kmerLength)` constructor default (`SeqSet.hpp:764`); see
@@ -250,6 +263,7 @@ impl RefKmerFilter {
 
         let mut seq_index = KmerIndex::new();
         let mut seq_names = Vec::new();
+        let mut seqs = Vec::new();
         let mut kmer_code = KmerCode::new(kmer_length);
 
         for record in parse_fasta(&text) {
@@ -259,6 +273,7 @@ impl RefKmerFilter {
             })?;
             seq_index.build_index_from_read(&mut kmer_code, record.seq.as_bytes(), id, 0);
             seq_names.push(record.id);
+            seqs.push(record.seq.into_bytes());
         }
 
         let seq_count = seq_names.len();
@@ -267,6 +282,7 @@ impl RefKmerFilter {
             kmer_length,
             seq_count,
             seq_names,
+            seqs,
             hit_len_required: DEFAULT_HIT_LEN_REQUIRED,
             ref_seq_similarity: DEFAULT_REF_SEQ_SIMILARITY,
         })
@@ -289,6 +305,99 @@ impl RefKmerFilter {
     #[must_use]
     pub fn seq_name(&self, idx: usize) -> &str {
         &self.seq_names[idx]
+    }
+
+    /// `SeqSet::hitLenRequired` (`SeqSet.hpp:223`), used by
+    /// [`RefKmerFilter::has_hit_in_set`]'s bucket-count gate.
+    #[must_use]
+    pub fn hit_len_required(&self) -> i32 {
+        self.hit_len_required
+    }
+
+    /// Ported from `SeqSet::SetHitLenRequired` (`SeqSet.hpp:805-808`): sets
+    /// `hitLenRequired`, the minimum `kmerLength * <hit count>` a candidate
+    /// read's winning bucket must reach to pass gate 1 of `HasHitInSet`.
+    /// `FastqExtractor.cpp:407` calls this with a data-dependent value
+    /// computed from sampled read lengths (see [`crate::extract`]'s module
+    /// docs for that computation) rather than relying on the
+    /// [`DEFAULT_HIT_LEN_REQUIRED`] constructor default.
+    pub fn set_hit_len_required(&mut self, hit_len_required: i32) {
+        self.hit_len_required = hit_len_required;
+    }
+
+    /// Ported from `SeqSet::SetRefSeqSimilarity` (`SeqSet.hpp:835-838`): sets
+    /// `refSeqSimilarity`, the minimum fraction of a candidate read's length
+    /// that gate 2's LIS-chained mismatch-threshold check must confirm.
+    /// `FastqExtractor.cpp:408` calls this with `filterAlignmentSimilarity`
+    /// (the `-s` CLI flag, default 0.8) rather than relying on the
+    /// [`DEFAULT_REF_SEQ_SIMILARITY`] constructor default.
+    pub fn set_ref_seq_similarity(&mut self, ref_seq_similarity: f64) {
+        self.ref_seq_similarity = ref_seq_similarity;
+    }
+
+    /// Ported EXACTLY from `SeqSet::InferKmerLength` (`SeqSet.hpp:2830-2845`):
+    /// sums every loaded reference sequence's length into `totalLength`, then
+    /// repeatedly divides `totalLength` by 4 (integer division) counting each
+    /// iteration until it reaches 0, and finally adds one more to that count.
+    /// This is `floor(log4(totalLength)) + 2` for `totalLength > 0` (the loop
+    /// counts base-4 "digits", i.e. `floor(log4(totalLength)) + 1`
+    /// iterations, then one more `+= 1` after the loop) and exactly `1` for
+    /// `totalLength == 0` (loop body never runs; the trailing `+= 1` still
+    /// fires).
+    ///
+    /// `FastqExtractor.cpp:411` calls this AFTER `SetHitLenRequired`/
+    /// `SetRefSeqSimilarity` but the total-length sum this reads
+    /// (`seqs[i].consensusLen`, i.e. each loaded sequence's own length) is
+    /// unaffected by either of those calls, so callers may invoke this at any
+    /// point after [`RefKmerFilter::from_reference_fasta`] returns.
+    #[must_use]
+    pub fn infer_kmer_length(&self) -> usize {
+        // Real reference FASTAs never approach i64::MAX total length, so
+        // this sum cannot wrap in practice; matches the C++ `int
+        // totalLength` (itself far smaller-range, `i32`) accumulation.
+        #[allow(clippy::cast_possible_wrap)]
+        let mut total_length: i64 = self.seqs.iter().map(|s| s.len() as i64).sum();
+        let mut ret: i64 = 0;
+        while total_length != 0 {
+            ret += 1;
+            total_length /= 4;
+        }
+        ret += 1;
+        // `ret` is bounded by ~32 even for an astronomically large total
+        // reference length (log4 of i64::MAX is well under 32), so this
+        // never truncates in practice; matches the C++ `int` return type.
+        usize::try_from(ret).unwrap_or(usize::MAX)
+    }
+
+    /// Ported from `SeqSet::UpdateKmerLength` (`SeqSet.hpp:2847-2857`):
+    /// rebuilds `seq_index` from scratch at a new k-mer length `kl`, by
+    /// clearing it and re-running [`KmerIndex::build_index_from_read`] over
+    /// every stored reference sequence (in the same 0-based load order used
+    /// by [`RefKmerFilter::from_reference_fasta`], so `id`s match exactly).
+    ///
+    /// `FastqExtractor.cpp:411-418` only calls this when `InferKmerLength()`
+    /// returns a value strictly greater than the current k-mer length; this
+    /// method itself does not gate on that condition (mirroring
+    /// `UpdateKmerLength`'s own unconditional body) -- the caller decides
+    /// whether to call it, exactly as `FastqExtractor.cpp:main` does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `kl == 0` (see [`RefKmerFilter::from_reference_fasta`]'s
+    /// identical panic doc).
+    pub fn update_kmer_length(&mut self, kl: usize) {
+        assert!(kl >= 1, "kmer_length must be >= 1, got {kl}");
+        self.kmer_length = kl;
+        let mut kmer_code = KmerCode::new(kl);
+        self.seq_index = KmerIndex::new();
+        for (id, seq) in self.seqs.iter().enumerate() {
+            // `seqs.len() == seq_count`, itself bounded by an `i32` at load
+            // time (`from_reference_fasta`'s own `i32::try_from` check), so
+            // this cannot truncate.
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            let id = id as i32;
+            self.seq_index.build_index_from_read(&mut kmer_code, seq, id, 0);
+        }
     }
 
     /// Ergonomic entry point: `!is_low_complexity(read) &&
@@ -987,5 +1096,75 @@ mod tests {
             forward_hits, 150,
             "the first-window exemption must still record all 150 reference hits"
         );
+    }
+
+    #[test]
+    fn set_hit_len_required_and_ref_seq_similarity_round_trip() {
+        let f = write_fasta(&[("a", "ACGTACGTACGTACGTACGTACGT")]);
+        let mut filter = RefKmerFilter::from_reference_fasta(f.path(), 9).unwrap();
+        assert_eq!(filter.hit_len_required(), DEFAULT_HIT_LEN_REQUIRED);
+
+        filter.set_hit_len_required(42);
+        assert_eq!(filter.hit_len_required(), 42);
+
+        // ref_seq_similarity has no public getter; exercised indirectly via
+        // is_good_candidate in the differential/extract-module tests. Here
+        // we only confirm the setter does not panic and the filter remains
+        // otherwise usable.
+        filter.set_ref_seq_similarity(0.5);
+        let read = b"ACGTACGTACGTACGTACGTACGT";
+        let _ = filter.is_good_candidate(read);
+    }
+
+    #[test]
+    fn infer_kmer_length_matches_seqset_formula_for_known_totals() {
+        // InferKmerLength: ret = 0; while (total) { ret+=1; total/=4; } ret+=1;
+        // total=0   -> loop never runs -> ret = 0 + 1 = 1
+        // total=1   -> 1 iter (1/4=0)   -> ret = 1 + 1 = 2
+        // total=8781 (kir_rna_seq.fa's real total, per ref_kmer_filter's own
+        //   differential fixture) -> known real-world value: 8.
+        let empty = tempfile::NamedTempFile::new().unwrap();
+        let filter_empty = RefKmerFilter::from_reference_fasta(empty.path(), 9).unwrap();
+        assert_eq!(filter_empty.seq_count(), 0);
+        assert_eq!(filter_empty.infer_kmer_length(), 1);
+
+        let f_one = write_fasta(&[("a", "A")]);
+        let filter_one = RefKmerFilter::from_reference_fasta(f_one.path(), 9).unwrap();
+        assert_eq!(filter_one.infer_kmer_length(), 2);
+
+        // total=8781: 8781/4=2195, /4=548, /4=137, /4=34, /4=8, /4=2, /4=0 ->
+        // 7 iterations -> ret = 7 + 1 = 8.
+        let seq_8781 = "A".repeat(8781);
+        let f_8781 = write_fasta(&[("a", &seq_8781)]);
+        let filter_8781 = RefKmerFilter::from_reference_fasta(f_8781.path(), 9).unwrap();
+        assert_eq!(filter_8781.infer_kmer_length(), 8);
+    }
+
+    #[test]
+    fn update_kmer_length_rebuilds_index_at_new_k() {
+        let reference = "ACGTACGTACGTGGATTACAGATTACAGATTACAGATTACAGCCCTGACGTGTGACGTGTG";
+        let f = write_fasta(&[("only", reference)]);
+        let mut filter = RefKmerFilter::from_reference_fasta(f.path(), 9).unwrap();
+        assert_eq!(filter.kmer_length(), 9);
+
+        // Before update: a 40bp exact substring is a candidate at k=9
+        // (matches from_reference_fasta's own is_good_candidate test).
+        let read40 = &reference.as_bytes()[0..40];
+        assert!(filter.is_good_candidate(read40));
+
+        filter.update_kmer_length(15);
+        assert_eq!(filter.kmer_length(), 15);
+        // Index rebuilt at k=15: an exact-substring read that is still
+        // comfortably long relative to the new k should still be a
+        // candidate (hitLenRequired defaults to 31, so needs >= ceil(31/15)
+        // = 3 hits in one bucket; a 40bp exact substring at k=15 has 26
+        // overlapping windows, easily satisfying this).
+        let read = reference.as_bytes();
+        assert!(filter.is_good_candidate(read));
+
+        // A read shorter than the new k=15 can no longer produce any k-mer
+        // window at all (previously fine at k=9).
+        let too_short_for_new_k = &reference.as_bytes()[0..10];
+        assert!(!filter.is_good_candidate(too_short_for_new_k));
     }
 }
