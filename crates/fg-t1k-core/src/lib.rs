@@ -9,6 +9,6 @@ pub mod fastq;
 pub mod kmer;
 pub mod kmer_count;
 pub mod kmer_index;
-pub(crate) mod overlap;
+pub mod overlap;
 pub mod ref_kmer_filter;
 pub mod refbuild;

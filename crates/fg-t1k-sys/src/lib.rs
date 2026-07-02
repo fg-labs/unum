@@ -104,6 +104,28 @@ mod ffi {
         pub fn fg_t1k_seqset_has_hit_in_set(p: *mut c_void, read: *const c_char) -> i32;
         pub fn fg_t1k_seqset_is_good_candidate(p: *mut c_void, read: *const c_char) -> i32;
 
+        /// Mirrors `SeqSet::GetOverlapsFromRead` IN FULL. Writes up to
+        /// `out_capacity` overlaps into the caller-allocated `out_*`
+        /// arrays; `*out_count` receives the real overlap count (may
+        /// exceed `out_capacity`; mirrors stock's `-1` short-read return by
+        /// writing `-1` there). Returns 0 on success, -1 if the underlying
+        /// call threw.
+        #[allow(clippy::too_many_arguments)]
+        pub fn fg_t1k_seqset_get_overlaps_from_read(
+            p: *mut c_void,
+            read: *const c_char,
+            out_capacity: i32,
+            out_seq_idx: *mut i32,
+            out_strand: *mut i32,
+            out_read_start: *mut i32,
+            out_read_end: *mut i32,
+            out_seq_start: *mut i32,
+            out_seq_end: *mut i32,
+            out_match_cnt: *mut i32,
+            out_similarity: *mut f64,
+            out_count: *mut i32,
+        ) -> i32;
+
         /// Constructs a real C++ `Alignments()`. Returns NULL if construction
         /// threw (defense-in-depth only; the C++ constructor is lightweight
         /// and not expected to throw in practice).
@@ -667,6 +689,102 @@ impl CppSeqSet {
         assert!(rc >= 0, "fg_t1k_seqset_is_good_candidate threw a C++ exception");
         rc != 0
     }
+
+    /// Mirrors `SeqSet::GetOverlapsFromRead(read, strand=0, barcode=-1,
+    /// overlaps)` IN FULL -- the real, unmodified stock C++ read-to-allele
+    /// alignment/scoring core this task differentially tests against.
+    /// `read` must not contain an interior NUL byte.
+    ///
+    /// Returns `None` for stock's `read.len() < kmerLength` short-read
+    /// sentinel (`-1`, mirrors [`fg_t1k_core`]'s `RefKmerFilter::
+    /// get_overlaps_from_read`'s own `Option` return), otherwise
+    /// `Some(overlaps)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `read` contains an interior NUL byte, if the underlying
+    /// C++ call threw, or if the real overlap count exceeds this method's
+    /// internal capacity (10000 -- generous for any differential-test
+    /// read; a real overflow here indicates a test fixture producing an
+    /// unexpectedly large overlap count, not a legitimate result to
+    /// silently truncate).
+    #[must_use]
+    pub fn get_overlaps_from_read(&self, read: &[u8]) -> Option<Vec<CppOverlap>> {
+        const CAPACITY: usize = 10_000;
+        let c_read =
+            std::ffi::CString::new(read).expect("read must not contain an interior NUL byte");
+
+        let mut seq_idx = vec![0i32; CAPACITY];
+        let mut strand = vec![0i32; CAPACITY];
+        let mut read_start = vec![0i32; CAPACITY];
+        let mut read_end = vec![0i32; CAPACITY];
+        let mut seq_start = vec![0i32; CAPACITY];
+        let mut seq_end = vec![0i32; CAPACITY];
+        let mut match_cnt = vec![0i32; CAPACITY];
+        let mut similarity = vec![0f64; CAPACITY];
+        let mut count: i32 = 0;
+
+        let rc = unsafe {
+            ffi::fg_t1k_seqset_get_overlaps_from_read(
+                self.handle,
+                c_read.as_ptr(),
+                i32::try_from(CAPACITY).expect("CAPACITY fits in i32"),
+                seq_idx.as_mut_ptr(),
+                strand.as_mut_ptr(),
+                read_start.as_mut_ptr(),
+                read_end.as_mut_ptr(),
+                seq_start.as_mut_ptr(),
+                seq_end.as_mut_ptr(),
+                match_cnt.as_mut_ptr(),
+                similarity.as_mut_ptr(),
+                &mut count,
+            )
+        };
+        assert!(rc == 0, "fg_t1k_seqset_get_overlaps_from_read threw a C++ exception");
+
+        if count < 0 {
+            return None;
+        }
+        let count = usize::try_from(count).expect("count must be non-negative here");
+        assert!(
+            count <= CAPACITY,
+            "fg_t1k_seqset_get_overlaps_from_read returned {count} overlaps, exceeding this \
+             wrapper's {CAPACITY}-entry capacity"
+        );
+
+        Some(
+            (0..count)
+                .map(|i| CppOverlap {
+                    seq_idx: seq_idx[i],
+                    strand: strand[i],
+                    read_start: read_start[i],
+                    read_end: read_end[i],
+                    seq_start: seq_start[i],
+                    seq_end: seq_end[i],
+                    match_cnt: match_cnt[i],
+                    similarity: similarity[i],
+                })
+                .collect(),
+        )
+    }
+}
+
+/// A single overlap as returned by [`CppSeqSet::get_overlaps_from_read`],
+/// field-for-field mirroring the subset of `_overlap` (`SeqSet.hpp:89-115`)
+/// `GetOverlapsFromRead` actually populates -- matches
+/// `fg_t1k_core::overlap::Overlap`'s field set exactly so differential tests
+/// can compare the two directly.
+#[cfg(feature = "t1k-sys")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CppOverlap {
+    pub seq_idx: i32,
+    pub strand: i32,
+    pub read_start: i32,
+    pub read_end: i32,
+    pub seq_start: i32,
+    pub seq_end: i32,
+    pub match_cnt: i32,
+    pub similarity: f64,
 }
 
 #[cfg(feature = "t1k-sys")]
