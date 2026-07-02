@@ -2,6 +2,7 @@
 //! fg-t1k core: the pure-Rust port of T1K's pipeline. No C++ dependency.
 
 pub mod alignments;
+pub mod bam_extract;
 pub mod extract;
 pub mod fastq;
 pub mod kmer;

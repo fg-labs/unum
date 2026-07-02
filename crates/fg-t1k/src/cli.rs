@@ -89,39 +89,61 @@ pub struct BuildArgs {
     pub prefix: String,
 }
 
-/// Arguments for the `extract` subcommand, mirroring `fastq-extractor`'s flag names
+/// Arguments for the `extract` subcommand. Mirrors `fastq-extractor`'s flag names
 /// (`FastqExtractor.cpp:12-33`'s `usage[]`) for the paired/single-end FASTQ-plus-reference-FASTA
-/// candidate-extraction path. Barcode/single-cell (`--barcode*`) and interleaved (`-i`) input are
-/// deliberately not exposed here -- see `crate::stages::extract`'s module docs.
+/// candidate-extraction path (the default, when `-b` is absent), OR `bam-extractor`'s flag names
+/// (`BamExtractor.cpp:16-26`'s `usage[]`) for the BAM/CRAM-plus-coord-FASTA path (when `-b` is
+/// given -- see `crate::stages::extract`'s module docs for how the two modes are dispatched).
+/// Barcode/single-cell (`--barcode*`/`--UMI`) and interleaved (`-i`) input are deliberately not
+/// exposed here in either mode -- see that module's docs.
 #[derive(Args, Debug)]
 pub struct ExtractArgs {
-    /// Path to the reference sequence FASTA file.
+    /// Path to the reference sequence FASTA file (FASTQ mode) or the `_coord.fa` gene-coordinate
+    /// reference (BAM mode, i.e. when `-b` is given).
     #[arg(short = 'f', value_name = "STRING")]
     pub ref_seq_fasta: String,
 
-    /// Path to the first-mate FASTQ file (paired input; requires `-2`).
+    /// Path to the first-mate FASTQ file (paired FASTQ-mode input; requires `-2`).
     #[arg(short = '1', value_name = "STRING")]
     pub mate1: Option<String>,
 
-    /// Path to the second-mate FASTQ file (paired input; requires `-1`).
+    /// Path to the second-mate FASTQ file (paired FASTQ-mode input; requires `-1`).
     #[arg(short = '2', value_name = "STRING")]
     pub mate2: Option<String>,
 
-    /// Path to a single-end read file (mutually exclusive with `-1`/`-2`).
+    /// Path to a single-end read file (FASTQ mode; mutually exclusive with `-1`/`-2` and `-b`).
     #[arg(short = 'u', value_name = "STRING")]
     pub single: Option<String>,
+
+    /// Path to a BAM/CRAM file (switches to BAM mode; mutually exclusive with `-1`/`-2`/`-u`).
+    #[arg(short = 'b', value_name = "STRING")]
+    pub bam: Option<String>,
+
+    /// BAM mode only: the flag or order of an unaligned read-pair is not ordinary (i.e. the two
+    /// mates of an unaligned template are not guaranteed to be adjacent records). Mirrors
+    /// `bam-extractor -u` / `BamExtractor.cpp`'s `abnormalUnalignedFlag`.
+    #[arg(long = "abnormal-unmapped")]
+    pub abnormal_unmapped: bool,
+
+    /// BAM mode only: the suffix length in a read id to strip for mate matching (default: strip a
+    /// trailing `/1` or `/2`). Mirrors `bam-extractor --mateIdSuffixLen`.
+    #[arg(long = "mate-id-suffix-len", default_value_t = -1)]
+    pub mate_id_suffix_len: i32,
 
     /// Prefix of the output file(s).
     #[arg(short = 'o', long = "prefix", default_value = "toassemble", value_name = "STRING")]
     pub prefix: String,
 
     /// Number of threads. Accepted for CLI compatibility; the extraction pass itself always
-    /// runs single-threaded internally, since its output is provably threadCnt-invariant -- see
-    /// `fg_t1k_core::extract`'s module docs ("Output order == input order").
+    /// runs single-threaded internally. For FASTQ mode, output is provably threadCnt-invariant --
+    /// see `fg_t1k_core::extract`'s module docs ("Output order == input order"). For BAM mode,
+    /// see `fg_t1k_core::bam_extract`'s module docs for why only `-t 1` oracle semantics are
+    /// reproduced.
     #[arg(short = 't', default_value_t = 1)]
     pub threads: u32,
 
-    /// Filter alignments with alignment similarity less than the specified value.
+    /// FASTQ mode only: filter alignments with alignment similarity less than the specified
+    /// value.
     #[arg(short = 's', default_value_t = fg_t1k_core::extract::DEFAULT_REF_SEQ_SIMILARITY)]
     pub similarity: f64,
 }
