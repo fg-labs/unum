@@ -96,7 +96,12 @@ pub use ffi::{fg_t1k_nuc_to_num, fg_t1k_num_to_nuc};
 /// object via `fg_t1k_kmercode_new`, and `Drop` calls `fg_t1k_kmercode_free`
 /// exactly once. All methods forward to the corresponding FFI function; the
 /// `unsafe` calls are sound because `self.handle` is a non-null pointer
-/// created by `fg_t1k_kmercode_new` and never freed until `Drop`.
+/// created by `fg_t1k_kmercode_new` and never freed until `Drop`. Construction
+/// checks the returned handle for NULL, mirroring [`CppKmerCount::new`] and
+/// [`CppKmerIndex::new`]: the shim wraps the C++ constructor in a try/catch
+/// and returns NULL on any exception, so this wrapper must -- and does --
+/// refuse to proceed with a NULL handle rather than silently dereferencing it
+/// later.
 #[cfg(feature = "t1k-sys")]
 pub struct CppKmerCode {
     handle: *mut std::os::raw::c_void,
@@ -105,9 +110,18 @@ pub struct CppKmerCode {
 #[cfg(feature = "t1k-sys")]
 impl CppKmerCode {
     /// Constructs a new C++ `KmerCode` for k-mer length `k`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying `fg_t1k_kmercode_new` call returns NULL (i.e.
+    /// the C++ constructor threw an exception).
     #[must_use]
     pub fn new(k: i32) -> Self {
         let handle = unsafe { ffi::fg_t1k_kmercode_new(k) };
+        assert!(
+            !handle.is_null(),
+            "fg_t1k_kmercode_new({k}) returned NULL: C++ KmerCode construction failed"
+        );
         Self { handle }
     }
 

@@ -86,7 +86,7 @@ pub fn canonical_kmer(seq: &[u8], k: usize) -> u64 {
 
 /// Returns `true` if `c` is not one of the four canonical bases (`A`/`C`/`G`/`T`).
 ///
-/// Mirrors T1K's `nucToNum` table (`Genotyper.cpp:34-39`), which holds `-1`
+/// Mirrors T1K's `nucToNum` table (`Genotyper.cpp:37-40`), which holds `-1`
 /// for every entry except `A`, `C`, `G`, `T`. This is the check
 /// `KmerCode::Prepend` uses (`nucToNum[c-'A'] == -1`) to decide whether a
 /// base is invalid -- note this differs from `KmerCode::Append`'s literal

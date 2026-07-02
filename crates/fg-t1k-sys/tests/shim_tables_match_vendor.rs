@@ -3,8 +3,9 @@
 //! `nucToNum`/`numToNuc` tables (`crates/fg-t1k-sys/shim/shim.cpp`) and the
 //! vendored source of truth (`vendor/t1k/Genotyper.cpp:37-42`).
 //!
-//! The lockstep differential tests in `diff_kmercode.rs` and `diff_kmer.rs`
-//! only validate the Rust port against the *shim's copy* of these tables --
+//! The lockstep differential tests in `diff_kmer.rs`, `diff_kmercode.rs`,
+//! `diff_kmercount.rs`, and `diff_kmerindex.rs` only validate the Rust port
+//! against the *shim's copy* of these tables --
 //! if the shim's copy ever drifted from the real T1K source (e.g. a future
 //! T1K vendor update changes the table and nobody updates the shim), those
 //! tests would keep passing while silently testing against a stale table.

@@ -202,13 +202,28 @@ fn build_index_read() -> &'static [u8] {
     b"GATTACAGATTACAGGGCTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACGTNNNNNACGTACGTACGTACGTGATTACAGATTACC"
 }
 
+/// A read that BEGINS with a homopolymer run of `A`s long enough (35 bases)
+/// that the very first full k-mer window is all-`A` -- i.e. code `0` -- for
+/// both k=15 and k=31. This coincidentally matches a freshly-constructed
+/// `KmerCode`'s initial all-zero `prev_kmer_code` sentinel (see the
+/// `build_index_from_read` doc comment on `fg_t1k_core::kmer_index::
+/// KmerIndex`), so `IsEqual` returns true against that sentinel and the very
+/// first window is silently dropped by `BuildIndexFromRead`'s
+/// consecutive-duplicate dedup -- *before* any duplicate window has actually
+/// been seen. This "first window collides with the initial sentinel"
+/// path was previously only hand-verified in a core unit test
+/// (`build_index_from_read_dedups_homopolymer_run_but_drops_first_window`);
+/// this differential test exercises it against the real C++ oracle.
+fn build_index_read_homopolymer_leading() -> &'static [u8] {
+    b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACGTACGTACGTGATTACAGATTACCGGGCT"
+}
+
 /// Runs `BuildIndexFromRead`/`build_index_from_read` on both a Rust and a
 /// C++ `KmerIndex` for k-mer length `k`, with the given `id`/`shift`, then
 /// queries every length-`k` window of `read` (which, thanks to the read's
 /// homopolymer run, includes windows that must have been *dropped* by the
 /// dedup logic) and asserts the two indexes agree, in order, everywhere.
-fn run_build_index_from_read_diff(k: usize, id: i32, shift: i32) {
-    let read = build_index_read();
+fn run_build_index_from_read_diff_on(read: &[u8], k: usize, id: i32, shift: i32) {
     assert!(read.len() >= k, "test read must be at least k={k} bases long");
 
     let mut rust_index = KmerIndex::new();
@@ -230,6 +245,12 @@ fn run_build_index_from_read_diff(k: usize, id: i32, shift: i32) {
             &cpp_index.search(&q_cpp),
         );
     }
+}
+
+/// Convenience wrapper: runs `run_build_index_from_read_diff_on` against the
+/// general-purpose `build_index_read()` fixture.
+fn run_build_index_from_read_diff(k: usize, id: i32, shift: i32) {
+    run_build_index_from_read_diff_on(build_index_read(), k, id, shift);
 }
 
 #[test]
@@ -260,6 +281,25 @@ fn build_index_from_read_matches_t1k_k15_negative_shift_and_id() {
 #[test]
 fn build_index_from_read_matches_t1k_k31_negative_shift_and_id() {
     run_build_index_from_read_diff(31, -1, -1);
+}
+
+#[test]
+fn build_index_from_read_matches_t1k_k15_homopolymer_leading_first_window_dropped() {
+    // The read's first full k=15 window ("AAAAAAAAAAAAAAA") is all-`A`
+    // (code 0), coincidentally matching `BuildIndexFromRead`'s freshly
+    // constructed initial `prev_kmer_code` sentinel (also code 0) -- so this
+    // first window is dropped by the dedup check, not inserted. Every
+    // subsequent window in the read (including the rest of the homopolymer
+    // run, and the non-repeating tail) is checked for full parity too.
+    run_build_index_from_read_diff_on(build_index_read_homopolymer_leading(), 15, 3, 0);
+}
+
+#[test]
+fn build_index_from_read_matches_t1k_k31_homopolymer_leading_first_window_dropped() {
+    // Same edge case as the k=15 variant above, but at k=31 -- the read's
+    // leading homopolymer run (35 `A`s) is long enough that the first full
+    // k=31 window is still all-`A`.
+    run_build_index_from_read_diff_on(build_index_read_homopolymer_leading(), 31, -7, 12);
 }
 
 #[test]

@@ -23,7 +23,13 @@ uint64_t fg_t1k_canonical_kmer(const char* seq, int len, int k) {
 // Opaque-handle FFI for KmerCode. Each function casts the opaque `void*`
 // back to `KmerCode*` and forwards to the corresponding method, so Rust can
 // drive a real C++ KmerCode instance step-by-step (see shim.h).
-void* fg_t1k_kmercode_new(int k) { return new KmerCode(k); }
+void* fg_t1k_kmercode_new(int k) {
+    try {
+        return new KmerCode(k);
+    } catch (...) {
+        return nullptr;
+    }
+}
 void fg_t1k_kmercode_free(void* p) { delete static_cast<KmerCode*>(p); }
 void fg_t1k_kmercode_restart(void* p) { static_cast<KmerCode*>(p)->Restart(); }
 void fg_t1k_kmercode_append(void* p, char c) { static_cast<KmerCode*>(p)->Append(c); }
@@ -140,11 +146,22 @@ int fg_t1k_kmerindex_search_size(void* idxp, void* kcp) {
 
 void fg_t1k_kmerindex_search_get(void* idxp, void* kcp, int i, uint32_t* out_idx,
                                   uint32_t* out_offset) {
-    SimpleVector<struct _indexInfo>* list =
-        static_cast<KmerIndex*>(idxp)->Search(*static_cast<KmerCode*>(kcp));
-    struct _indexInfo entry = (*list)[i];
-    *out_idx = entry.idx;
-    *out_offset = entry.offset;
+    try {
+        SimpleVector<struct _indexInfo>* list =
+            static_cast<KmerIndex*>(idxp)->Search(*static_cast<KmerCode*>(kcp));
+        struct _indexInfo entry = (*list)[i];
+        *out_idx = entry.idx;
+        *out_offset = entry.offset;
+    } catch (...) {
+        // No return value to signal failure through; on exception, write a
+        // clear sentinel rather than leaving *out_idx/*out_offset
+        // uninitialized. Defense-in-depth only: the Rust caller only ever
+        // calls this for `i in 0..search_size` on an unmutated index (see
+        // CppKmerIndex::search), so `Search`/operator[] are not expected to
+        // throw in that usage.
+        *out_idx = 0;
+        *out_offset = 0;
+    }
 }
 
 void fg_t1k_kmerindex_build_index_from_read(void* idxp, void* kcp, const char* s, int len, int id,
