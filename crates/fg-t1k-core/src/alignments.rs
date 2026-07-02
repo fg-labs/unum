@@ -1,12 +1,14 @@
 //! BAM/CRAM reader ported from the slice of T1K's `Alignments` class
 //! (`vendor/t1k/alignments.hpp`) that `BamExtractor.cpp` uses, over
-//! **rust-htslib** (`bam::Reader`) rather than the bundled samtools-0.1.19 /
-//! htslib-1.15.1 C library T1K links against directly. Since both are
-//! libhts-family readers operating on the same BAM/CRAM record layout, a
-//! record parses identically either way; this module's job is to reproduce
-//! `Alignments`' *interpretation* of that record (orientation handling,
-//! CIGAR-to-segments splitting, the `fragStdev`/`readLen` pre-scan) bit-for-
-//! bit, not the low-level parsing itself.
+//! **rust-htslib** (`bam::Reader`) rather than the C++ `Alignments` class'
+//! own htslib 1.19.1 C library (the oracle build now links via `-DHTSLIB`
+//! against hts-sys's htslib -- the same version/build rust-htslib itself
+//! links -- see `crates/fg-t1k-sys/build.rs`). Since both are htslib-family
+//! readers operating on the same BAM/CRAM record layout, a record parses
+//! identically either way; this module's job is to reproduce `Alignments`'
+//! *interpretation* of that record (orientation handling, CIGAR-to-segments
+//! splitting, the `fragStdev`/`readLen` pre-scan) bit-for-bit, not the
+//! low-level parsing itself.
 //!
 //! # `GetReadSeq`/`GetQual`: reverse-strand records are returned in ORIGINAL
 //! sequencing orientation, not reference-forward

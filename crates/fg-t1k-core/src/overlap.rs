@@ -216,7 +216,7 @@ fn binary_search_lis(top: &[usize], size: usize, val_a: i32, hits: &[Pair]) -> i
     let mut l: i32 = 0;
     let mut r: i32 = i32::try_from(size).unwrap_or(i32::MAX) - 1;
     while l <= r {
-        let m = (l + r) / 2;
+        let m = i32::midpoint(l, r);
         #[allow(clippy::cast_sign_loss)]
         let hit_a = hits[top[m as usize]].a;
         match val_a.cmp(&hit_a) {

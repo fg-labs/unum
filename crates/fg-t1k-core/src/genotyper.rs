@@ -3842,7 +3842,8 @@ impl Genotyper {
             }
 
             if local_qual >= 0 {
-                buffer.push_str(&format!("{sep}{abundance:.6}{sep}{local_qual}"));
+                use std::fmt::Write as _;
+                write!(buffer, "{sep}{abundance:.6}{sep}{local_qual}").unwrap();
             } else if type_ <= 1 {
                 buffer.push_str(".\t0\t-1");
             }

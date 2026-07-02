@@ -1665,13 +1665,15 @@ impl VariantCaller {
         names: &[String],
         exonic_position: impl Fn(usize, i32) -> i32,
     ) -> String {
+        use std::fmt::Write as _;
         let mut out = String::new();
         for variant in &self.final_variants {
             let filter = if variant.qual > 0 { "PASS" } else { "FAIL" };
             let seq_idx = usize::try_from(variant.seq_idx).unwrap();
             let exon_ref_start = exonic_position(seq_idx, variant.ref_start);
-            out.push_str(&format!(
-                "{} {} . {} {} . {} {:.6} {:.6} {:.6} {} {}\n",
+            writeln!(
+                out,
+                "{} {} . {} {} . {} {:.6} {:.6} {:.6} {} {}",
                 names[seq_idx],
                 exon_ref_start + 1,
                 variant.reference as char,
@@ -1682,7 +1684,8 @@ impl VariantCaller {
                 variant.var_uniq_support,
                 variant.ref_start,
                 variant.output_group_id,
-            ));
+            )
+            .unwrap();
         }
         out
     }
@@ -1968,7 +1971,7 @@ mod tests {
             use crate::align_algo::{EDIT_DELETE, EDIT_MATCH};
             let mut ops = vec![EDIT_MATCH; 5];
             ops.push(EDIT_DELETE);
-            ops.extend(std::iter::repeat(EDIT_MATCH).take(14));
+            ops.extend(std::iter::repeat_n(EDIT_MATCH, 14));
             ops
         };
         let mut read1 = Vec::new();
@@ -2052,7 +2055,7 @@ mod tests {
             use crate::align_algo::{EDIT_DELETE, EDIT_INSERT, EDIT_MATCH};
             let mut ops = vec![EDIT_MATCH; 5];
             ops.push(EDIT_DELETE); // consumes ref pos 5 ('C'), no read base
-            ops.extend(std::iter::repeat(EDIT_MATCH).take(14)); // ref 6..=19
+            ops.extend(std::iter::repeat_n(EDIT_MATCH, 14)); // ref 6..=19
             ops.push(EDIT_INSERT); // trailing insert: refPos already at 20
             ops
         };
