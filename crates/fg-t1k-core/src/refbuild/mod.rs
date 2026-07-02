@@ -3,6 +3,7 @@
 //! the FASTA references T1K's genotyper indexes.
 
 pub mod dat;
+mod drand48;
 pub mod gene_coord;
 
 use std::path::Path;
@@ -44,8 +45,7 @@ use dat::SeqKind;
 /// # Errors
 ///
 /// Returns an error if `out_dir` cannot be created, `dat` or `gtf` cannot be read/parsed, any
-/// seq/coord FASTA cannot be emitted (see [`dat::emit_seq_fasta`]'s synthetic-UTR-fallback caveat),
-/// or an output file cannot be written.
+/// seq/coord FASTA cannot be emitted, or an output file cannot be written.
 pub fn build_reference(dat: &Path, gtf: &Path, out_dir: &Path, prefix: &str) -> Result<()> {
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating output directory {}", out_dir.display()))?;
