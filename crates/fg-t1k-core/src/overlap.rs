@@ -60,10 +60,10 @@ pub(crate) struct Triple {
     pub c: i32,
 }
 
-/// A single k-mer hit, ported from `_hit` (`SeqSet.hpp:66-87`), extended
-/// (relative to [`crate::ref_kmer_filter::Hit`]) with `repeats`
-/// (`_hit::repeats`, `SeqSet.hpp:72`), which only [`get_overlaps_from_hits`]'s
-/// `filter == 1` branches consume. This is a standalone type (rather than
+/// A single k-mer hit, ported from `_hit` (`SeqSet.hpp:66-87`). Field-identical
+/// to [`crate::ref_kmer_filter::Hit`] (both carry `repeats`, `_hit::repeats`,
+/// `SeqSet.hpp:72`); here `repeats` is consumed only by
+/// [`get_overlaps_from_hits`]'s `filter == 1` branches. This is a standalone type (rather than
 /// reusing `ref_kmer_filter::Hit` directly) so this module has no dependency
 /// on `ref_kmer_filter`'s internals; callers convert at the boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

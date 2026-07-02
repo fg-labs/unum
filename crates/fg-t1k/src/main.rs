@@ -12,5 +12,6 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Run(args) => stages::run(&args),
         Commands::Build(args) => stages::build::run(&args),
+        Commands::Extract(args) => stages::extract::run(&args),
     }
 }

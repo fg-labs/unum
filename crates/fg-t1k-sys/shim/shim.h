@@ -80,10 +80,12 @@ void fg_t1k_kmerindex_build_index_from_read(void* idxp, void* kcp, const char* s
                                               int id, int shift);
 
 // Opaque-handle FFI for SeqSet (the FastqExtractor/BamExtractor read-
-// candidate-filtering slice only: reference load + GetHitsFromRead +
-// HasHitInSet's bucket-count gate + IsLowComplexity/IsGoodCandidate. NOT
-// GetOverlapsFromHits/AlignAlgo -- see fg-t1k-core's ref_kmer_filter module
-// docs for why). The handle is an opaque `void*` (really a `SeqSet*`);
+// candidate-filtering slice: reference load + GetHitsFromRead + HasHitInSet +
+// IsLowComplexity/IsGoodCandidate). These entries call the real, unmodified
+// stock C++ (e.g. HasHitInSet runs IN FULL, including its
+// GetOverlapsFromHits/AlignAlgo mismatch-threshold confirmation) so they serve
+// as the differential oracle for fg-t1k-core's Rust port. The handle is an
+// opaque `void*` (really a `SeqSet*`);
 // callers must free it exactly once via fg_t1k_seqset_free.
 // `fg_t1k_seqset_new` returns NULL if construction throws -- callers MUST
 // check for a NULL handle before using it.

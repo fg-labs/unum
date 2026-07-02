@@ -14,5 +14,6 @@ t1k-sys = []
 cc = "1"
 
 [dev-dependencies]
+anyhow = "1"
 fg-t1k-core = { path = "../fg-t1k-core" }
 tempfile = "3"
