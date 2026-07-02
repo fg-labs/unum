@@ -78,6 +78,39 @@ void fg_t1k_kmerindex_search_get(void* idxp, void* kcp, int i, uint32_t* out_idx
 // which never calls strlen on `s`).
 void fg_t1k_kmerindex_build_index_from_read(void* idxp, void* kcp, const char* s, int len,
                                               int id, int shift);
+
+// Opaque-handle FFI for SeqSet (the FastqExtractor/BamExtractor read-
+// candidate-filtering slice only: reference load + GetHitsFromRead +
+// HasHitInSet's bucket-count gate + IsLowComplexity/IsGoodCandidate. NOT
+// GetOverlapsFromHits/AlignAlgo -- see fg-t1k-core's ref_kmer_filter module
+// docs for why). The handle is an opaque `void*` (really a `SeqSet*`);
+// callers must free it exactly once via fg_t1k_seqset_free.
+// `fg_t1k_seqset_new` returns NULL if construction throws -- callers MUST
+// check for a NULL handle before using it.
+void* fg_t1k_seqset_new(int kmerLength);
+void fg_t1k_seqset_free(void* p);
+// Mirrors `SeqSet::InputRefFa(char* filename)` (SeqSet.hpp:872-904): loads
+// every FASTA record in `fastaPath`, indexing each sequence's k-mers with
+// `id` = its 0-based load order (matching stock's `id = seqs.size()` at
+// insertion time). Returns 0 on success, -1 if the underlying call threw
+// (e.g. the file could not be opened).
+int fg_t1k_seqset_load_ref(void* p, const char* fastaPath);
+// Mirrors the free function `IsLowComplexity` (FastqExtractor.cpp:89-111,
+// byte-identical to BamExtractor.cpp:144-166) -- NOT a SeqSet method; `p` is
+// unused (kept for call-site symmetry with the other fg_t1k_seqset_* FFI
+// entries). `seq` must be a NUL-terminated C string. Returns 1/0.
+int fg_t1k_seqset_is_low_complexity(void* p, const char* seq);
+// Mirrors `SeqSet::HasHitInSet(char* read, char* rcRead)` (SeqSet.hpp:
+// 1915-1990) IN FULL, including the GetOverlapsFromHits/AlignAlgo-based
+// mismatch-threshold confirmation this port's Rust side deliberately does
+// NOT implement (see ref_kmer_filter module docs) -- this is the real,
+// unmodified stock C++ oracle. `read` must be a NUL-terminated C string;
+// `rcRead`'s scratch buffer is allocated internally. Returns 1/0.
+int fg_t1k_seqset_has_hit_in_set(void* p, const char* read);
+// Mirrors the free function `IsGoodCandidate` (FastqExtractor.cpp:113-118):
+// `!IsLowComplexity(read) && refSet->HasHitInSet(read, buffer)`. Returns
+// 1/0.
+int fg_t1k_seqset_is_good_candidate(void* p, const char* read);
 #ifdef __cplusplus
 }
 #endif
