@@ -6,15 +6,20 @@
 //! in the C++ rather than delegating to a `Genotyper` method -- right here, matching that same
 //! split of responsibility.
 //!
-//! # Scope: single-threaded, paired/single-end FASTQ, no barcode/`-a`/whitelist
+//! # Scope: paired/single-end FASTQ, no barcode/`-a`/whitelist
 //!
-//! This port only reproduces `Genotyper.cpp:main`'s `threadCnt <= 1` code path (`Genotyper.cpp:
-//! 463-480,531-574`) -- the multi-threaded path is a batching/parallelism detail over the exact
-//! same per-read logic, not a different algorithm, so single-threaded output is what an
-//! end-to-end differential against the real oracle (also run at `-t 1`) must match.
-//! `--barcode`/`-a` (a precomputed abundance file, skipping `QuantifyAlleleEquivalentClass`
-//! entirely)/`--alleleWhitelist`/`--outputReadAssignment` are not exposed by [`GenotypeArgs`] --
-//! see that struct's doc comment.
+//! This port reproduces `Genotyper.cpp:main`'s per-read logic exactly (`Genotyper.cpp:463-480,
+//! 531-574`); it does not replicate stock's own `threadCnt > 1` batching mechanics, but achieves
+//! the same output-determinism property via a different means: `-t`/`--threads` parallelizes
+//! only the read-only `get_overlaps_from_read` phase of the read-assignment loop (see
+//! `unum_core::genotyper::assign_reads_parallel`'s doc comment), while every shared-state
+//! mutation (`assign_read`'s `allele_refs` coverage marking, and everything downstream --
+//! fragment assembly, `CoalesceReadAssignments`, the EM/quantification, allele selection) stays
+//! strictly sequential in a fixed, thread-count-independent order. So `-t N` output is
+//! byte-identical to `-t 1` (and to the oracle, itself always run at `-t 1` for the end-to-end
+//! differential) at any `N`. `--barcode`/`-a` (a precomputed abundance file, skipping
+//! `QuantifyAlleleEquivalentClass` entirely)/`--alleleWhitelist`/`--outputReadAssignment` are not
+//! exposed by [`GenotypeArgs`] -- see that struct's doc comment.
 //!
 //! # Reference loading mirrors `Genotyper::InitRefSet` (`Genotyper.hpp:706-727`)
 //!
@@ -278,10 +283,11 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     // `overlaps_by_seq` mirrors `AssignReads_Thread`/the single-threaded loop
     // at `Genotyper.cpp:463-480`: sort ALL read ends (mate 1 + mate 2) by
     // sequence, and call AssignRead once per distinct sequence, reusing the
-    // result for every read end sharing that exact sequence. `allele_refs`
-    // must be `&mut` (AssignRead marks base coverage in place), so this is
-    // a plain sequential loop -- see this module's "single-threaded" scope
-    // note.
+    // result for every read end sharing that exact sequence. `-t`/`--threads`
+    // parallelizes the dominant `get_overlaps_from_read` cost across
+    // `sorted_seqs`; `assign_read`'s `allele_refs` mutation always runs
+    // sequentially in `sorted_seqs` order, so output is byte-identical at any
+    // thread count -- see `genotyper::assign_reads_parallel`'s doc comment.
     let mut allele_refs = loaded.allele_refs;
     let mut all_seqs: Vec<&[u8]> = reads1.iter().map(|r| r.seq.as_slice()).collect();
     all_seqs.extend(reads2.iter().map(|r| r.seq.as_slice()));
@@ -289,18 +295,21 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     sorted_seqs.sort_unstable();
     sorted_seqs.dedup();
 
-    let mut overlaps_by_seq: HashMap<&[u8], Option<Vec<ExtendedOverlap>>> = HashMap::new();
     let mut counted: HashMap<&[u8], i32> = HashMap::new();
     for &seq in &all_seqs {
         *counted.entry(seq).or_insert(0) += 1;
     }
-    for &seq in &sorted_seqs {
-        let weight = counted[seq];
-        let raw_overlaps = filter
-            .get_overlaps_from_read(seq, &mut unum_core::ref_kmer_filter::Scratch::default())
-            .unwrap_or_default();
-        let extended =
-            genotyper::assign_read(seq, &raw_overlaps, &mut allele_refs, args.similarity, weight);
+    let threads = usize::try_from(args.threads).unwrap_or(usize::MAX).max(1);
+    let extended_by_seq = genotyper::assign_reads_parallel(
+        &filter,
+        &sorted_seqs,
+        &mut allele_refs,
+        args.similarity,
+        |seq| counted[seq],
+        threads,
+    );
+    let mut overlaps_by_seq: HashMap<&[u8], Option<Vec<ExtendedOverlap>>> = HashMap::new();
+    for (&seq, extended) in sorted_seqs.iter().zip(extended_by_seq) {
         overlaps_by_seq.insert(seq, extended);
     }
 

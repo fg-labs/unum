@@ -139,11 +139,11 @@ pub struct GenotypeArgs {
     #[arg(short = 'o', long = "prefix", default_value = "t1k", value_name = "STRING")]
     pub prefix: String,
 
-    /// Number of threads. Accepted for CLI compatibility -- this port always runs
-    /// single-threaded internally (mirrors `Genotyper.cpp`'s `threadCnt <= 1` code path, the
-    /// only one this port reproduces; both paths are deterministically byte-identical for a
-    /// single genotyping run, so `-t 1` is the only value this CLI needs to accept for the
-    /// end-to-end differential to compare cleanly).
+    /// Number of threads used to parallelize the per-read `get_overlaps_from_read` computation
+    /// in the read-assignment loop. Output is byte-identical at any `-t` -- see
+    /// `unum_core::genotyper::assign_reads_parallel`'s doc comment for why (the shared-state
+    /// `assign_read` mutation, and everything downstream, always runs sequentially in a fixed
+    /// order regardless of `-t`).
     #[arg(short = 't', default_value_t = 1)]
     pub threads: u32,
 
