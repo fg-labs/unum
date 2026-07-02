@@ -302,6 +302,44 @@ int fg_t1k_seqset_is_good_candidate(void* p, const char* read) {
     }
 }
 
+int fg_t1k_seqset_get_overlaps_from_read(void* p, const char* read, int out_capacity,
+                                          int* out_seq_idx, int* out_strand,
+                                          int* out_read_start, int* out_read_end,
+                                          int* out_seq_start, int* out_seq_end,
+                                          int* out_match_cnt, double* out_similarity,
+                                          int* out_count) {
+    try {
+        SeqSet* seqSet = static_cast<SeqSet*>(p);
+        std::vector<struct _overlap> overlaps;
+        // GetOverlapsFromRead takes non-const char* but never mutates
+        // `read` itself (it only reads it and writes into its own
+        // internally-allocated rcRead buffer); const_cast is safe here.
+        // strand=0 (search both strands), barcode=-1 (no barcode
+        // filtering) -- matching RefKmerFilter::get_overlaps_from_read's
+        // own fixed parameters (see shim.h).
+        int overlapCnt =
+            seqSet->GetOverlapsFromRead(const_cast<char*>(read), 0, -1, overlaps);
+        *out_count = overlapCnt;
+        if (overlapCnt <= 0) {
+            return 0;
+        }
+        int n = overlapCnt < out_capacity ? overlapCnt : out_capacity;
+        for (int i = 0; i < n; ++i) {
+            out_seq_idx[i] = overlaps[i].seqIdx;
+            out_strand[i] = overlaps[i].strand;
+            out_read_start[i] = overlaps[i].readStart;
+            out_read_end[i] = overlaps[i].readEnd;
+            out_seq_start[i] = overlaps[i].seqStart;
+            out_seq_end[i] = overlaps[i].seqEnd;
+            out_match_cnt[i] = overlaps[i].matchCnt;
+            out_similarity[i] = overlaps[i].similarity;
+        }
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
 // Opaque-handle FFI for Alignments (vendor/t1k/alignments.hpp), scoped to
 // the BamExtractor.cpp slice -- see shim.h for the documented scope. Every
 // entry point is wrapped in try/catch per this shim's exception-safety rule

@@ -128,6 +128,19 @@ const DEFAULT_REF_SEQ_SIMILARITY: f64 = 0.8;
 /// `overlap::get_overlaps_from_hits`'s `is_long_seq_set` parameter.
 const IS_LONG_SEQ_SET: bool = false;
 
+/// `SeqSet`'s default `novelSeqSimilarity` (`SeqSet.hpp:767`), used by
+/// [`RefKmerFilter::get_overlaps_from_read`]'s final similarity filter for
+/// non-`isRef` overlaps (`SeqSet.hpp:1898`). Fixed at the `SeqSet(kmerLength)`
+/// constructor default; see [`DEFAULT_HIT_LEN_REQUIRED`]'s doc comment for
+/// why this port does not replicate any dynamic `Set*` call. Every sequence
+/// loaded via [`RefKmerFilter::from_reference_fasta`] is `isRef == true` (see
+/// module docs), so this constant is currently unexercised by any reachable
+/// overlap in this codebase -- ported anyway, per this port's "ported
+/// generally, not overfit" discipline (see [`crate::overlap`]'s module docs
+/// for the same principle applied to `GetOverlapsFromHits`'s `filter == 1`
+/// branches).
+const DEFAULT_NOVEL_SEQ_SIMILARITY: f64 = 0.9;
+
 /// A single k-mer hit collected by [`RefKmerFilter::get_hits_from_read`],
 /// mirroring the FFI-relevant fields of T1K's `struct _hit`
 /// (`SeqSet.hpp:66-87`), including `repeats` (`_hit::repeats`,
@@ -168,6 +181,80 @@ impl Hit {
             strand: self.strand,
             repeats: self.repeats,
         }
+    }
+}
+
+/// Ported from `_hit::operator<` (`SeqSet.hpp:74-86`): ascending by
+/// `strand`, then `indexHit.idx`, then `readOffset`, then `indexHit.offset`.
+/// This is the comparator `SortHits`'s `std::sort` fallback branch uses
+/// (`SeqSet.hpp:1589`); see [`sort_hits`]'s doc comment for the full
+/// bucket-sort-vs-`std::sort` dispatch this feeds into.
+#[must_use]
+fn hit_less_than(a: &Hit, b: &Hit) -> bool {
+    if a.strand != b.strand {
+        return a.strand < b.strand;
+    }
+    if a.idx != b.idx {
+        return a.idx < b.idx;
+    }
+    if a.read_offset != b.read_offset {
+        return a.read_offset < b.read_offset;
+    }
+    a.offset < b.offset
+}
+
+/// Ported from `SeqSet::SortHits` (`SeqSet.hpp:1558-1590`): reorders `hits`
+/// in place, either via a `(strand-tag, seqIdx)` bucket sort (STABLE within
+/// each bucket, since it's built by a single forward `PushBack` pass per
+/// hit) or a plain `std::sort` using [`hit_less_than`] as the comparator.
+///
+/// The bucket-sort path is taken only when `hits.len() > 2 * seq_count &&
+/// already_read_order` (mirrors `SeqSet.hpp:1561`); `GetOverlapsFromRead`
+/// always passes `already_read_order = true` (`SeqSet.hpp:1605`), so this
+/// port's only caller always has that half of the condition satisfied --
+/// the `hits.len() > 2 * seq_count` half is genuinely data-dependent and
+/// reproduced as-is.
+///
+/// # Bucket sort is a STABLE reordering by `(tag, idx)`, not a full sort
+///
+/// Unlike [`hit_less_than`] (which also orders by `readOffset`/`offset`
+/// within a tied `(strand, idx)` group), the bucket-sort path does NOT sort
+/// within each `(tag, idx)` bucket at all -- it simply partitions `hits`
+/// into `2 * seqCnt` buckets (by ascending `tag` then ascending `idx`) and
+/// concatenates them back together in bucket order, preserving each hit's
+/// ORIGINAL relative order within its bucket (`PushBack` in encounter
+/// order, `SeqSet.hpp:1570-1574`). This port reproduces that exact
+/// semantics via a stable sort keyed only on `(tag, idx)` (Rust's
+/// `sort_by_key`/`sort_by` are documented stable), NOT [`hit_less_than`]
+/// (which would additionally reorder within a bucket by `readOffset`/
+/// `offset` -- a different, and for this branch WRONG, result).
+pub(crate) fn sort_hits(hits: &mut [Hit], already_read_order: bool, seq_count: usize) {
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let two_seq_count = 2 * seq_count as i64;
+    if i64::try_from(hits.len()).unwrap_or(i64::MAX) > two_seq_count && already_read_order {
+        // Bucket sort: stable partition by (tag, idx), tag = (strand==1) as
+        // 0/1, buckets visited tag=0 (idx ascending) THEN tag=1 (idx
+        // ascending) -- SeqSet.hpp:1577-1583's `for k in 0..=1 { for i in
+        // 0..seqCnt { ... } }` nesting.
+        hits.sort_by_key(|h| (i8::from(h.strand == 1), h.idx));
+    } else {
+        // `hit_less_than` is a strict total order over every field of `Hit`
+        // that participates in equality (strand, idx, read_offset, offset --
+        // `repeats` is not compared), so two hits only tie here if they are
+        // bit-identical in those four fields; `sort_unstable_by`'s lack of a
+        // stability guarantee is therefore unobservable, matching this
+        // codebase's established convention for other strict-total-order
+        // comparators (see `overlap.rs`'s `comp_sort_hit_coord_diff` doc
+        // comment for the same argument).
+        hits.sort_unstable_by(|a, b| {
+            if hit_less_than(a, b) {
+                std::cmp::Ordering::Less
+            } else if hit_less_than(b, a) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
     }
 }
 
@@ -568,6 +655,369 @@ impl RefKmerFilter {
         overlaps.iter().any(|o| read_len_i32 - o.match_cnt / 2 <= mismatch_threshold)
     }
 
+    /// Ported from `SeqSet::GetOverlapsFromRead` (`SeqSet.hpp:1594-1912`):
+    /// the read-to-allele alignment/scoring core the Genotyper (a later
+    /// phase) depends on. Turns a single read into a list of scored,
+    /// `AlignAlgo`-confirmed [`overlap::Overlap`]s -- unlike
+    /// [`RefKmerFilter::has_hit_in_set`]'s gate 2 (which only ever reads
+    /// `matchCnt` from the LIS-chained hit length, `overlap::Overlap::match_cnt`'s
+    /// doc comment), this method fully reproduces stock's per-overlap
+    /// `AlignAlgo`-based `matchCnt`/`similarity` refinement.
+    ///
+    /// Returns `None` if `read.len() < kmer_length` (mirrors stock's `return
+    /// -1`, `SeqSet.hpp:1598-1599` -- surfaced here as `Option` rather than a
+    /// sentinel `-1`, since this port's caller always has a real `Vec` to
+    /// inspect either way).
+    ///
+    /// # `isRef` is always `true` for every seq loaded via `from_reference_fasta`
+    ///
+    /// Every reference sequence loaded by [`RefKmerFilter::from_reference_fasta`]
+    /// is `isRef == true` (see module docs), and a ref-only `SeqSet` never
+    /// populates `posWeight` -- so the `!isRef` / `GlobalAlignment_PosWeight`
+    /// branches below are ported faithfully (not overfit away) but are
+    /// PROVABLY UNREACHABLE from any overlap this method can actually
+    /// produce in this codebase today: [`RefKmerFilter::is_ref`] (this
+    /// type's per-seq `isRef` query, mirroring `_seqWrapper::isRef`) always
+    /// returns `true`. A future caller that builds novel (non-reference)
+    /// sequences -- e.g. a Genotyper port -- would need to extend
+    /// [`RefKmerFilter`] with a real per-seq `isRef`/`posWeight` model
+    /// (replacing [`RefKmerFilter::is_ref`]'s hardcoded `true` and the
+    /// placeholder all-zero-count `PosWeight` this method substitutes below)
+    /// before those branches become live.
+    ///
+    /// # FLOATS: `similarity` is a plain, deterministic `f64` ratio
+    ///
+    /// `similarity = (double)matchCnt / (seqSpan + readSpan)` (`SeqSet.hpp:
+    /// 1838-1840`) is reproduced as `f64::from(match_cnt) /
+    /// f64::from(seq_span + read_span)` in that exact operand order --
+    /// bit-identical to the C++, not merely close. See [`overlap::overlap_less_than`]'s
+    /// doc comment for the same exactness requirement applied to
+    /// `_overlap::operator<`'s `similarity` comparison.
+    #[must_use]
+    // `int_plus_one`: this function's `... + kmerLength - 1 >= ...` guards are
+    // deliberately kept in the C++'s own `x - 1 >= y` form (rather than
+    // clippy's suggested `x > y`) throughout, to stay line-comparable to
+    // `SeqSet.hpp:1704,1770-1786` for future maintainers cross-checking a fix
+    // against the vendored source -- see `align_algo.rs`'s module docs for
+    // the same "line-comparable over clippy's preferences" convention
+    // applied elsewhere in this port.
+    #[allow(clippy::too_many_lines, clippy::int_plus_one)]
+    pub fn get_overlaps_from_read(
+        &self,
+        read: &[u8],
+        scratch: &mut Scratch,
+    ) -> Option<Vec<overlap::Overlap>> {
+        let len = read.len();
+        if len < self.kmer_length {
+            return None;
+        }
+
+        self.get_hits_from_read(read, scratch);
+        sort_hits(&mut scratch.hits, true, self.seq_count);
+
+        let winning_hits: Vec<OverlapHit> =
+            scratch.hits.iter().map(|hit| hit.to_overlap_hit()).collect();
+
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let kmer_length_i32 = self.kmer_length as i32;
+        let overlaps_with_coords = overlap::get_overlaps_from_hits_with_coords(
+            &winning_hits,
+            self.hit_len_required,
+            0, // filter: GetOverlapsFromRead always passes filter=0 (SeqSet.hpp:1614).
+            |idx| self.is_ref(idx),
+            DEFAULT_RADIUS,
+            IS_LONG_SEQ_SET,
+            kmer_length_i32,
+        );
+
+        let mut overlaps: Vec<overlap::Overlap> =
+            overlaps_with_coords.iter().map(|(o, _)| *o).collect();
+        let mut overlaps_hit_coords: Vec<Vec<overlap::Pair>> =
+            overlaps_with_coords.into_iter().map(|(_, coords)| coords).collect();
+
+        // Strand filter (SeqSet.hpp:1619-1648): find bestOverlapIdx via
+        // overlap::overlap_less_than (the FIRST index achieving the minimum
+        // under that ordering -- `<` strictly, so later ties do not
+        // displace an earlier winner, matching C++'s `if (overlaps[i] <
+        // overlaps[bestOverlapIdx]) bestOverlapIdx = i` loop exactly), then
+        // compact `overlaps`/`overlaps_hit_coords` in place to keep only
+        // entries whose strand matches the winner's.
+        if !overlaps.is_empty() {
+            let mut best_overlap_idx = 0usize;
+            for i in 1..overlaps.len() {
+                if overlap::overlap_less_than(&overlaps[i], &overlaps[best_overlap_idx]) {
+                    best_overlap_idx = i;
+                }
+            }
+            let best_strand = overlaps[best_overlap_idx].strand;
+
+            let mut k = 0usize;
+            for i in 0..overlaps.len() {
+                if overlaps[i].strand != best_strand {
+                    continue;
+                }
+                if i != k {
+                    overlaps[k] = overlaps[i];
+                    overlaps_hit_coords[k] = std::mem::take(&mut overlaps_hit_coords[i]);
+                }
+                k += 1;
+            }
+            overlaps.truncate(k);
+            overlaps_hit_coords.truncate(k);
+        }
+
+        reverse_complement_into(read, &mut scratch.rc_buf);
+        let rc_read = scratch.rc_buf.clone();
+
+        // Per-overlap AlignAlgo-based matchCnt/similarity refinement
+        // (SeqSet.hpp:1660-1882). `firstRef`/`bestNovelOverlap`/
+        // `readOverlapRepresentatives` are computed for fidelity with stock
+        // (see this function's own inline comments below) but -- as in
+        // stock -- never feed back into which overlaps are kept; only the
+        // final refSeqSimilarity/novelSeqSimilarity filter below does that.
+        let mut first_ref: i32 = -1;
+        let mut best_novel_overlap: i32 = -1;
+        let mut read_overlap_representatives: Vec<usize> = Vec::new();
+
+        for i in 0..overlaps.len() {
+            let r: &[u8] = if overlaps[i].strand == 1 { read } else { &rc_read };
+            let hit_coords = &overlaps_hit_coords[i];
+            let hit_cnt = hit_coords.len();
+
+            let mut match_cnt: i32 = 0;
+            let mut mismatch_cnt: i32 = 0;
+            let mut indel_cnt: i32 = 0;
+            let mut similarity: f64 = 1.0;
+
+            let is_ref = self.is_ref(overlaps[i].seq_idx);
+            if is_ref && first_ref == -1 {
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                {
+                    first_ref = i as i32;
+                }
+            }
+
+            match_cnt += 2 * kmer_length_i32;
+
+            for j in 1..hit_cnt {
+                let prev = hit_coords[j - 1];
+                let cur = hit_coords[j];
+
+                if prev.b - prev.a == cur.b - cur.a {
+                    // Same coordinate diff: colinear on both read and seq.
+                    if prev.a + kmer_length_i32 - 1 >= cur.a {
+                        match_cnt += 2 * (cur.a - prev.a);
+                    } else {
+                        match_cnt += 2 * kmer_length_i32;
+
+                        let align = if is_ref {
+                            let seq_slice = seq_gap_slice(
+                                &self.seqs[overlaps[i].seq_idx as usize],
+                                prev.b + kmer_length_i32,
+                                cur.b - (prev.b + kmer_length_i32),
+                            );
+                            let read_slice = read_gap_slice(
+                                r,
+                                prev.a + kmer_length_i32,
+                                cur.a - (prev.a + kmer_length_i32),
+                            );
+                            crate::align_algo::global_alignment(
+                                seq_slice,
+                                read_slice,
+                                crate::align_algo::DEFAULT_BAND,
+                            )
+                        } else {
+                            // Novel-seq path: ported but unreachable from
+                            // this codebase's overlaps (see this method's
+                            // doc comment). `posWeight` is not modeled by
+                            // `RefKmerFilter`, so this substitutes an
+                            // all-zero-count (i.e. "no support", always
+                            // `is_base_equal == true`) posWeight slice of
+                            // the matching length -- the correct behavior
+                            // once a real posWeight source exists is to
+                            // replace this placeholder, not to change the
+                            // control flow here.
+                            let gap_len = cur.b - (prev.b + kmer_length_i32);
+                            #[allow(clippy::cast_sign_loss)]
+                            let weights = vec![
+                                crate::align_algo::PosWeight::default();
+                                gap_len.max(0) as usize
+                            ];
+                            let read_slice = read_gap_slice(
+                                r,
+                                prev.a + kmer_length_i32,
+                                cur.a - (prev.a + kmer_length_i32),
+                            );
+                            crate::align_algo::global_alignment_pos_weight(&weights, read_slice)
+                        };
+
+                        let (mut m, mut mm, mut ind) = (0, 0, 0);
+                        crate::align_algo::get_align_stats(
+                            &align.align,
+                            false,
+                            &mut m,
+                            &mut mm,
+                            &mut ind,
+                        );
+                        match_cnt += 2 * m;
+                        mismatch_cnt += mm;
+                        indel_cnt += ind;
+
+                        if (DEFAULT_RADIUS == 0 || !is_ref) && indel_cnt > 0 {
+                            similarity = 0.0;
+                            break;
+                        }
+                    }
+                } else {
+                    // Different coordinate diff: non-colinear hit pair.
+                    if DEFAULT_RADIUS == 0 || !is_ref {
+                        similarity = 0.0;
+                        break;
+                    }
+
+                    if prev.a + kmer_length_i32 - 1 >= cur.a && prev.b + kmer_length_i32 - 1 < cur.b
+                    {
+                        match_cnt += 2 * (cur.a - prev.a);
+                        indel_cnt += (cur.b - (prev.b + kmer_length_i32))
+                            + (cur.a + kmer_length_i32 - prev.a);
+                    } else if prev.a + kmer_length_i32 - 1 < cur.a
+                        && prev.b + kmer_length_i32 - 1 >= cur.b
+                    {
+                        match_cnt += 2 * (cur.b - prev.b);
+                        indel_cnt += (cur.a - (prev.a + kmer_length_i32))
+                            + (cur.b + kmer_length_i32 - prev.b);
+                    } else if prev.a + kmer_length_i32 - 1 >= cur.a
+                        && prev.b + kmer_length_i32 - 1 >= cur.b
+                    {
+                        match_cnt += 2 * (cur.a - prev.a).min(cur.b - prev.b);
+                        indel_cnt += ((cur.a - cur.b) - (prev.a - prev.b)).abs();
+                    } else {
+                        match_cnt += 2 * kmer_length_i32;
+
+                        let align = if is_ref {
+                            let seq_slice = seq_gap_slice(
+                                &self.seqs[overlaps[i].seq_idx as usize],
+                                prev.b + kmer_length_i32,
+                                cur.b - (prev.b + kmer_length_i32),
+                            );
+                            let read_slice = read_gap_slice(
+                                r,
+                                prev.a + kmer_length_i32,
+                                cur.a - (prev.a + kmer_length_i32),
+                            );
+                            crate::align_algo::global_alignment(
+                                seq_slice,
+                                read_slice,
+                                crate::align_algo::DEFAULT_BAND,
+                            )
+                        } else {
+                            let gap_len = cur.b - (prev.b + kmer_length_i32);
+                            #[allow(clippy::cast_sign_loss)]
+                            let weights = vec![
+                                crate::align_algo::PosWeight::default();
+                                gap_len.max(0) as usize
+                            ];
+                            let read_slice = read_gap_slice(
+                                r,
+                                prev.a + kmer_length_i32,
+                                cur.a - (prev.a + kmer_length_i32),
+                            );
+                            crate::align_algo::global_alignment_pos_weight(&weights, read_slice)
+                        };
+
+                        let (mut m, mut mm, mut ind) = (0, 0, 0);
+                        crate::align_algo::get_align_stats(
+                            &align.align,
+                            false,
+                            &mut m,
+                            &mut mm,
+                            &mut ind,
+                        );
+                        match_cnt += 2 * m;
+                        mismatch_cnt += mm;
+                        indel_cnt += ind;
+
+                        if !is_ref && indel_cnt > 0 {
+                            similarity = 0.0;
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = mismatch_cnt; // matches stock: computed, never read after the loop.
+
+            overlaps[i].match_cnt = match_cnt;
+            if (similarity - 1.0).abs() < f64::EPSILON {
+                let seq_span = overlaps[i].seq_end - overlaps[i].seq_start + 1;
+                let read_span = overlaps[i].read_end - overlaps[i].read_start + 1;
+                overlaps[i].similarity = f64::from(match_cnt) / f64::from(seq_span + read_span);
+            } else {
+                overlaps[i].similarity = 0.0;
+            }
+
+            if is_overlap_low_complex(r, &overlaps[i]) {
+                overlaps[i].similarity = 0.0;
+            }
+            overlaps[i].match_cnt = match_cnt;
+
+            if !is_ref && overlaps[i].similarity > 0.0 {
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                let i_i32 = i as i32;
+                if best_novel_overlap == -1
+                    || overlap::overlap_less_than(
+                        &overlaps[i],
+                        &overlaps[usize::try_from(best_novel_overlap).unwrap_or(0)],
+                    )
+                {
+                    best_novel_overlap = i_i32;
+                }
+            }
+
+            if overlaps[i].similarity > 0.0 {
+                let mut found = false;
+                for &k in &read_overlap_representatives {
+                    if overlaps[i].read_start >= overlaps[k].read_start
+                        && overlaps[i].read_end <= overlaps[k].read_end
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    read_overlap_representatives.push(i);
+                }
+            }
+        }
+        let _ = first_ref; // computed for fidelity; never read again (matches stock).
+        let _ = best_novel_overlap; // computed for fidelity; never read again (matches stock).
+        let _ = read_overlap_representatives; // computed for fidelity; never read again (matches stock).
+
+        // Final filter (SeqSet.hpp:1893-1908): keep only overlaps meeting
+        // the isRef-vs-novel similarity threshold.
+        overlaps.retain(|o| {
+            let is_ref = self.is_ref(o.seq_idx);
+            if is_ref {
+                o.similarity >= self.ref_seq_similarity
+            } else {
+                o.similarity >= DEFAULT_NOVEL_SEQ_SIMILARITY
+            }
+        });
+
+        Some(overlaps)
+    }
+
+    /// Every sequence loaded via [`RefKmerFilter::from_reference_fasta`] is a
+    /// reference sequence (`_seqWrapper::isRef == true`, `SeqSet.hpp:883,911`)
+    /// -- see module docs. `_idx` is accepted (rather than an always-`true`
+    /// zero-arg closure) purely to match the `impl Fn(u32) -> bool` shape
+    /// [`overlap::get_overlaps_from_hits`]/[`overlap::get_overlaps_from_hits_with_coords`]
+    /// expect, and to document the extension point for a future novel-seq
+    /// model (see [`RefKmerFilter::get_overlaps_from_read`]'s doc comment).
+    #[allow(clippy::unused_self)]
+    fn is_ref(&self, _idx: u32) -> bool {
+        true
+    }
+
     /// Ported from `SeqSet::GetHitsFromRead` (`SeqSet.hpp:1071-1229`),
     /// specialized to exactly the parameters `HasHitInSet` always passes
     /// (`SeqSet.hpp:1923`: `strand=0`, `barcode=-1`, `allowTotalSkip=false`,
@@ -829,6 +1279,91 @@ fn complement_base(c: u8) -> u8 {
              see this module's doc comment)"
         ),
     }
+}
+
+/// Slices `seq_len` bytes out of `seq` starting at signed offset `start`,
+/// mirroring the C++ pointer arithmetic `seqs[...].consensus + start` (a
+/// `char*`) paired with a separately-computed length argument
+/// (`GetOverlapsFromRead`'s `AlignAlgo::GlobalAlignment(consensus + ..., len,
+/// ...)` call sites, `SeqSet.hpp:1716-1721` etc.). Both `start` and `seq_len`
+/// are always non-negative for every reachable call site in
+/// [`RefKmerFilter::get_overlaps_from_read`] (see that method's inline
+/// comments deriving the non-negativity from each branch's guard condition);
+/// this helper still uses checked `usize` conversions (rather than
+/// `as usize`) so a violated invariant panics loudly instead of silently
+/// wrapping.
+///
+/// # Panics
+///
+/// Panics if `start`/`seq_len` are negative, or if `start + seq_len` exceeds
+/// `seq.len()`.
+fn seq_gap_slice(seq: &[u8], start: i32, seq_len: i32) -> &[u8] {
+    let start = usize::try_from(start).expect("seq_gap_slice: start must be non-negative");
+    let seq_len = usize::try_from(seq_len).expect("seq_gap_slice: seq_len must be non-negative");
+    &seq[start..start + seq_len]
+}
+
+/// Identical to [`seq_gap_slice`], but named separately for readability at
+/// call sites that slice the read (`r + ...`) rather than the reference
+/// sequence's consensus (`seqs[...].consensus + ...`) -- both C++ pointer
+/// arithmetic idioms are structurally the same, but naming them apart keeps
+/// [`RefKmerFilter::get_overlaps_from_read`]'s call sites line-comparable to
+/// which C++ pointer (`consensus` vs. `r`) each one ports.
+///
+/// # Panics
+///
+/// Panics if `start`/`read_len` are negative, or if `start + read_len`
+/// exceeds `r.len()`.
+fn read_gap_slice(r: &[u8], start: i32, read_len: i32) -> &[u8] {
+    let start = usize::try_from(start).expect("read_gap_slice: start must be non-negative");
+    let read_len =
+        usize::try_from(read_len).expect("read_gap_slice: read_len must be non-negative");
+    &r[start..start + read_len]
+}
+
+/// Ported from `SeqSet::IsOverlapLowComplex` (`SeqSet.hpp:458-485`): flags an
+/// overlap's read span (`r[o.readStart..=o.readEnd]`) as low-complexity by a
+/// DIFFERENT (looser) rule than the whole-read [`is_low_complexity`]: counts
+/// how many of the 4 bases appear `<= 2` times within just that span, and
+/// how many total bases those low-count bases contribute. If that low-count
+/// total is at least `1/7` of the span length, the span is considered
+/// "not low-complex enough to reject" and this returns `false`
+/// unconditionally (even if `lowCnt >= 2`); otherwise, `lowCnt >= 2` (at
+/// least two bases each appearing `<= 2` times, contributing under `1/7` of
+/// the span) flags it as low-complex.
+///
+/// Only `A`/`C`/`G`/`T`/`N` are supported (`N` positions are skipped
+/// entirely, matching `SeqSet.hpp:464-465`'s `if (r[i]=='N') continue;`; any
+/// other byte hits [`nuc_index`]'s same unsupported-base panic as
+/// [`is_low_complexity`]).
+///
+/// # Panics
+///
+/// Panics if `o.read_start`/`o.read_end` are out of bounds for `r`, or if
+/// `r` contains a byte other than `A`/`C`/`G`/`T`/`N` in that range.
+fn is_overlap_low_complex(r: &[u8], o: &overlap::Overlap) -> bool {
+    let mut cnt: [i32; 4] = [0; 4];
+    #[allow(clippy::cast_sign_loss)]
+    let (start, end) = (o.read_start as usize, o.read_end as usize);
+    for &c in &r[start..=end] {
+        if c == b'N' {
+            continue;
+        }
+        cnt[nuc_index(c)] += 1;
+    }
+    let len = o.read_end - o.read_start + 1;
+    let mut low_cnt = 0i32;
+    let mut low_total_cnt = 0i32;
+    for &c in &cnt {
+        if c <= 2 {
+            low_cnt += 1;
+            low_total_cnt += c;
+        }
+    }
+    if low_total_cnt * 7 >= len {
+        return false;
+    }
+    low_cnt >= 2
 }
 
 /// Ported verbatim from the free function `IsLowComplexity`
@@ -1166,5 +1701,242 @@ mod tests {
         // window at all (previously fine at k=9).
         let too_short_for_new_k = &reference.as_bytes()[0..10];
         assert!(!filter.is_good_candidate(too_short_for_new_k));
+    }
+
+    // ---- hit_less_than (_hit::operator<) -----------------------------------
+
+    fn h(idx: u32, offset: u32, read_offset: i32, strand: i8) -> Hit {
+        Hit { idx, offset, read_offset, strand, repeats: 1 }
+    }
+
+    #[test]
+    fn hit_less_than_orders_by_strand_first() {
+        let a = h(5, 5, 5, -1);
+        let b = h(0, 0, 0, 1);
+        assert!(hit_less_than(&a, &b), "strand -1 < strand 1 regardless of other fields");
+        assert!(!hit_less_than(&b, &a));
+    }
+
+    #[test]
+    fn hit_less_than_ties_on_strand_fall_to_idx() {
+        let a = h(1, 0, 0, 1);
+        let b = h(2, 0, 0, 1);
+        assert!(hit_less_than(&a, &b));
+        assert!(!hit_less_than(&b, &a));
+    }
+
+    #[test]
+    fn hit_less_than_ties_on_strand_and_idx_fall_to_read_offset() {
+        let a = h(0, 0, 3, 1);
+        let b = h(0, 0, 7, 1);
+        assert!(hit_less_than(&a, &b));
+        assert!(!hit_less_than(&b, &a));
+    }
+
+    #[test]
+    fn hit_less_than_final_tiebreak_is_offset() {
+        let a = h(0, 3, 0, 1);
+        let b = h(0, 7, 0, 1);
+        assert!(hit_less_than(&a, &b));
+        assert!(!hit_less_than(&b, &a));
+    }
+
+    #[test]
+    fn hit_less_than_bit_identical_hits_are_neither_less() {
+        let a = h(1, 2, 3, 1);
+        let b = a;
+        assert!(!hit_less_than(&a, &b));
+        assert!(!hit_less_than(&b, &a));
+    }
+
+    // ---- sort_hits (SeqSet::SortHits) --------------------------------------
+
+    #[test]
+    fn sort_hits_uses_std_sort_path_when_below_bucket_threshold() {
+        // hits.len() = 3, seq_count = 10 -> 3 > 2*10 is false, so this takes
+        // the std::sort (hit_less_than) branch regardless of
+        // already_read_order.
+        let mut hits = vec![h(0, 0, 5, 1), h(0, 0, 1, 1), h(1, 0, 0, -1)];
+        sort_hits(&mut hits, true, 10);
+        // Expected order: strand -1 first, then strand 1 ascending by idx
+        // then read_offset.
+        assert_eq!(hits, vec![h(1, 0, 0, -1), h(0, 0, 1, 1), h(0, 0, 5, 1)]);
+    }
+
+    #[test]
+    fn sort_hits_bucket_path_preserves_within_bucket_order() {
+        // hits.len() = 7, seq_count = 2 -> 7 > 2*2 = 4, and
+        // already_read_order = true -> bucket-sort path. Two sequences
+        // (idx 0, 1), mixed strands; within each (tag, idx) bucket the
+        // ORIGINAL encounter order must be preserved (NOT re-sorted by
+        // read_offset/offset -- unlike the std::sort branch above).
+        let mut hits = vec![
+            h(1, 0, 30, 1),  // tag=1, idx=1
+            h(0, 0, 20, -1), // tag=0, idx=0
+            h(1, 0, 10, 1),  // tag=1, idx=1 (comes AFTER the read_offset=30 one above)
+            h(0, 0, 5, -1),  // tag=0, idx=0
+            h(0, 0, 99, 1),  // tag=1, idx=0
+            h(1, 0, 1, -1),  // tag=0, idx=1
+            h(0, 0, 2, 1),   // tag=1, idx=0
+        ];
+        let original = hits.clone();
+        sort_hits(&mut hits, true, 2);
+
+        // Bucket order: tag=0,idx=0 then tag=0,idx=1 then tag=1,idx=0 then
+        // tag=1,idx=1. Within each bucket, original relative order.
+        let expected = vec![
+            original[1], // tag=0,idx=0 (read_offset=20)
+            original[3], // tag=0,idx=0 (read_offset=5)  <- NOT resorted ahead of 20
+            original[5], // tag=0,idx=1 (read_offset=1)
+            original[4], // tag=1,idx=0 (read_offset=99)
+            original[6], // tag=1,idx=0 (read_offset=2)
+            original[0], // tag=1,idx=1 (read_offset=30)
+            original[2], // tag=1,idx=1 (read_offset=10) <- stays AFTER the 30 one
+        ];
+        assert_eq!(hits, expected);
+    }
+
+    #[test]
+    fn sort_hits_falls_back_to_std_sort_when_not_already_read_order() {
+        // Even with hits.len() > 2*seq_count, already_read_order=false must
+        // take the std::sort (hit_less_than) branch, not bucket sort.
+        let mut hits = vec![h(0, 0, 30, 1), h(0, 0, 10, 1), h(0, 0, 20, 1)];
+        sort_hits(&mut hits, false, 1); // 3 > 2*1 = 2, but already_read_order=false
+        assert_eq!(hits, vec![h(0, 0, 10, 1), h(0, 0, 20, 1), h(0, 0, 30, 1)]);
+    }
+
+    // ---- is_overlap_low_complex (SeqSet::IsOverlapLowComplex) -------------
+
+    fn overlap_span(read_start: i32, read_end: i32) -> overlap::Overlap {
+        overlap::Overlap {
+            seq_idx: 0,
+            read_start,
+            read_end,
+            seq_start: 0,
+            seq_end: read_end - read_start,
+            strand: 1,
+            match_cnt: 0,
+            similarity: 0.0,
+        }
+    }
+
+    #[test]
+    fn is_overlap_low_complex_flags_homopolymer_span() {
+        // All-A over a 30bp span: cnt=[30,0,0,0], lowCnt=3 (C/G/T each 0),
+        // lowTotalCnt=0, 0*7 >= 30 is false, lowCnt>=2 -> true.
+        let r = vec![b'A'; 30];
+        let o = overlap_span(0, 29);
+        assert!(is_overlap_low_complex(&r, &o));
+    }
+
+    #[test]
+    fn is_overlap_low_complex_passes_balanced_span() {
+        // Balanced ACGT repeat: each base ~equally represented, well above
+        // the <=2 threshold for a 32bp span (8 of each).
+        let r = b"ACGTACGTACGTACGTACGTACGTACGTACGT".to_vec();
+        let o = overlap_span(0, 31);
+        assert!(!is_overlap_low_complex(&r, &o));
+    }
+
+    #[test]
+    fn is_overlap_low_complex_low_total_below_one_seventh_still_passes() {
+        // 21bp span, mostly A with 2 C, 0 G, 0 T: cnt=[19,2,0,0].
+        // lowCnt=3 (C=2,G=0,T=0 all <=2), lowTotalCnt=2+0+0=2.
+        // 2*7=14 >= 21? No -> falls through to lowCnt>=2 -> true.
+        // (This case is here mainly to hand-verify the arithmetic; see the
+        // next test for a case where the 1/7 threshold actually flips it.)
+        let mut r = vec![b'A'; 21];
+        r[0] = b'C';
+        r[1] = b'C';
+        let o = overlap_span(0, 20);
+        assert!(is_overlap_low_complex(&r, &o));
+    }
+
+    #[test]
+    fn is_overlap_low_complex_ignores_n_positions() {
+        // N positions are skipped entirely (not counted into any base's
+        // tally): an all-N span has cnt=[0,0,0,0], lowCnt=4, lowTotalCnt=0,
+        // 0*7 >= len is false (len>0) -> lowCnt>=2 -> true.
+        let r = vec![b'N'; 10];
+        let o = overlap_span(0, 9);
+        assert!(is_overlap_low_complex(&r, &o));
+    }
+
+    // ---- get_overlaps_from_read: hand-computed exact-substring overlap ----
+
+    #[test]
+    fn get_overlaps_from_read_hand_computed_exact_substring() {
+        // A single reference sequence; the read is an exact 60bp substring
+        // of it. Exact substring -> a k-mer hit at EVERY read_offset in
+        // 0..=(len-kmerLength), all sharing the same coord diff -> single
+        // colinear hit chain -> no AlignAlgo gap branch is ever entered
+        // (every consecutive hit pair has hitCoords[j-1].a + kmerLength - 1
+        // >= hitCoords[j].a, i.e. the direct "matchCnt += 2*(a-aPrev)"
+        // branch). Starting from `matchCnt = 2*kmerLength`
+        // (SeqSet.hpp:1697) and accumulating `2*(a - aPrev)` for every
+        // consecutive pair telescopes to `matchCnt = 2*kmerLength +
+        // 2*((len-kmerLength) - 0) = 2*len` for a dense, single-step-offset
+        // exact-match chain covering the whole read -- hand-verifiable
+        // without any AlignAlgo call. `seqSpan = seqEnd-seqStart+1 = len`
+        // and `readSpan = readEnd-readStart+1 = len` (both `+1`, NOT
+        // `len-1` -- an inclusive span over `len` positions has length
+        // `len`), so `similarity = matchCnt/(seqSpan+readSpan) = 2*len /
+        // (2*len) = 1.0` exactly for this dense/exact-match case (a genuine
+        // coincidence of this specific scenario -- the `similarity == 1`
+        // check in the C++, `SeqSet.hpp:1677,1838`, is itself just a
+        // SENTINEL flag meaning "no break-triggering condition was hit",
+        // not a claim that the final ratio is always 1.0 in general).
+        let reference = "ACGTACGTACGTACGTACGTACGTGGATTACAGATTACAGATTACAGATTACAG\
+                          CCCTGACGTGTGACGTGTGACGTGTGACGTGTGACGTGT";
+        let f = write_fasta(&[("only", reference)]);
+        let filter = RefKmerFilter::from_reference_fasta(f.path(), 9).unwrap();
+
+        let start = 10;
+        let len = 60;
+        let read = &reference.as_bytes()[start..start + len];
+        let mut scratch = Scratch::default();
+        let overlaps = filter
+            .get_overlaps_from_read(read, &mut scratch)
+            .expect("read is long enough for a k-mer window");
+
+        assert_eq!(overlaps.len(), 1, "expected exactly one surviving overlap: {overlaps:?}");
+        let o = &overlaps[0];
+        assert_eq!(o.seq_idx, 0);
+        assert_eq!(o.strand, 1);
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let len_i32 = len as i32;
+        assert_eq!(o.read_start, 0);
+        assert_eq!(o.read_end, len_i32 - 1);
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let start_i32 = start as i32;
+        assert_eq!(o.seq_start, start_i32);
+        assert_eq!(o.seq_end, start_i32 + len_i32 - 1);
+
+        // matchCnt = 2*len (derivation above); seqSpan == readSpan == len.
+        let expected_match_cnt = 2 * len_i32;
+        assert_eq!(o.match_cnt, expected_match_cnt);
+        let seq_span = o.seq_end - o.seq_start + 1;
+        let read_span = o.read_end - o.read_start + 1;
+        assert_eq!(seq_span, len_i32);
+        assert_eq!(read_span, len_i32);
+        let expected_similarity = f64::from(expected_match_cnt) / f64::from(seq_span + read_span);
+        assert!(
+            (expected_similarity - 1.0).abs() < f64::EPSILON,
+            "sanity: hand-derivation should reduce to exactly 1.0"
+        );
+        assert!(
+            (o.similarity - expected_similarity).abs() < f64::EPSILON,
+            "expected similarity == {expected_similarity} exactly, got {}",
+            o.similarity
+        );
+    }
+
+    #[test]
+    fn get_overlaps_from_read_returns_none_for_short_read() {
+        let reference = "ACGTACGTACGTACGTACGTACGTGGATTACAGATTACA";
+        let f = write_fasta(&[("only", reference)]);
+        let filter = RefKmerFilter::from_reference_fasta(f.path(), 9).unwrap();
+        let mut scratch = Scratch::default();
+        assert!(filter.get_overlaps_from_read(b"ACGTACGT", &mut scratch).is_none());
     }
 }

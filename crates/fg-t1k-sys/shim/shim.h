@@ -113,6 +113,28 @@ int fg_t1k_seqset_has_hit_in_set(void* p, const char* read);
 // `!IsLowComplexity(read) && refSet->HasHitInSet(read, buffer)`. Returns
 // 1/0.
 int fg_t1k_seqset_is_good_candidate(void* p, const char* read);
+// Mirrors `SeqSet::GetOverlapsFromRead(char* read, int strand, int barcode,
+// std::vector<_overlap>&)` (SeqSet.hpp:1594-1912) IN FULL -- the real,
+// unmodified stock C++ read-to-allele alignment/scoring core (Task 4b's
+// differential oracle). Always called with `strand=0, barcode=-1` (matching
+// fg_t1k_core::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read's own
+// fixed parameters -- see that method's doc comment). Writes up to
+// `out_capacity` overlaps into the caller-allocated `out_*` arrays (count-
+// then-get is unnecessary here since GetOverlapsFromRead's result size is
+// already known after one call); `*out_count` receives the actual number of
+// overlaps returned by the real C++ call (which may exceed `out_capacity`,
+// in which case only the first `out_capacity` are written -- callers should
+// size `out_capacity` generously, e.g. 10000, and treat a `*out_count >
+// out_capacity` return as a test-fixture sizing bug, not a real result).
+// `read` must be a NUL-terminated C string. Returns 0 on success (including
+// the legitimate `read.len() < kmerLength` case, which mirrors stock's `-1`
+// return by setting `*out_count = -1`), -1 if the underlying call threw.
+int fg_t1k_seqset_get_overlaps_from_read(void* p, const char* read, int out_capacity,
+                                          int* out_seq_idx, int* out_strand,
+                                          int* out_read_start, int* out_read_end,
+                                          int* out_seq_start, int* out_seq_end,
+                                          int* out_match_cnt, double* out_similarity,
+                                          int* out_count);
 
 // Opaque-handle FFI for Alignments (vendor/t1k/alignments.hpp), scoped to
 // exactly the slice BamExtractor.cpp uses. The handle is an opaque `void*`

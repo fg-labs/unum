@@ -90,8 +90,14 @@ pub(crate) struct OverlapHit {
 /// (stock's `GetOverlapsFromHits` never sets them -- they default to
 /// whatever `_overlap`'s caller happens to leave, and no caller in the
 /// `HasHitInSet` path reads them).
+///
+/// `pub` (not `pub(crate)`, unlike most of this module): Task 4b's
+/// [`crate::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read`] returns
+/// `Vec<Overlap>` across the crate boundary, and its differential test
+/// (`crates/fg-t1k-sys/tests/diff_get_overlaps_from_read.rs`) needs to read
+/// every field to compare against the real C++ oracle.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Overlap {
+pub struct Overlap {
     /// `_overlap::seqIdx`.
     pub seq_idx: u32,
     /// `_overlap::readStart`. When `strand == -1`, this is the offset within
@@ -113,6 +119,61 @@ pub(crate) struct Overlap {
     /// `_overlap::similarity`. Always `0.0` on this `AlignAlgo`-free path
     /// (`SeqSet.hpp:1532`).
     pub similarity: f64,
+}
+
+/// Ported from `_overlap::operator<` (`SeqSet.hpp:103-127`): the overlap
+/// "priority" order used both to pick `GetOverlapsFromRead`'s
+/// `bestOverlapIdx` (the strand-filter anchor) and to rank candidate
+/// `bestNovelOverlap`s (`SeqSet.hpp:1622-1627,1851-1854`). NOT a total order
+/// in the `std::cmp::Ord` sense -- like C++'s `bool operator<`, this is a
+/// strict weak ordering usable for `std::sort`/pairwise comparison, but is
+/// exposed here as a plain `bool` function (mirroring the C++ signature
+/// exactly) rather than a `PartialOrd`/`Ord` impl, since two of its
+/// tie-break fields (`matchCnt`/`similarity`) sort DESCENDING (`>`, "smaller
+/// operator< result" means "better/first"), which would make a derived
+/// `Ord` impl actively misleading to a reader expecting ascending order.
+///
+/// Comparison order (first field that differs wins, all as `!=` then `<`/`>`
+/// exactly as C++ writes it): `matchCnt` descending, `similarity`
+/// descending, `readEnd - readStart` (span) descending, `seqIdx` ascending,
+/// `strand` ascending, `readStart` ascending, `readEnd` ascending,
+/// `seqStart` ascending, and finally `seqEnd` ascending (the C++ `else
+/// return seqEnd < b.seqEnd` -- reached only when every prior field tied).
+#[must_use]
+pub(crate) fn overlap_less_than(a: &Overlap, b: &Overlap) -> bool {
+    if a.match_cnt != b.match_cnt {
+        return a.match_cnt > b.match_cnt;
+    }
+    // `!=` on f64, matching C++'s `similarity != b.similarity` bit for bit --
+    // see this crate's FLOATS convention: `similarity` is a deterministic
+    // ratio, so exact inequality is the correct port (not an epsilon
+    // comparison).
+    #[allow(clippy::float_cmp)]
+    let similarity_differs = a.similarity != b.similarity;
+    if similarity_differs {
+        return a.similarity > b.similarity;
+    }
+    let a_span = a.read_end - a.read_start;
+    let b_span = b.read_end - b.read_start;
+    if a_span != b_span {
+        return a_span > b_span;
+    }
+    if a.seq_idx != b.seq_idx {
+        return a.seq_idx < b.seq_idx;
+    }
+    if a.strand != b.strand {
+        return a.strand < b.strand;
+    }
+    if a.read_start != b.read_start {
+        return a.read_start < b.read_start;
+    }
+    if a.read_end != b.read_end {
+        return a.read_end < b.read_end;
+    }
+    if a.seq_start != b.seq_start {
+        return a.seq_start < b.seq_start;
+    }
+    a.seq_end < b.seq_end
 }
 
 /// Ported from `SeqSet::CompSortPairBInc` (`SeqSet.hpp:233-239`): ascending
@@ -360,8 +421,45 @@ pub(crate) fn get_overlaps_from_hits(
     is_long_seq_set: bool,
     kmer_length: i32,
 ) -> Vec<Overlap> {
+    get_overlaps_from_hits_with_coords(
+        hits,
+        hit_len_required,
+        filter,
+        is_ref,
+        radius,
+        is_long_seq_set,
+        kmer_length,
+    )
+    .into_iter()
+    .map(|(overlap, _hit_coords)| overlap)
+    .collect()
+}
+
+/// Identical to [`get_overlaps_from_hits`], but also returns each overlap's
+/// `overlapsHitCoords`-equivalent list: the `(readOffset, seqOffset)` pairs
+/// of `finalHits` that produced it (`SeqSet.hpp:1539-1549`), in the same
+/// order `finalHits` was built (i.e. ascending `readOffset`, matching
+/// `hitCoordLIS[lisStart..=lisEnd]`'s own order).
+///
+/// This is the shape [`crate::call::get_overlaps_from_read`] (Task 4b) needs
+/// -- it walks each overlap's `hitCoords` pairwise to accumulate
+/// `matchCnt`/`mismatchCnt`/`indelCnt` via `AlignAlgo` on the inter-hit gaps
+/// (`SeqSet.hpp:1700-1833`) -- while [`get_overlaps_from_hits`] (the
+/// `HasHitInSet` gate-2 caller, which only ever reads `matchCnt`) stays a
+/// thin wrapper that discards the coords, avoiding a second copy of this
+/// function's body.
+#[allow(clippy::too_many_lines, clippy::many_single_char_names, clippy::needless_range_loop)]
+pub(crate) fn get_overlaps_from_hits_with_coords(
+    hits: &[OverlapHit],
+    hit_len_required: i32,
+    filter: i32,
+    is_ref: impl Fn(u32) -> bool,
+    radius: i32,
+    is_long_seq_set: bool,
+    kmer_length: i32,
+) -> Vec<(Overlap, Vec<Pair>)> {
     let hit_size = hits.len();
-    let mut overlaps: Vec<Overlap> = Vec::new();
+    let mut overlaps: Vec<(Overlap, Vec<Pair>)> = Vec::new();
     if hit_size == 0 {
         return overlaps;
     }
@@ -692,16 +790,25 @@ pub(crate) fn get_overlaps_from_hits(
                 continue;
             }
 
-            overlaps.push(Overlap {
-                seq_idx,
-                read_start,
-                read_end,
-                seq_start,
-                seq_end,
-                strand,
-                match_cnt,
-                similarity: 0.0,
-            });
+            // `overlapsHitCoords`-equivalent: (readOffset, seqOffset) pairs
+            // of `finalHits`, in order (SeqSet.hpp:1539-1549).
+            #[allow(clippy::cast_possible_wrap)]
+            let hit_coords: Vec<Pair> =
+                final_hits.iter().map(|h| Pair { a: h.read_offset, b: h.offset as i32 }).collect();
+
+            overlaps.push((
+                Overlap {
+                    seq_idx,
+                    read_start,
+                    read_end,
+                    seq_start,
+                    seq_end,
+                    strand,
+                    match_cnt,
+                    similarity: 0.0,
+                },
+                hit_coords,
+            ));
 
             s = e;
         }
@@ -876,5 +983,105 @@ mod tests {
         }
         let overlaps = get_overlaps_from_hits(&hits, 9, 0, |_| true, 10, false, 9);
         assert_eq!(overlaps.len(), 2);
+    }
+
+    // ---- get_overlaps_from_hits_with_coords ------------------------------
+
+    #[test]
+    fn get_overlaps_with_coords_matches_plain_overlaps_and_reports_hit_coords() {
+        // Same single-chain scenario as
+        // get_overlaps_hand_computed_single_colinear_chain, but asserting the
+        // *_with_coords variant returns identical Overlap fields PLUS the
+        // per-overlap hitCoords list (finalHits' (readOffset, seqOffset)
+        // pairs, in ascending order).
+        let hits: Vec<OverlapHit> =
+            (0..5i32).map(|i| hit(0, u32::try_from(100 + i).unwrap(), i, 1)).collect();
+        let with_coords = get_overlaps_from_hits_with_coords(&hits, 9, 0, |_| true, 10, false, 9);
+        let plain = get_overlaps_from_hits(&hits, 9, 0, |_| true, 10, false, 9);
+
+        assert_eq!(with_coords.len(), 1);
+        assert_eq!(plain.len(), 1);
+        let (overlap, coords) = &with_coords[0];
+        assert_eq!(*overlap, plain[0]);
+
+        // Every input hit survives the LIS chain unmodified here (already
+        // strictly increasing), so hitCoords should be exactly the 5 input
+        // (readOffset, seqOffset) pairs, in order.
+        let expected: Vec<Pair> = (0..5i32).map(|i| Pair { a: i, b: 100 + i }).collect();
+        assert_eq!(coords, &expected);
+    }
+
+    // ---- overlap_less_than (_overlap::operator<) --------------------------
+
+    // Test-only helper mirroring `Overlap`'s own field list one-for-one (see
+    // struct construction below); `too_many_arguments` is noise here, not a
+    // real API-design smell.
+    #[allow(clippy::too_many_arguments)]
+    fn ov(
+        seq_idx: u32,
+        read_start: i32,
+        read_end: i32,
+        seq_start: i32,
+        seq_end: i32,
+        strand: i8,
+        match_cnt: i32,
+        similarity: f64,
+    ) -> Overlap {
+        Overlap { seq_idx, read_start, read_end, seq_start, seq_end, strand, match_cnt, similarity }
+    }
+
+    #[test]
+    fn overlap_less_than_higher_match_cnt_wins() {
+        // matchCnt is compared first, DESCENDING: higher matchCnt is "less
+        // than" (i.e. has higher priority / sorts first).
+        let a = ov(0, 0, 10, 0, 10, 1, 100, 0.5);
+        let b = ov(0, 0, 10, 0, 10, 1, 50, 0.5);
+        assert!(overlap_less_than(&a, &b));
+        assert!(!overlap_less_than(&b, &a));
+    }
+
+    #[test]
+    fn overlap_less_than_ties_on_match_cnt_fall_to_similarity_descending() {
+        let a = ov(0, 0, 10, 0, 10, 1, 100, 0.9);
+        let b = ov(0, 0, 10, 0, 10, 1, 100, 0.5);
+        assert!(overlap_less_than(&a, &b));
+        assert!(!overlap_less_than(&b, &a));
+    }
+
+    #[test]
+    fn overlap_less_than_ties_on_match_and_similarity_fall_to_span_descending() {
+        // readEnd - readStart: a has span 20, b has span 10 -> a wins (span
+        // descending).
+        let a = ov(0, 0, 20, 0, 10, 1, 100, 0.5);
+        let b = ov(0, 0, 10, 0, 10, 1, 100, 0.5);
+        assert!(overlap_less_than(&a, &b));
+        assert!(!overlap_less_than(&b, &a));
+    }
+
+    #[test]
+    fn overlap_less_than_ties_fall_through_to_seq_idx_ascending() {
+        let a = ov(1, 0, 10, 0, 10, 1, 100, 0.5);
+        let b = ov(2, 0, 10, 0, 10, 1, 100, 0.5);
+        // seqIdx ascending: lower seqIdx wins.
+        assert!(overlap_less_than(&a, &b));
+        assert!(!overlap_less_than(&b, &a));
+    }
+
+    #[test]
+    fn overlap_less_than_bit_identical_overlaps_are_neither_less() {
+        let a = ov(0, 0, 10, 0, 10, 1, 100, 0.5);
+        let b = a;
+        assert!(!overlap_less_than(&a, &b));
+        assert!(!overlap_less_than(&b, &a));
+    }
+
+    #[test]
+    fn overlap_less_than_final_tiebreak_is_seq_end_ascending() {
+        // Every field ties except seqEnd: lower seqEnd wins (the final
+        // `else return seqEnd < b.seqEnd` arm).
+        let a = ov(0, 0, 10, 0, 10, 1, 100, 0.5);
+        let b = ov(0, 0, 10, 0, 20, 1, 100, 0.5);
+        assert!(overlap_less_than(&a, &b));
+        assert!(!overlap_less_than(&b, &a));
     }
 }
