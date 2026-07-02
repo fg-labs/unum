@@ -1,3 +1,12 @@
+// Standard C headers the vendored T1K headers rely on but do not include
+// themselves (they only compile in T1K because a .cpp includes these first):
+// KmerCount.hpp uses strlen/atoi/fopen/fscanf/printf. Include them BEFORE the
+// T1K headers so the shim compiles standalone on gcc/libstdc++ (Linux), not just
+// clang/libc++ (macOS), which pulls them in transitively.
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 #include "KmerCode.hpp"   // header-only; declares extern nucToNum/numToNuc
 #include "KmerCount.hpp"  // header-only; depends on KmerCode.hpp above
 #include "KmerIndex.hpp"  // header-only; depends on KmerCode.hpp + SimpleVector.hpp
