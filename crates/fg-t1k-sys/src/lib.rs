@@ -269,6 +269,71 @@ mod ffi {
         pub fn fg_t1k_genotyper2_allele_missing_coverage(p: *mut c_void, allele_idx: i32) -> i32;
         pub fn fg_t1k_genotyper2_seq_effective_len(p: *mut c_void, allele_idx: i32) -> i32;
         pub fn fg_t1k_genotyper2_seq_weight(p: *mut c_void, allele_idx: i32) -> i32;
+        pub fn fg_t1k_genotyper2_set_allele_abundance(
+            p: *mut c_void,
+            allele_idx: i32,
+            abundance: f64,
+        );
+
+        // --- Task 6a: VariantCaller ---
+        pub fn fg_t1k_variantcaller_new(genotyper_handle: *mut c_void) -> *mut c_void;
+        pub fn fg_t1k_variantcaller_free(p: *mut c_void);
+        pub fn fg_t1k_variantcaller_set_seq_abundance(
+            p: *mut c_void,
+            genotyper_handle: *mut c_void,
+        ) -> i32;
+        pub fn fg_t1k_variantcaller_set_max_var_group_to_resolve(p: *mut c_void, m: i32);
+        #[allow(clippy::too_many_arguments)]
+        pub fn fg_t1k_variantcaller_compute_variant(
+            p: *mut c_void,
+            read1: *const *const c_char,
+            read2: *const *const c_char,
+            read_cnt: i32,
+            read_idx: *const i32,
+            seq_idx: *const i32,
+            match_cnt: *const i32,
+            similarity: *const f64,
+            has_mate_pair: *const i32,
+            o1_from_r2: *const i32,
+            o1_seq_start: *const i32,
+            o1_seq_end: *const i32,
+            o1_read_start: *const i32,
+            o1_read_end: *const i32,
+            o1_strand: *const i32,
+            o1_match_cnt: *const i32,
+            o1_similarity: *const f64,
+            o2_seq_start: *const i32,
+            o2_seq_end: *const i32,
+            o2_read_start: *const i32,
+            o2_read_end: *const i32,
+            o2_strand: *const i32,
+            o2_match_cnt: *const i32,
+            o2_similarity: *const f64,
+            n: i32,
+        ) -> i32;
+        pub fn fg_t1k_variantcaller_final_variant_count(p: *mut c_void) -> i32;
+        #[allow(clippy::too_many_arguments)]
+        pub fn fg_t1k_variantcaller_final_variant(
+            p: *mut c_void,
+            i: i32,
+            out_seq_idx: *mut i32,
+            out_ref_start: *mut i32,
+            out_ref_end: *mut i32,
+            out_ref: *mut c_char,
+            out_var: *mut c_char,
+            out_all_support: *mut f64,
+            out_var_support: *mut f64,
+            out_var_uniq_support: *mut f64,
+            out_var_group_id: *mut i32,
+            out_output_group_id: *mut i32,
+            out_qual: *mut i32,
+        );
+        pub fn fg_t1k_variantcaller_output_allele_vcf(
+            p: *mut c_void,
+            tmp_dir: *const c_char,
+            out_buffer: *mut c_char,
+            out_capacity: i32,
+        ) -> i32;
     }
 }
 #[cfg(feature = "t1k-sys")]
@@ -1621,11 +1686,347 @@ impl CppGenotyper2 {
     pub fn seq_weight(&self, allele_idx: i32) -> i32 {
         unsafe { ffi::fg_t1k_genotyper2_seq_weight(self.handle, allele_idx) }
     }
+
+    /// Test-only: directly assigns `Genotyper::alleleInfo[allele_idx].abundance`,
+    /// bypassing the EM. See `shim.h`'s `fg_t1k_genotyper2_set_allele_abundance`
+    /// doc comment.
+    pub fn set_allele_abundance(&mut self, allele_idx: i32, abundance: f64) {
+        unsafe { ffi::fg_t1k_genotyper2_set_allele_abundance(self.handle, allele_idx, abundance) };
+    }
 }
 
 #[cfg(feature = "t1k-sys")]
 impl Drop for CppGenotyper2 {
     fn drop(&mut self) {
         unsafe { ffi::fg_t1k_genotyper2_free(self.handle) }
+    }
+}
+
+/// One scripted `_fragmentOverlap` entry fed to
+/// [`CppVariantCaller::compute_variant`] / [`fg_t1k_core::variant_caller::VariantCaller::compute_variant`]
+/// (Task 6a's differential test builds the identical list of these for both
+/// sides -- see `crates/fg-t1k-sys/tests/diff_variant_caller.rs`). Unlike
+/// [`ScriptedOverlap`] (5b's `_fragmentOverlap`-without-per-mate-overlaps
+/// scripting struct), this carries full `overlap1`/`overlap2` coordinates
+/// (seqStart/seqEnd/readStart/readEnd/strand/matchCnt/similarity) since
+/// `VariantCaller::UpdateBaseVariantFromOverlap` reads them directly --
+/// `align` itself is NOT included here: both
+/// [`CppVariantCaller::compute_variant`] (via the shim's real
+/// `SeqSet::AddOverlapAlignmentInfo` call) and a differential test's Rust
+/// side (via [`fg_t1k_core::align_algo::global_alignment`]) derive it
+/// identically from these coordinates plus the read sequence, exactly as
+/// the real `Analyzer::AddFragmentAlignmentInfo` pipeline step does before
+/// `VariantCaller::ComputeVariant` ever runs.
+#[cfg(feature = "t1k-sys")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScriptedVariantOverlap {
+    /// Which read (0-based, indexing the `read1`/`read2` arrays passed to
+    /// [`CppVariantCaller::compute_variant`]) this fragment assignment
+    /// belongs to.
+    pub read_idx: i32,
+    pub seq_idx: i32,
+    /// `_fragmentOverlap::matchCnt`.
+    pub match_cnt: i32,
+    /// `_fragmentOverlap::similarity`.
+    pub similarity: f64,
+    pub has_mate_pair: bool,
+    pub o1_from_r2: bool,
+    /// `overlap1`: `(seqStart, seqEnd, readStart, readEnd, strand, matchCnt, similarity)`.
+    pub overlap1: ScriptedVcOverlapCoords,
+    /// `overlap2` (ignored when `has_mate_pair == false`).
+    pub overlap2: ScriptedVcOverlapCoords,
+}
+
+/// The `_overlap` coordinate fields [`ScriptedVariantOverlap::overlap1`]/
+/// `overlap2` carry (everything `VariantCaller::UpdateBaseVariantFromOverlap`
+/// needs EXCEPT `align`, which is derived -- see [`ScriptedVariantOverlap`]'s
+/// doc comment).
+#[cfg(feature = "t1k-sys")]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScriptedVcOverlapCoords {
+    pub seq_start: i32,
+    pub seq_end: i32,
+    pub read_start: i32,
+    pub read_end: i32,
+    pub strand: i32,
+    pub match_cnt: i32,
+    pub similarity: f64,
+}
+
+/// One called variant read back from [`CppVariantCaller::final_variant`],
+/// mirroring `_variant` (`VariantCaller.hpp:7-20`).
+#[cfg(feature = "t1k-sys")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CppVariant {
+    pub seq_idx: i32,
+    pub ref_start: i32,
+    pub ref_end: i32,
+    pub reference: u8,
+    pub var: u8,
+    pub all_support: f64,
+    pub var_support: f64,
+    pub var_uniq_support: f64,
+    pub var_group_id: i32,
+    pub output_group_id: i32,
+    pub qual: i32,
+}
+
+/// Safe Rust wrapper around the opaque C++ `VariantCaller*` handle, scoped to
+/// Task 6a (`fg_t1k_variantcaller_*`, see `shim.h`).
+///
+/// Owns the handle for its lifetime: [`CppVariantCaller::new`] allocates the
+/// C++ object (from an existing [`CppGenotyper2`]'s `refSet`, mirroring
+/// `VariantCaller variantCaller(refSet)`, `Analyzer.cpp:673`), and `Drop`
+/// calls `fg_t1k_variantcaller_free` exactly once.
+#[cfg(feature = "t1k-sys")]
+pub struct CppVariantCaller {
+    handle: *mut std::os::raw::c_void,
+}
+
+#[cfg(feature = "t1k-sys")]
+impl CppVariantCaller {
+    /// Constructs a new C++ `VariantCaller(genotyper.refSet)`. `genotyper`
+    /// must already have every reference sequence loaded (via
+    /// [`CppGenotyper2::add_ref_seq`]) that this variant caller will be fed
+    /// fragment assignments against.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying `fg_t1k_variantcaller_new` call returns NULL
+    /// (i.e. the C++ constructor threw an exception).
+    #[must_use]
+    pub fn new(genotyper: &CppGenotyper2) -> Self {
+        let handle = unsafe { ffi::fg_t1k_variantcaller_new(genotyper.handle) };
+        assert!(
+            !handle.is_null(),
+            "fg_t1k_variantcaller_new returned NULL: C++ VariantCaller construction failed"
+        );
+        Self { handle }
+    }
+
+    /// Mirrors `VariantCaller::SetSeqAbundance(genotyper)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying C++ call threw.
+    pub fn set_seq_abundance(&mut self, genotyper: &CppGenotyper2) {
+        let rc =
+            unsafe { ffi::fg_t1k_variantcaller_set_seq_abundance(self.handle, genotyper.handle) };
+        assert!(rc == 0, "fg_t1k_variantcaller_set_seq_abundance threw a C++ exception");
+    }
+
+    /// Mirrors `VariantCaller::SetMaxVarGroupToResolve(m)`.
+    pub fn set_max_var_group_to_resolve(&mut self, m: i32) {
+        unsafe { ffi::fg_t1k_variantcaller_set_max_var_group_to_resolve(self.handle, m) };
+    }
+
+    /// Mirrors `VariantCaller::ComputeVariant(read1, read2, fragmentAssignments)`.
+    /// `reads1`/`reads2` are per-read sequences (`reads2` empty for
+    /// single-end, mirroring `read2.size() > 0`'s C++ gate); `assignments`
+    /// is the flat list of every fragment-assignment entry across all reads
+    /// (grouped internally by `ScriptedVariantOverlap::read_idx`). Before
+    /// calling the real `ComputeVariant`, the shim populates every
+    /// `overlap.align` via the REAL, unmodified
+    /// `SeqSet::AddOverlapAlignmentInfo` (see `shim.h`'s doc comment) -- this
+    /// wrapper does not (and must not) supply `align` itself.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `reads2` is non-empty but its length differs from
+    /// `reads1`'s, if any string contains an interior NUL byte, or if the
+    /// underlying C++ call threw.
+    pub fn compute_variant(
+        &mut self,
+        reads1: &[&str],
+        reads2: &[&str],
+        assignments: &[ScriptedVariantOverlap],
+    ) {
+        assert!(
+            reads2.is_empty() || reads2.len() == reads1.len(),
+            "reads2 must be empty (single-end) or the same length as reads1"
+        );
+        let read_cnt = i32::try_from(reads1.len()).expect("read count fits in i32");
+
+        let c_reads1: Vec<std::ffi::CString> = reads1
+            .iter()
+            .map(|s| {
+                std::ffi::CString::new(*s).expect("read must not contain an interior NUL byte")
+            })
+            .collect();
+        let read1_ptrs: Vec<*const std::os::raw::c_char> =
+            c_reads1.iter().map(|c| c.as_ptr()).collect();
+
+        let c_reads2: Vec<std::ffi::CString> = reads2
+            .iter()
+            .map(|s| {
+                std::ffi::CString::new(*s).expect("read must not contain an interior NUL byte")
+            })
+            .collect();
+        let read2_ptrs: Vec<*const std::os::raw::c_char> =
+            c_reads2.iter().map(|c| c.as_ptr()).collect();
+        let read2_arg = if reads2.is_empty() { std::ptr::null() } else { read2_ptrs.as_ptr() };
+
+        let n = assignments.len();
+        let read_idx: Vec<i32> = assignments.iter().map(|a| a.read_idx).collect();
+        let seq_idx: Vec<i32> = assignments.iter().map(|a| a.seq_idx).collect();
+        let match_cnt: Vec<i32> = assignments.iter().map(|a| a.match_cnt).collect();
+        let similarity: Vec<f64> = assignments.iter().map(|a| a.similarity).collect();
+        let has_mate_pair: Vec<i32> =
+            assignments.iter().map(|a| i32::from(a.has_mate_pair)).collect();
+        let o1_from_r2: Vec<i32> = assignments.iter().map(|a| i32::from(a.o1_from_r2)).collect();
+
+        let o1_seq_start: Vec<i32> = assignments.iter().map(|a| a.overlap1.seq_start).collect();
+        let o1_seq_end: Vec<i32> = assignments.iter().map(|a| a.overlap1.seq_end).collect();
+        let o1_read_start: Vec<i32> = assignments.iter().map(|a| a.overlap1.read_start).collect();
+        let o1_read_end: Vec<i32> = assignments.iter().map(|a| a.overlap1.read_end).collect();
+        let o1_strand: Vec<i32> = assignments.iter().map(|a| a.overlap1.strand).collect();
+        let o1_match_cnt: Vec<i32> = assignments.iter().map(|a| a.overlap1.match_cnt).collect();
+        let o1_similarity: Vec<f64> = assignments.iter().map(|a| a.overlap1.similarity).collect();
+
+        let o2_seq_start: Vec<i32> = assignments.iter().map(|a| a.overlap2.seq_start).collect();
+        let o2_seq_end: Vec<i32> = assignments.iter().map(|a| a.overlap2.seq_end).collect();
+        let o2_read_start: Vec<i32> = assignments.iter().map(|a| a.overlap2.read_start).collect();
+        let o2_read_end: Vec<i32> = assignments.iter().map(|a| a.overlap2.read_end).collect();
+        let o2_strand: Vec<i32> = assignments.iter().map(|a| a.overlap2.strand).collect();
+        let o2_match_cnt: Vec<i32> = assignments.iter().map(|a| a.overlap2.match_cnt).collect();
+        let o2_similarity: Vec<f64> = assignments.iter().map(|a| a.overlap2.similarity).collect();
+
+        let rc = unsafe {
+            ffi::fg_t1k_variantcaller_compute_variant(
+                self.handle,
+                read1_ptrs.as_ptr(),
+                read2_arg,
+                read_cnt,
+                read_idx.as_ptr(),
+                seq_idx.as_ptr(),
+                match_cnt.as_ptr(),
+                similarity.as_ptr(),
+                has_mate_pair.as_ptr(),
+                o1_from_r2.as_ptr(),
+                o1_seq_start.as_ptr(),
+                o1_seq_end.as_ptr(),
+                o1_read_start.as_ptr(),
+                o1_read_end.as_ptr(),
+                o1_strand.as_ptr(),
+                o1_match_cnt.as_ptr(),
+                o1_similarity.as_ptr(),
+                o2_seq_start.as_ptr(),
+                o2_seq_end.as_ptr(),
+                o2_read_start.as_ptr(),
+                o2_read_end.as_ptr(),
+                o2_strand.as_ptr(),
+                o2_match_cnt.as_ptr(),
+                o2_similarity.as_ptr(),
+                i32::try_from(n).expect("assignment count fits in i32"),
+            )
+        };
+        assert!(rc == 0, "fg_t1k_variantcaller_compute_variant threw a C++ exception");
+    }
+
+    /// Mirrors `VariantCaller::finalVariants.size()`.
+    #[must_use]
+    pub fn final_variant_count(&self) -> i32 {
+        unsafe { ffi::fg_t1k_variantcaller_final_variant_count(self.handle) }
+    }
+
+    /// Mirrors `VariantCaller::finalVariants[i]`. `i` must be in
+    /// `0..self.final_variant_count()`.
+    #[must_use]
+    pub fn final_variant(&self, i: i32) -> CppVariant {
+        let mut seq_idx = 0i32;
+        let mut ref_start = 0i32;
+        let mut ref_end = 0i32;
+        let mut reference: std::os::raw::c_char = 0;
+        let mut var: std::os::raw::c_char = 0;
+        let mut all_support = 0.0f64;
+        let mut var_support = 0.0f64;
+        let mut var_uniq_support = 0.0f64;
+        let mut var_group_id = 0i32;
+        let mut output_group_id = 0i32;
+        let mut qual = 0i32;
+        unsafe {
+            ffi::fg_t1k_variantcaller_final_variant(
+                self.handle,
+                i,
+                &mut seq_idx,
+                &mut ref_start,
+                &mut ref_end,
+                &mut reference,
+                &mut var,
+                &mut all_support,
+                &mut var_support,
+                &mut var_uniq_support,
+                &mut var_group_id,
+                &mut output_group_id,
+                &mut qual,
+            );
+        }
+        #[allow(clippy::cast_sign_loss)]
+        CppVariant {
+            seq_idx,
+            ref_start,
+            ref_end,
+            reference: reference as u8,
+            var: var as u8,
+            all_support,
+            var_support,
+            var_uniq_support,
+            var_group_id,
+            output_group_id,
+            qual,
+        }
+    }
+
+    /// Mirrors `VariantCaller::OutputAlleleVCF(filename)`, returning the
+    /// written text directly (via a temp file under `tmp_dir`).
+    ///
+    /// The temp file name is made unique per call (incorporating the process
+    /// ID, this handle's pointer value, and a per-process atomic counter) so
+    /// concurrent calls from different threads/tests never collide on the
+    /// same path -- an earlier revision used a single fixed filename per
+    /// `tmp_dir`, which corrupted results under `cargo test`'s default
+    /// parallel test execution (two tests' `OutputAlleleVCF`/read-back racing
+    /// on the same file).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `tmp_dir` contains an interior NUL byte, if the underlying
+    /// C++ call threw, or if the VCF text does not fit in an internal 1 MiB
+    /// buffer (every scenario this port's differential tests use is far
+    /// smaller).
+    #[must_use]
+    pub fn output_allele_vcf(&self, tmp_dir: &std::path::Path) -> String {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let file_name = format!(
+            "fg_t1k_variantcaller_shim_{}_{:p}_{unique}.vcf",
+            std::process::id(),
+            self.handle,
+        );
+        let tmp_path = tmp_dir.join(file_name);
+        let c_tmp_path =
+            std::ffi::CString::new(tmp_path.to_str().expect("tmp_dir must be valid UTF-8"))
+                .expect("tmp_dir must not contain an interior NUL byte");
+        let capacity = 1024 * 1024;
+        let mut buffer: Vec<u8> = vec![0; capacity];
+        let n = unsafe {
+            ffi::fg_t1k_variantcaller_output_allele_vcf(
+                self.handle,
+                c_tmp_path.as_ptr(),
+                buffer.as_mut_ptr().cast::<std::os::raw::c_char>(),
+                i32::try_from(capacity).unwrap(),
+            )
+        };
+        assert!(n >= 0, "fg_t1k_variantcaller_output_allele_vcf threw a C++ exception");
+        #[allow(clippy::cast_sign_loss)]
+        let n = n as usize;
+        String::from_utf8(buffer[..n].to_vec()).expect("VCF output must be valid UTF-8")
+    }
+}
+
+#[cfg(feature = "t1k-sys")]
+impl Drop for CppVariantCaller {
+    fn drop(&mut self) {
+        unsafe { ffi::fg_t1k_variantcaller_free(self.handle) }
     }
 }

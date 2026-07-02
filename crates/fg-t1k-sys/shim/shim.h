@@ -331,6 +331,85 @@ double fg_t1k_genotyper2_allele_ec_abundance(void* p, int alleleIdx);
 int fg_t1k_genotyper2_allele_missing_coverage(void* p, int alleleIdx);
 int fg_t1k_genotyper2_seq_effective_len(void* p, int alleleIdx);
 int fg_t1k_genotyper2_seq_weight(void* p, int alleleIdx);
+
+// Test-only setter: directly assigns `Genotyper::alleleInfo[alleleIdx].abundance`,
+// bypassing the EM (`QuantifyAlleleEquivalentClass`). Lets a differential test
+// script a known abundance for `VariantCaller::SetSeqAbundance` (Task 6a) without
+// needing to drive the full EM to a specific converged value. Mirrors no
+// particular C++ call site (InitAlleleInfo defaults `abundance` to 0, `Genotyper.
+// hpp:587,591` -- this is purely a test scripting hook, analogous to how
+// fg_t1k_genotyper2_set_read_assignments scripts `_fragmentOverlap` inputs
+// directly rather than deriving them from a real alignment pipeline).
+void fg_t1k_genotyper2_set_allele_abundance(void* p, int alleleIdx, double abundance);
+
+// --- Task 6a: VariantCaller (opaque-handle FFI, mirrors the fg_t1k_genotyper2_*
+// pattern above). The handle is really a `VariantCaller*`; callers must free it
+// exactly once via fg_t1k_variantcaller_free. Construction takes the SAME
+// Genotyper handle a caller already built via fg_t1k_genotyper2_* (VariantCaller's
+// C++ constructor takes a `SeqSet&`; this shim passes `genotyper->refSet`) so both
+// share the identical reference/allele-index space.
+void* fg_t1k_variantcaller_new(void* genotyperHandle);
+void fg_t1k_variantcaller_free(void* p);
+
+// Mirrors `VariantCaller::SetSeqAbundance(genotyper)`. Returns 0 on success, -1 if
+// the underlying call threw.
+int fg_t1k_variantcaller_set_seq_abundance(void* p, void* genotyperHandle);
+
+// Mirrors `VariantCaller::SetMaxVarGroupToResolve(m)`.
+void fg_t1k_variantcaller_set_max_var_group_to_resolve(void* p, int m);
+
+// Mirrors `VariantCaller::ComputeVariant(read1, read2, fragmentAssignments)`,
+// built from flat scripted arrays (parallel across all fragment-assignment
+// entries of all reads, `n` total entries):
+//   - readIdx[i]: which read (0-based) this entry belongs to.
+//   - seqIdx/matchCnt/similarity: `_fragmentOverlap` top-level fields.
+//   - hasMatePair/o1FromR2: `_fragmentOverlap` flags.
+//   - o1SeqStart/o1SeqEnd/o1ReadStart/o1ReadEnd/o1Strand/o1MatchCnt/o1Similarity:
+//     `overlap1` fields (`_overlap`; `matchCnt`/`similarity` may differ from the
+//     fragment-level fields above when mate-paired -- see
+//     `_fragmentOverlap::matchCnt` vs `overlap1.matchCnt`).
+//   - o2* : same, for `overlap2` (ignored when hasMatePair[i] == 0).
+// `read1`/`read2` are `readCnt`-length arrays of NUL-terminated C strings
+// (`read2` may be NULL for single-end; individual entries may be NULL when
+// unused by a given fragment). Before calling `ComputeVariant`, this shim
+// populates every `overlap.align` via the REAL, unmodified
+// `SeqSet::AddOverlapAlignmentInfo` (exactly as `Analyzer::ProcessReads` does
+// before its own `ComputeVariant` call, `Analyzer.cpp:672-686` /
+// `SeqSet.hpp:2758-2778`) -- callers do not supply `align` directly.
+// Returns 0 on success, -1 if the underlying call threw.
+int fg_t1k_variantcaller_compute_variant(
+    void* p, const char* const* read1, const char* const* read2, int readCnt, const int* readIdx,
+    const int* seqIdx, const int* matchCnt, const double* similarity, const int* hasMatePair,
+    const int* o1FromR2, const int* o1SeqStart, const int* o1SeqEnd, const int* o1ReadStart,
+    const int* o1ReadEnd, const int* o1Strand, const int* o1MatchCnt, const double* o1Similarity,
+    const int* o2SeqStart, const int* o2SeqEnd, const int* o2ReadStart, const int* o2ReadEnd,
+    const int* o2Strand, const int* o2MatchCnt, const double* o2Similarity, int n);
+
+// Read-back accessors for `VariantCaller::finalVariants` (all real state, no
+// shim-side recomputation).
+int fg_t1k_variantcaller_final_variant_count(void* p);
+// `i` must be in `0..fg_t1k_variantcaller_final_variant_count(p)`. `outRef`/
+// `outVar` are 1-byte-capacity buffers (every variant in this port's scope is a
+// single-base substitution -- see fg-t1k-core's variant_caller module docs on
+// why no indel calling exists in stock T1K).
+void fg_t1k_variantcaller_final_variant(void* p, int i, int* outSeqIdx, int* outRefStart,
+                                         int* outRefEnd, char* outRef, char* outVar,
+                                         double* outAllSupport, double* outVarSupport,
+                                         double* outVarUniqSupport, int* outVarGroupId,
+                                         int* outOutputGroupId, int* outQual);
+
+// Mirrors `VariantCaller::OutputAlleleVCF(filename)`, but returns the file's
+// text content directly (via a temp file at `tmpPath`) rather than requiring
+// the caller to read it back off disk themselves. `tmpPath` must be a path to
+// a writable, not-necessarily-existing file (the CALLER is responsible for
+// making it unique -- e.g. incorporating a PID/thread-id/counter -- since
+// tests may run this concurrently across threads; this shim does not
+// generate uniqueness itself). The file is deleted before returning.
+// `outBuffer`/`outCapacity` receive the VCF text (NUL-terminated, truncated
+// if it would not fit). Returns the number of bytes written (excluding the
+// NUL terminator), or -1 if the underlying call threw.
+int fg_t1k_variantcaller_output_allele_vcf(void* p, const char* tmpPath, char* outBuffer,
+                                            int outCapacity);
 #ifdef __cplusplus
 }
 #endif

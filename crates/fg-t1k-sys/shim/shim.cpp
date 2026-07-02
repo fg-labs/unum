@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "KmerCode.hpp"   // header-only; declares extern nucToNum/numToNuc
@@ -31,6 +32,11 @@
                            // (AlignAlgo.hpp is pulled in transitively by SeqSet.hpp; both
                            // AlignAlgo::* and struct _posWeight are usable directly)
 #include "Genotyper.hpp"  // header-only; depends on SeqSet.hpp + KmerCount.hpp + SimpleVector.hpp above
+#include "VariantCaller.hpp" // header-only; depends on SeqSet.hpp + Genotyper.hpp above. Needed `private
+                              // public` too: VariantCaller::finalVariants/baseVariants/ComputeVariant's
+                              // internals are all `private`, and this shim's Task-6a read-back accessors
+                              // read `finalVariants` directly (mirroring the SeqSet/Genotyper pattern
+                              // above -- see its comment for why this technique is safe/standard here).
 #undef private
 
 #include "alignments.hpp" // header-only; depends on samtools-0.1.19/sam.h (NOT built with -DHTSLIB,
@@ -848,4 +854,191 @@ int fg_t1k_genotyper2_seq_effective_len(void* p, int alleleIdx) {
 // Mirrors `Genotyper::refSet.GetSeqWeight(alleleIdx)`.
 int fg_t1k_genotyper2_seq_weight(void* p, int alleleIdx) {
     return static_cast<Genotyper*>(p)->refSet.GetSeqWeight(alleleIdx);
+}
+
+// Test-only setter: see shim.h's doc comment.
+void fg_t1k_genotyper2_set_allele_abundance(void* p, int alleleIdx, double abundance) {
+    static_cast<Genotyper*>(p)->alleleInfo[alleleIdx].abundance = abundance;
+}
+
+// --- Task 6a: VariantCaller ---
+//
+// Opaque-handle FFI, mirroring the fg_t1k_genotyper2_* pattern above. See
+// shim.h's doc comments for each entry's exact contract.
+
+void* fg_t1k_variantcaller_new(void* genotyperHandle) {
+    try {
+        Genotyper* g = static_cast<Genotyper*>(genotyperHandle);
+        return new VariantCaller(g->refSet);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void fg_t1k_variantcaller_free(void* p) { delete static_cast<VariantCaller*>(p); }
+
+int fg_t1k_variantcaller_set_seq_abundance(void* p, void* genotyperHandle) {
+    try {
+        static_cast<VariantCaller*>(p)->SetSeqAbundance(*static_cast<Genotyper*>(genotyperHandle));
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+void fg_t1k_variantcaller_set_max_var_group_to_resolve(void* p, int m) {
+    static_cast<VariantCaller*>(p)->SetMaxVarGroupToResolve(m);
+}
+
+int fg_t1k_variantcaller_compute_variant(
+    void* p, const char* const* read1, const char* const* read2, int readCnt, const int* readIdx,
+    const int* seqIdx, const int* matchCnt, const double* similarity, const int* hasMatePair,
+    const int* o1FromR2, const int* o1SeqStart, const int* o1SeqEnd, const int* o1ReadStart,
+    const int* o1ReadEnd, const int* o1Strand, const int* o1MatchCnt, const double* o1Similarity,
+    const int* o2SeqStart, const int* o2SeqEnd, const int* o2ReadStart, const int* o2ReadEnd,
+    const int* o2Strand, const int* o2MatchCnt, const double* o2Similarity, int n) {
+    try {
+        VariantCaller* vc = static_cast<VariantCaller*>(p);
+        bool hasMate = (read2 != nullptr);
+
+        // Build std::vector<char*> read1seq/read2seq (VariantCaller::ComputeVariant's
+        // own signature), and one std::vector<_fragmentOverlap> per read.
+        std::vector<char*> read1seq(readCnt);
+        std::vector<char*> read2seq;
+        if (hasMate)
+            read2seq.resize(readCnt);
+        for (int i = 0; i < readCnt; ++i) {
+            read1seq[i] = const_cast<char*>(read1[i]);
+            if (hasMate)
+                read2seq[i] = const_cast<char*>(read2 ? const_cast<char*>(read2[i]) : nullptr);
+        }
+
+        std::vector<std::vector<struct _fragmentOverlap> > fragmentAssignments(readCnt);
+        for (int i = 0; i < n; ++i) {
+            int rIdx = readIdx[i];
+            struct _fragmentOverlap fo;
+            memset(&fo, 0, sizeof(fo));
+            fo.seqIdx = seqIdx[i];
+            fo.matchCnt = matchCnt[i];
+            fo.similarity = similarity[i];
+            fo.hasMatePair = hasMatePair[i] != 0;
+            fo.o1FromR2 = o1FromR2[i] != 0;
+            fo.qual = 0;
+            fo.hasN = false;
+
+            fo.overlap1.seqIdx = fo.seqIdx;
+            fo.overlap1.seqStart = o1SeqStart[i];
+            fo.overlap1.seqEnd = o1SeqEnd[i];
+            fo.overlap1.readStart = o1ReadStart[i];
+            fo.overlap1.readEnd = o1ReadEnd[i];
+            fo.overlap1.strand = o1Strand[i];
+            fo.overlap1.matchCnt = o1MatchCnt[i];
+            fo.overlap1.similarity = o1Similarity[i];
+            fo.overlap1.align = NULL;
+
+            if (fo.hasMatePair) {
+                fo.overlap2.seqIdx = fo.seqIdx;
+                fo.overlap2.seqStart = o2SeqStart[i];
+                fo.overlap2.seqEnd = o2SeqEnd[i];
+                fo.overlap2.readStart = o2ReadStart[i];
+                fo.overlap2.readEnd = o2ReadEnd[i];
+                fo.overlap2.strand = o2Strand[i];
+                fo.overlap2.matchCnt = o2MatchCnt[i];
+                fo.overlap2.similarity = o2Similarity[i];
+                fo.overlap2.align = NULL;
+            } else {
+                fo.overlap2.seqIdx = -1;
+                fo.overlap2.align = NULL;
+            }
+
+            fragmentAssignments[rIdx].push_back(fo);
+        }
+
+        // Populate overlap.align via the REAL, unmodified
+        // SeqSet::AddOverlapAlignmentInfo -- exactly what Analyzer::ProcessReads
+        // does (via AddFragmentAlignmentInfo) before its own ComputeVariant call.
+        for (int i = 0; i < readCnt; ++i) {
+            for (size_t j = 0; j < fragmentAssignments[i].size(); ++j) {
+                struct _fragmentOverlap& fo = fragmentAssignments[i][j];
+                if (fo.hasMatePair) {
+                    vc->refSet.AddOverlapAlignmentInfo(read1seq[i], fo.overlap1);
+                    vc->refSet.AddOverlapAlignmentInfo(read2seq[i], fo.overlap2);
+                } else {
+                    if (!fo.o1FromR2)
+                        vc->refSet.AddOverlapAlignmentInfo(read1seq[i], fo.overlap1);
+                    else
+                        vc->refSet.AddOverlapAlignmentInfo(read2seq[i], fo.overlap1);
+                }
+            }
+        }
+
+        vc->ComputeVariant(read1seq, read2seq, fragmentAssignments);
+
+        // Free the align[] buffers AddOverlapAlignmentInfo allocated (`new
+        // signed char[...]`, SeqSet.hpp:2670) -- ComputeVariant never frees
+        // them itself (matches stock: Analyzer.cpp also leaks these across a
+        // whole-process run; freeing here just avoids leaking across repeated
+        // differential-test invocations within one process).
+        for (int i = 0; i < readCnt; ++i) {
+            for (size_t j = 0; j < fragmentAssignments[i].size(); ++j) {
+                struct _fragmentOverlap& fo = fragmentAssignments[i][j];
+                delete[] fo.overlap1.align;
+                delete[] fo.overlap2.align;
+            }
+        }
+
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_variantcaller_final_variant_count(void* p) {
+    return (int)static_cast<VariantCaller*>(p)->finalVariants.size();
+}
+
+void fg_t1k_variantcaller_final_variant(void* p, int i, int* outSeqIdx, int* outRefStart,
+                                         int* outRefEnd, char* outRef, char* outVar,
+                                         double* outAllSupport, double* outVarSupport,
+                                         double* outVarUniqSupport, int* outVarGroupId,
+                                         int* outOutputGroupId, int* outQual) {
+    struct _variant& v = static_cast<VariantCaller*>(p)->finalVariants[i];
+    *outSeqIdx = v.seqIdx;
+    *outRefStart = v.refStart;
+    *outRefEnd = v.refEnd;
+    *outRef = v.ref[0];
+    *outVar = v.var[0];
+    *outAllSupport = v.allSupport;
+    *outVarSupport = v.varSupport;
+    *outVarUniqSupport = v.varUniqSupport;
+    *outVarGroupId = v.varGroupId;
+    *outOutputGroupId = v.outputGroupId;
+    *outQual = v.qual;
+}
+
+int fg_t1k_variantcaller_output_allele_vcf(void* p, const char* tmpPath, char* outBuffer,
+                                            int outCapacity) {
+    try {
+        VariantCaller* vc = static_cast<VariantCaller*>(p);
+        vc->OutputAlleleVCF(const_cast<char*>(tmpPath));
+
+        FILE* fp = fopen(tmpPath, "rb");
+        if (fp == NULL)
+            return -1;
+        fseek(fp, 0, SEEK_END);
+        long size = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+        int toRead = (int)size;
+        if (toRead > outCapacity - 1)
+            toRead = outCapacity - 1;
+        int nread = 0;
+        if (toRead > 0)
+            nread = (int)fread(outBuffer, 1, toRead, fp);
+        outBuffer[nread] = '\0';
+        fclose(fp);
+        remove(tmpPath);
+        return nread;
+    } catch (...) {
+        return -1;
+    }
 }
