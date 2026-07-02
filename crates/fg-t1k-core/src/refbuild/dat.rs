@@ -1038,6 +1038,22 @@ fn apply_utr_padding(state: &mut BuildState) {
 /// the fallback, whether or not that gene's real partial flank ends up
 /// visible in the final padding. Skipping the draw would desync the stream
 /// for every later gene+side.
+///
+/// **Generality caveat (rescue order vs. RNG draw order).** This pass walks
+/// `state.order`, which includes rescued alleles appended by
+/// [`rescue_partial_alleles`] in fixed `partial_order` (file-encounter) order —
+/// not Perl's `keys %partialAlleles` (hash-randomized) order. For the current
+/// pinned HLA subset this is provably irrelevant: only one gene ever needs the
+/// fallback and reaches it via a rescued allele, so Perl's own gene+side
+/// first-encounter order is deterministic regardless of hash randomization,
+/// and all 7 oracle runs (Perl vs. Perl, and Perl vs. this port) are
+/// byte-identical (see `fixtures/refbuild/PINS.md`). If a future HLA release
+/// had two or more rescued alleles of *distinct* genes that both need the RNG
+/// fallback, Perl's own tail assignment would become hash-nondeterministic
+/// (no single canonical golden run-to-run), while this port always picks one
+/// deterministic, reproducible gene+side draw order. In that scenario, the
+/// byte-identity oracle for the full database must compare records
+/// order-independently (sort by header) rather than raw bytes, per spike #8.
 fn resolve_utr_padding_caches(state: &mut BuildState) {
     use std::collections::hash_map::Entry;
 

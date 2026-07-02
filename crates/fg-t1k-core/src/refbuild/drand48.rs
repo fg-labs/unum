@@ -103,4 +103,33 @@ mod tests {
         assert_eq!(rng.next_f64(), 0.7279398726272746);
         assert_eq!(rng.next_f64(), 0.6499462188604745);
     }
+
+    /// Directly exercises `next_base`'s `int(rand() * 4)` -> `ACGT` mapping
+    /// (not just the underlying `f64` stream), so a regression in the `* 4.0`
+    /// truncation or the nucleotide table is caught here rather than only
+    /// transitively through a full UTR-padding golden file.
+    ///
+    /// Expected bases are derived independently from the known seed-17
+    /// `drand48` draws — the first three are pinned above
+    /// (`seed_17_matches_perl_reference_draws`); draws 4-8 were carried out
+    /// by hand-running the same LCG in a scratch script, not by reading back
+    /// `next_base`'s own output:
+    ///
+    /// ```text
+    /// draw  drand48()             int(v * 4)  base
+    /// 1     0.9744672834212942    3           T
+    /// 2     0.7279398726272746    2           G
+    /// 3     0.6499462188604745    2           G
+    /// 4     0.7843188800351939    3           T
+    /// 5     0.3764637519025946    1           C
+    /// 6     0.4572493692248685    1           C
+    /// 7     0.11391533366107964   0           A
+    /// 8     0.9371190402135525    3           T
+    /// ```
+    #[test]
+    fn seed_17_next_base_matches_expected_acgt_mapping() {
+        let mut rng = Drand48::new(17);
+        let bases: Vec<u8> = (0..8).map(|_| rng.next_base()).collect();
+        assert_eq!(bases, b"TGGTCCAT");
+    }
 }
