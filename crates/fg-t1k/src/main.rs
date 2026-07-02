@@ -11,5 +11,6 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Run(args) => stages::run(&args),
+        Commands::Build(args) => stages::build::run(&args),
     }
 }
