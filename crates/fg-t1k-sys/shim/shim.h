@@ -113,6 +113,61 @@ int fg_t1k_seqset_has_hit_in_set(void* p, const char* read);
 // `!IsLowComplexity(read) && refSet->HasHitInSet(read, buffer)`. Returns
 // 1/0.
 int fg_t1k_seqset_is_good_candidate(void* p, const char* read);
+
+// Opaque-handle FFI for Alignments (vendor/t1k/alignments.hpp), scoped to
+// exactly the slice BamExtractor.cpp uses. The handle is an opaque `void*`
+// (really an `Alignments*`); callers must free it exactly once via
+// fg_t1k_alignments_free. Alignments' constructor is lightweight (no heap
+// allocation that can throw), but Open/Next/GetGeneralInfo can still throw
+// via a corrupt/unreadable file (or, on the real vendored source, `exit(1)`
+// on a hard open failure -- that path cannot be caught by try/catch at all,
+// so callers should only ever point fg_t1k_alignments_open at a file they
+// already know exists and parses); every entry point here is still wrapped
+// in try/catch per this shim's exception-safety rule (no C++ exception may
+// unwind across an `extern "C"` boundary) for defense-in-depth.
+void* fg_t1k_alignments_new(void);
+void fg_t1k_alignments_free(void* p);
+// Returns 0 on success, -1 if the underlying call threw. `path` must be a
+// NUL-terminated C string.
+int fg_t1k_alignments_open(void* p, const char* path);
+// Returns 0 on success, -1 if the underlying call threw.
+int fg_t1k_alignments_rewind(void* p);
+// Mirrors `Alignments::Next`. Returns 1 if a record was read, 0 at EOF, -1
+// if the underlying call threw.
+int fg_t1k_alignments_next(void* p);
+// Mirrors `Alignments::GetReadSeq`/`GetQual`: writes a NUL-terminated string
+// into `buffer` (caller-owned, must be at least `record.l_qseq + 1` bytes --
+// the shim itself does not know l_qseq, so callers should size generously,
+// e.g. the same 100001-byte convention used elsewhere in this shim). Returns
+// 0 on success, -1 if the underlying call threw.
+int fg_t1k_alignments_get_read_seq(void* p, char* buffer);
+int fg_t1k_alignments_get_qual(void* p, char* buffer);
+// Mirrors `Alignments::GetReadId`. Writes a NUL-terminated string into
+// `buffer` (caller-owned, must be large enough for any QNAME the test BAM
+// contains). Returns 0 on success, -1 if the underlying call threw.
+int fg_t1k_alignments_get_read_id(void* p, char* buffer);
+// Flag predicates. Return 1/0, or -1 if the underlying call threw.
+int fg_t1k_alignments_is_first_mate(void* p);
+int fg_t1k_alignments_is_reverse(void* p);
+int fg_t1k_alignments_is_mate_reverse(void* p);
+int fg_t1k_alignments_is_aligned(void* p);
+int fg_t1k_alignments_is_template_aligned(void* p);
+int fg_t1k_alignments_is_primary(void* p);
+// Mirrors `Alignments::GetChromId`. Returns the tid, or INT32_MIN if the
+// underlying call threw (a tid is never that value in practice, so this
+// remains an unambiguous sentinel without needing a separate out-param).
+int fg_t1k_alignments_get_chrom_id(void* p);
+// Mirrors `Alignments::segCnt`. Returns the count, or -1 if the underlying
+// call threw.
+int fg_t1k_alignments_seg_count(void* p);
+// Mirrors `Alignments::segments[i]`. Writes `.a`/`.b` into the out-params.
+// `i` must be in `0..fg_t1k_alignments_seg_count(p)`. Returns 0 on success,
+// -1 if the underlying call threw.
+int fg_t1k_alignments_seg(void* p, int i, int64_t* out_a, int64_t* out_b);
+// Mirrors `Alignments::GetGeneralInfo(stopEarly)` then reads the resulting
+// `fragStdev`/`readLen` public fields into the out-params. Returns 0 on
+// success, -1 if the underlying call threw.
+int fg_t1k_alignments_general_info(void* p, int stop_early, int* out_frag_stdev, int* out_read_len);
 #ifdef __cplusplus
 }
 #endif

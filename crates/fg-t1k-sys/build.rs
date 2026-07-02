@@ -67,4 +67,13 @@ fn main() {
     // libs for the shim's final link step.
     println!("cargo:rustc-link-lib=z");
     println!("cargo:rustc-link-lib=pthread");
+
+    // alignments.hpp (pulled in by shim.cpp for the Alignments opaque handle)
+    // is compiled WITHOUT -DHTSLIB (matching how the bam-extractor oracle
+    // binary above is built: `#include "samtools-0.1.19/sam.h"` and the
+    // bam1_cigar/bam1_qname/etc macros come from that bundled header, not
+    // htslib-1.15.1), so it needs the same bundled `libbam.a` the
+    // bam-extractor oracle links against.
+    println!("cargo:rustc-link-search=native={}", sam.display());
+    println!("cargo:rustc-link-lib=bam");
 }
