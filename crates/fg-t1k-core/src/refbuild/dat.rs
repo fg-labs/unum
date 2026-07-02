@@ -576,7 +576,6 @@ fn build_rna_body(
 /// Mirrors the `elsif ($mode eq "dna")` branch of `ParseDatFile.pl`'s
 /// per-record output builder (the intron-merge `for`/nested-`while` loop that
 /// manually advances its outer index).
-#[allow(clippy::too_many_arguments)]
 fn build_dna_body(
     exons: &[i64],
     sequence: &str,
