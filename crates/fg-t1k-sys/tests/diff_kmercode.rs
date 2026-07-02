@@ -340,3 +340,21 @@ fn is_equal_matches_code_equality() {
     b.append(b'C');
     assert!(!a.is_equal(&b));
 }
+
+#[test]
+#[should_panic(expected = "shift_right count must be in 0..32")]
+fn cpp_shift_right_rejects_full_width() {
+    // A full-width shift (2*k >= 64) is `>> 64`: undefined behavior in the
+    // C++ side. The wrapper must reject it at the FFI boundary rather than
+    // forwarding UB, mirroring the `k < 32` guard on the safe-Rust KmerCode.
+    let mut kc = CppKmerCode::new(32);
+    kc.shift_right(32);
+}
+
+#[test]
+#[should_panic(expected = "shift_right count must be in 0..32")]
+fn cpp_shift_right_rejects_negative_count() {
+    // A negative shift count is also UB on the C++ side; reject it too.
+    let mut kc = CppKmerCode::new(9);
+    kc.shift_right(-1);
+}

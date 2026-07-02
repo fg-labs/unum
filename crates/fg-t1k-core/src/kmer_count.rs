@@ -53,6 +53,14 @@ impl KmerCount {
     /// the current window) -- by incrementing the entry for its canonical
     /// k-mer code. Returns `1` on success, matching the C++ return value
     /// semantics (`0` = read too short to yield any k-mer, `1` = processed).
+    ///
+    /// Uses `read.len()` as the read length, whereas T1K's C++ `AddCount`
+    /// computes it via `strlen(read)`. The two diverge only if `read`
+    /// contains an interior NUL byte (`strlen` would stop early; this port
+    /// would keep going) -- which does not occur in real FASTQ/sequence
+    /// data, and which the FFI wrapper (`CppKmerCount::add_count` in
+    /// `fg-t1k-sys`) rejects up front via `CString::new`, since a NUL byte
+    /// cannot be encoded in a NUL-terminated C string.
     pub fn add_count(&mut self, read: &[u8]) -> i32 {
         let len = read.len();
         if len < self.kmer_length {

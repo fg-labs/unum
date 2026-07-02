@@ -171,3 +171,13 @@ fn kmercount_new_produces_a_usable_handle() {
     assert_eq!(cpp.add_count(b"ACGTACGTA"), 1);
     assert_eq!(cpp.get_count(b"ACGTACGTA"), 1);
 }
+
+#[test]
+#[should_panic(expected = "get_count query must be at least k=9 bytes")]
+fn get_count_rejects_query_shorter_than_k() {
+    // The C++ GetCount reads exactly k bytes without calling strlen, so a
+    // query slice shorter than k would read past the CString allocation.
+    // The wrapper must reject it at the FFI boundary.
+    let cpp = CppKmerCount::new(9);
+    let _ = cpp.get_count(b"ACGT");
+}

@@ -86,7 +86,7 @@ pub fn canonical_kmer(seq: &[u8], k: usize) -> u64 {
 
 /// Returns `true` if `c` is not one of the four canonical bases (`A`/`C`/`G`/`T`).
 ///
-/// Mirrors T1K's `nucToNum` table (`Genotyper.cpp:34-39`), which holds `-1`
+/// Mirrors T1K's `nucToNum` table (`Genotyper.cpp:37-40`), which holds `-1`
 /// for every entry except `A`, `C`, `G`, `T`. This is the check
 /// `KmerCode::Prepend` uses (`nucToNum[c-'A'] == -1`) to decide whether a
 /// base is invalid -- note this differs from `KmerCode::Append`'s literal
@@ -142,8 +142,17 @@ impl KmerCode {
     /// `KmerCode(int kl)` constructor: `code = 0`, `invalid_pos = -1`, and
     /// `mask` built by repeatedly shifting left 2 bits and OR-ing in `0b11`,
     /// `k` times (so `mask` has its lowest `2*k` bits set).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `k > 32`: the 2-bit-per-base packing lives in a `u64`, so a
+    /// `kmer_length` beyond 32 has no room in the packed word (`2*k > 64`) and
+    /// would silently overflow the window. This guard is a fail-fast on an
+    /// invariant the C++ side leaves implicit; it never fires for any real
+    /// usage (the largest supported k is 32).
     #[must_use]
     pub fn new(k: usize) -> Self {
+        assert!(k <= 32, "kmer length must be <= 32");
         let mut mask: u64 = 0;
         for _ in 0..k {
             mask <<= 2;
@@ -236,15 +245,18 @@ impl KmerCode {
     /// [`is_invalid_base`] check (any non-ACGT byte), unlike `Append`'s
     /// literal `'N'` check -- see the struct-level doc comment.
     ///
-    /// # Preconditions
+    /// # Panics
     ///
-    /// Requires `kmer_length >= 1` (mirrors the C++ side, which has
-    /// undefined behavior for a zero-length k-mer at this call site). The
-    /// `self.kmer_length as u64 - 1` subtraction below underflows when
-    /// `kmer_length == 0`: in debug builds this panics (Rust's default
-    /// overflow check on arithmetic), while release builds wrap silently
-    /// and produce a garbage shift amount/code rather than panicking.
+    /// Panics if `kmer_length == 0`. The `self.kmer_length as u64 - 1`
+    /// subtraction below would otherwise underflow: in debug builds Rust's
+    /// overflow check already panics, while release builds would wrap
+    /// silently and produce a garbage shift amount/code. The C++ side has
+    /// undefined behavior at this call site for a zero-length k-mer; rather
+    /// than mirror that garbage in release builds, this guard fails fast with
+    /// a clear message in all build modes. A zero-length k-mer is a nonsense
+    /// input that no real usage produces.
     pub fn prepend(&mut self, c: u8) {
+        assert!(self.kmer_length > 0, "prepend requires kmer_length >= 1");
         self.shift_right(1);
         if is_invalid_base(c) {
             self.invalid_pos = kmer_length_as_i64(self.kmer_length) - 1;
@@ -257,7 +269,17 @@ impl KmerCode {
     /// (masked to the remaining window width), and moves `invalid_pos` in
     /// the opposite direction of `Append`/`Prepend` (decrementing by `k`,
     /// clamped back to -1 if it goes negative).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `k >= 32`, i.e. `2*k >= 64`. A shift that consumes the whole
+    /// packed `u64` word is `>> 64`: undefined behavior in C++ and a masked
+    /// (`& 63`) no-op in release Rust / an overflow panic in debug Rust. T1K
+    /// never calls `ShiftRight` with the full `kmer_length` in one step, so
+    /// this is a nonsense input rather than a real usage pattern; this guard
+    /// fails fast with a clear message instead of silently diverging.
     pub fn shift_right(&mut self, k: usize) {
+        assert!(k < 32, "shift_right count must be < 32 (2*k must fit in a u64)");
         if self.invalid_pos != -1 {
             self.invalid_pos -= kmer_length_as_i64(k);
         }
@@ -422,5 +444,41 @@ mod tests {
             expected.append(c);
         }
         assert_eq!(kc.get_code(), expected.get_code());
+    }
+
+    #[test]
+    fn kmer_code_new_allows_maximum_k_of_32() {
+        // k=32 is the largest k that fits in a u64 (2*32 == 64 bits); the mask
+        // is all-ones with no headroom bit. Must not panic.
+        let kc = KmerCode::new(32);
+        assert_eq!(kc.mask, u64::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "kmer length must be <= 32")]
+    fn kmer_code_new_rejects_k_above_32() {
+        // 2*33 == 66 bits has no room in a u64 packed word, so `new` must
+        // fail fast rather than silently overflow the window.
+        let _ = KmerCode::new(33);
+    }
+
+    #[test]
+    #[should_panic(expected = "prepend requires kmer_length >= 1")]
+    fn kmer_code_prepend_rejects_zero_length() {
+        // KmerCode::new(0) is constructible, but prepend's shift computation
+        // underflows on a zero-length window; guard it explicitly so release
+        // builds fail fast instead of producing garbage.
+        let mut kc = KmerCode::new(0);
+        kc.prepend(b'A');
+    }
+
+    #[test]
+    #[should_panic(expected = "shift_right count must be < 32")]
+    fn kmer_code_shift_right_rejects_full_width() {
+        // A full-width shift (2*k >= 64) is `>> 64`: UB in C++ and a masked
+        // no-op / overflow panic in Rust. Guard it rather than silently
+        // diverging from the C++ oracle on a nonsense count.
+        let mut kc = KmerCode::new(32);
+        kc.shift_right(32);
     }
 }

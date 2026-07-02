@@ -96,7 +96,12 @@ pub use ffi::{fg_t1k_nuc_to_num, fg_t1k_num_to_nuc};
 /// object via `fg_t1k_kmercode_new`, and `Drop` calls `fg_t1k_kmercode_free`
 /// exactly once. All methods forward to the corresponding FFI function; the
 /// `unsafe` calls are sound because `self.handle` is a non-null pointer
-/// created by `fg_t1k_kmercode_new` and never freed until `Drop`.
+/// created by `fg_t1k_kmercode_new` and never freed until `Drop`. Construction
+/// checks the returned handle for NULL, mirroring [`CppKmerCount::new`] and
+/// [`CppKmerIndex::new`]: the shim wraps the C++ constructor in a try/catch
+/// and returns NULL on any exception, so this wrapper must -- and does --
+/// refuse to proceed with a NULL handle rather than silently dereferencing it
+/// later.
 #[cfg(feature = "t1k-sys")]
 pub struct CppKmerCode {
     handle: *mut std::os::raw::c_void,
@@ -105,9 +110,18 @@ pub struct CppKmerCode {
 #[cfg(feature = "t1k-sys")]
 impl CppKmerCode {
     /// Constructs a new C++ `KmerCode` for k-mer length `k`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying `fg_t1k_kmercode_new` call returns NULL (i.e.
+    /// the C++ constructor threw an exception).
     #[must_use]
     pub fn new(k: i32) -> Self {
         let handle = unsafe { ffi::fg_t1k_kmercode_new(k) };
+        assert!(
+            !handle.is_null(),
+            "fg_t1k_kmercode_new({k}) returned NULL: C++ KmerCode construction failed"
+        );
         Self { handle }
     }
 
@@ -133,7 +147,16 @@ impl CppKmerCode {
     }
 
     /// Mirrors `KmerCode::ShiftRight`.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `0 <= k < 32`. The C++ side shifts by `2*k` bits, so a
+    /// negative `k` or `k >= 32` (i.e. `2*k >= 64`) is undefined behavior in
+    /// C++; this guard rejects such counts at the FFI boundary rather than
+    /// forwarding UB. It mirrors the `k < 32` invariant enforced on the
+    /// safe-Rust `KmerCode::shift_right`, keeping the two sides symmetric.
     pub fn shift_right(&mut self, k: i32) {
+        assert!((0..32).contains(&k), "shift_right count must be in 0..32 (2*k must fit in a u64)");
         unsafe { ffi::fg_t1k_kmercode_shift_right(self.handle, k) }
     }
 
@@ -193,6 +216,14 @@ impl Drop for CppKmerCode {
 #[cfg(feature = "t1k-sys")]
 pub struct CppKmerCount {
     handle: *mut std::os::raw::c_void,
+    /// The k-mer length passed at construction. Retained so [`get_count`]
+    /// can reject query slices shorter than `k` before crossing the FFI
+    /// boundary: the C++ `GetCount` reads exactly `k` bytes without calling
+    /// `strlen`, so a shorter slice would read past the `CString`'s
+    /// allocation.
+    ///
+    /// [`get_count`]: CppKmerCount::get_count
+    k: usize,
 }
 
 #[cfg(feature = "t1k-sys")]
@@ -201,17 +232,18 @@ impl CppKmerCount {
     ///
     /// # Panics
     ///
-    /// Panics if the underlying `fg_t1k_kmercount_new` call returns NULL
-    /// (i.e. the C++ constructor threw an exception, most plausibly
-    /// `std::bad_alloc`).
+    /// Panics if `k` is negative, or if the underlying `fg_t1k_kmercount_new`
+    /// call returns NULL (i.e. the C++ constructor threw an exception, most
+    /// plausibly `std::bad_alloc`).
     #[must_use]
     pub fn new(k: i32) -> Self {
+        let k_usize = usize::try_from(k).expect("k must be non-negative");
         let handle = unsafe { ffi::fg_t1k_kmercount_new(k) };
         assert!(
             !handle.is_null(),
             "fg_t1k_kmercount_new({k}) returned NULL: C++ KmerCount construction failed"
         );
-        Self { handle }
+        Self { handle, k: k_usize }
     }
 
     /// Mirrors `KmerCount::AddCount`. `read` must not contain an interior NUL
@@ -234,8 +266,16 @@ impl CppKmerCount {
     ///
     /// # Panics
     ///
-    /// Panics if `kmer` contains an interior NUL byte.
+    /// Panics if `kmer` is shorter than `k` bytes (the C++ side reads exactly
+    /// `k` bytes, so a shorter slice would read past the allocation), or if
+    /// `kmer` contains an interior NUL byte.
     pub fn get_count(&self, kmer: &[u8]) -> i32 {
+        assert!(
+            kmer.len() >= self.k,
+            "get_count query must be at least k={} bytes, got {}",
+            self.k,
+            kmer.len()
+        );
         let c_kmer =
             std::ffi::CString::new(kmer).expect("kmer must not contain an interior NUL byte");
         unsafe { ffi::fg_t1k_kmercount_get_count(self.handle, c_kmer.as_ptr()) }
