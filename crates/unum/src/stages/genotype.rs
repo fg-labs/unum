@@ -320,6 +320,23 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     };
     let hit_len_required = filter.hit_len_required();
     let ref_seq_similarity = filter.ref_seq_similarity();
+    // `SeqSet::IsSeparatorInRange(s, e, seqIdx)` (`SeqSet.hpp:487-498`), fed
+    // by each allele's `AlleleRef::separator` (built at load time by
+    // `AlleleRef::new`, mirroring `_seqWrapper::separator`) -- see
+    // `unum_core::genotyper::is_separator_in_range`'s doc comment (fixes #39:
+    // this was previously stubbed as `|_, _, _| false`, over-assigning reads
+    // whose alignment span crosses an interior reference `N`).
+    let separator_in_range = |s: i32, e: i32, seq_idx: i32| {
+        let idx = usize::try_from(seq_idx).unwrap_or(0);
+        genotyper::is_separator_in_range(&allele_refs[idx].separator, s, e)
+    };
+    // `Genotyper::set_read_assignments`'s own `separator_lookup` closure is
+    // called as `(seq_idx, s, e)` (see that function's doc comment) --
+    // reordered here rather than at the call site.
+    let separator_lookup_for_set_read_assignments = |seq_idx: i32, s: i32, e: i32| {
+        let idx = usize::try_from(seq_idx).unwrap_or(0);
+        genotyper::is_separator_in_range(&allele_refs[idx].separator, s, e)
+    };
 
     for i in 0..read_cnt {
         let overlaps1 = overlaps_by_seq.get(reads1[i].seq.as_slice()).and_then(Option::as_ref);
@@ -337,9 +354,14 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
             has_n,
             hit_len_required,
             consensus_len_of,
-            |_, _, _| false, // no interior-N separators in this port's references (see genotyper.rs doc).
+            separator_in_range,
         );
-        genotyper.set_read_assignments(i, &assignment, ref_seq_similarity, |_, _, _| false);
+        genotyper.set_read_assignments(
+            i,
+            &assignment,
+            ref_seq_similarity,
+            separator_lookup_for_set_read_assignments,
+        );
     }
 
     genotyper.coalesce_read_assignments(0, i32::try_from(read_cnt.saturating_sub(1)).unwrap_or(0));
