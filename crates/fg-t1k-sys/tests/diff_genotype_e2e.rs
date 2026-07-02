@@ -67,7 +67,7 @@ fn fixture(rel: &str) -> PathBuf {
 /// semantics -- see `fg_t1k_core::genotyper`'s module docs).
 fn run_oracle(out_prefix: &Path) {
     let bin = binary_path(OracleStage::Genotyper);
-    assert!(bin.exists(), "oracle binary not built: {bin:?}");
+    assert!(bin.exists(), "oracle binary not built: {}", bin.display());
     let output = Command::new(&bin)
         .arg("-f")
         .arg(fixture("example/ref/kir_rna_seq.fa"))
@@ -329,7 +329,8 @@ struct GenotypeRow {
 }
 
 fn parse_genotype_tsv(path: &Path) -> Vec<GenotypeRow> {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {path:?}: {e}"));
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     text.lines()
         .map(|line| {
             let cols: Vec<&str> = line.split('\t').collect();

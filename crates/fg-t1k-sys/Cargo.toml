@@ -10,6 +10,9 @@ build = "build.rs"
 default = []
 t1k-sys = []
 
+[dependencies]
+hts-sys = "2.2"
+
 [build-dependencies]
 cc = "1"
 

@@ -398,7 +398,7 @@ fn indel_bearing_reads_do_not_spuriously_call_a_variant() {
         use fg_t1k_core::align_algo::{EDIT_DELETE, EDIT_MATCH};
         let mut ops = vec![EDIT_MATCH; 5];
         ops.push(EDIT_DELETE);
-        ops.extend(std::iter::repeat(EDIT_MATCH).take(14));
+        ops.extend(std::iter::repeat_n(EDIT_MATCH, 14));
         ops
     };
     let rust_read1: Vec<Vec<u8>> = (0..read_cnt).map(|_| read.as_bytes().to_vec()).collect();

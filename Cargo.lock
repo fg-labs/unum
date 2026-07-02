@@ -360,6 +360,7 @@ dependencies = [
  "anyhow",
  "cc",
  "fg-t1k-core",
+ "hts-sys",
  "rust-htslib",
  "tempfile",
 ]

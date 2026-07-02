@@ -8,37 +8,36 @@
 //!
 //! # Why a subprocess, not an in-process FFI call via `CppAlignments`
 //!
-//! `vendor/t1k/samtools-0.1.19` (the bundled, legacy htslib the vendored
-//! `Alignments` class links against) and `rust-htslib`'s vendored MODERN
-//! htslib (`hts-sys`, pulled in transitively by `fg-t1k-core`'s
+//! Historically, the bundled legacy `vendor/t1k/samtools-0.1.19` (which the
+//! vendored `Alignments` class linked against) and `rust-htslib`'s vendored
+//! MODERN htslib (`hts-sys`, pulled in transitively by `fg-t1k-core`'s
 //! `alignments::Alignments`, which this test also needs to build/read the
-//! fixture) export a large overlapping set of IDENTICALLY NAMED C symbols
+//! fixture) exported a large overlapping set of IDENTICALLY NAMED C symbols
 //! with INCOMPATIBLE ABIs -- `bam_read1`, `sam_read1`, `bam_write1`, every
-//! `bgzf_*`/`fai_*` function, etc. Linking BOTH into one process causes the
+//! `bgzf_*`/`fai_*` function, etc. Linking BOTH into one process caused the
 //! platform linker to silently resolve each duplicate symbol to exactly ONE
 //! winner (confirmed via `lldb` + `otool -tv` disassembly: the final test
-//! binary's `bam_read1`/`sam_read1` bind to MODERN htslib's implementation
-//! everywhere, including inside the vendored `Alignments::Next`, which is
-//! compiled WITHOUT `-DHTSLIB` and therefore expects the LEGACY
-//! samtools-0.1.19 `bam1_t` layout -- e.g. samtools-0.1.19's `bam1_t` is 56
+//! binary's `bam_read1`/`sam_read1` bound to MODERN htslib's implementation
+//! everywhere, including inside the vendored `Alignments::Next`, which was
+//! compiled WITHOUT `-DHTSLIB` and therefore expected the LEGACY
+//! samtools-0.1.19 `bam1_t` layout -- e.g. samtools-0.1.19's `bam1_t` was 56
 //! bytes vs. modern htslib's differently-laid-out, larger struct). The
-//! result is a `calloc`/`free` size mismatch and an immediate SIGSEGV inside
-//! `bam_destroy1` on the very first record read -- a genuine, unavoidable
-//! ABI collision from linking two htslib generations into one address space,
-//! not a bug in either port.
+//! result was a `calloc`/`free` size mismatch and an immediate SIGSEGV
+//! inside `bam_destroy1` on the very first record read.
 //!
-//! The fix: run the C++ oracle in a SEPARATE PROCESS
-//! (`alignments_oracle_dump`, `src/bin/alignments_oracle_dump.rs`) that
-//! depends ONLY on `fg_t1k_sys` (samtools-0.1.19 + the shim, never
-//! rust-htslib). This test file spawns that binary via
-//! `std::process::Command` and parses its line-oriented stdout output --
-//! it never calls `fg_t1k_sys::CppAlignments`/the FFI module directly, so
-//! THIS process links only rust-htslib (via `fg_t1k_core`), and the spawned
-//! process links only samtools-0.1.19 -- neither process has both, so
-//! neither has the collision. This is still a byte-for-byte differential
-//! against the REAL, unmodified vendored C++ `Alignments` class on the exact
-//! same BAM bytes; only the process boundary differs from a more typical
-//! in-process opaque-handle FFI comparison.
+//! As of the htslib unification (see `crates/fg-t1k-sys/build.rs`),
+//! samtools-0.1.19 is retired and the vendored `Alignments` class is
+//! compiled `-DHTSLIB` against the SAME htslib 1.19.1 build (via hts-sys)
+//! that `rust-htslib` links -- so the original ABI blocker no longer exists
+//! and an in-process FFI call via `CppAlignments` would be safe. This test
+//! still spawns `alignments_oracle_dump` (`src/bin/alignments_oracle_dump.
+//! rs`) as a separate process, purely to avoid restructuring an
+//! already-correct, thoroughly-commented differential test as an
+//! incidental side effect of the unification -- not because the collision
+//! still applies. It is still a byte-for-byte differential against the
+//! REAL, unmodified vendored C++ `Alignments` class on the exact same BAM
+//! bytes; only the process boundary differs from a more typical in-process
+//! opaque-handle FFI comparison.
 //!
 //! # Coverage
 //!
@@ -283,8 +282,9 @@ fn oracle_dump_bin_path() -> PathBuf {
     let candidate = profile_dir.join("alignments_oracle_dump");
     assert!(
         candidate.exists(),
-        "alignments_oracle_dump binary not found at {candidate:?} -- expected it to be built \
-         alongside the fg-t1k-sys test binaries (src/bin/alignments_oracle_dump.rs)"
+        "alignments_oracle_dump binary not found at {} -- expected it to be built \
+         alongside the fg-t1k-sys test binaries (src/bin/alignments_oracle_dump.rs)",
+        candidate.display()
     );
     candidate
 }
@@ -296,7 +296,7 @@ fn run_oracle_dump(bam_path: &Path) -> (Vec<OracleRecord>, OracleGeneralInfo) {
     let output = Command::new(&bin)
         .arg(bam_path)
         .output()
-        .unwrap_or_else(|e| panic!("spawning {bin:?}: {e}"));
+        .unwrap_or_else(|e| panic!("spawning {}: {e}", bin.display()));
     assert!(
         output.status.success(),
         "alignments_oracle_dump exited with {:?}; stderr:\n{}",

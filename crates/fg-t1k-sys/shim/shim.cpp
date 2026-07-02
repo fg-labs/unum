@@ -39,9 +39,13 @@
                               // above -- see its comment for why this technique is safe/standard here).
 #undef private
 
-#include "alignments.hpp" // header-only; depends on samtools-0.1.19/sam.h (NOT built with -DHTSLIB,
-                           // matching how build.rs compiles the bam-extractor oracle binary against
-                           // the bundled samtools-0.1.19 -lbam, not htslib-1.15.1)
+#include "alignments.hpp" // header-only; compiled WITH -DHTSLIB (build.rs passes -DHTSLIB plus an
+                           // -I alias resolving alignments.hpp's hardcoded
+                           // "htslib-1.15.1/htslib/sam.h" to hts-sys's real htslib 1.19.1 headers),
+                           // matching how build.rs compiles the bam-extractor oracle binary. This is
+                           // the same htslib rust-htslib links, so this shim's static lib and any
+                           // Rust test binary linking it share exactly one htslib -- no samtools-
+                           // 0.1.19, no duplicate-symbol collision.
 #include "shim.h"
 
 // nucToNum/numToNuc are extern in the headers, defined only in the T1K .cpp files

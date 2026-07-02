@@ -51,10 +51,10 @@ struct FastqFileSink {
 impl FastqFileSink {
     fn create(prefix: &Path, paired: bool) -> Self {
         let fp1 = std::fs::File::create(format!("{}_1.fq", prefix.display()))
-            .unwrap_or_else(|e| panic!("create {prefix:?}_1.fq: {e}"));
+            .unwrap_or_else(|e| panic!("create {}_1.fq: {e}", prefix.display()));
         if paired {
             let fp2 = std::fs::File::create(format!("{}_2.fq", prefix.display()))
-                .unwrap_or_else(|e| panic!("create {prefix:?}_2.fq: {e}"));
+                .unwrap_or_else(|e| panic!("create {}_2.fq: {e}", prefix.display()));
             Self { fp1, fp2: Some(fp2) }
         } else {
             Self { fp1, fp2: None }
@@ -63,7 +63,7 @@ impl FastqFileSink {
 
     fn create_single(prefix: &Path) -> Self {
         let fp1 = std::fs::File::create(format!("{}.fq", prefix.display()))
-            .unwrap_or_else(|e| panic!("create {prefix:?}.fq: {e}"));
+            .unwrap_or_else(|e| panic!("create {}.fq: {e}", prefix.display()));
         Self { fp1, fp2: None }
     }
 }
@@ -124,7 +124,7 @@ fn run_rust_single(ref_fasta: &Path, r1: &Path, out_prefix: &Path) {
 /// Runs the real oracle `fastq-extractor` binary, paired input.
 fn run_oracle_paired(ref_fasta: &Path, r1: &Path, r2: &Path, out_prefix: &Path) {
     let bin = binary_path(OracleStage::FastqExtractor);
-    assert!(bin.exists(), "oracle binary not built: {bin:?}");
+    assert!(bin.exists(), "oracle binary not built: {}", bin.display());
     let status = Command::new(&bin)
         .arg("-f")
         .arg(ref_fasta)
@@ -142,7 +142,7 @@ fn run_oracle_paired(ref_fasta: &Path, r1: &Path, r2: &Path, out_prefix: &Path) 
 /// Same as [`run_oracle_paired`] but single-end (`-u`).
 fn run_oracle_single(ref_fasta: &Path, r1: &Path, out_prefix: &Path) {
     let bin = binary_path(OracleStage::FastqExtractor);
-    assert!(bin.exists(), "oracle binary not built: {bin:?}");
+    assert!(bin.exists(), "oracle binary not built: {}", bin.display());
     let status = Command::new(&bin)
         .arg("-f")
         .arg(ref_fasta)
@@ -157,14 +157,16 @@ fn run_oracle_single(ref_fasta: &Path, r1: &Path, out_prefix: &Path) {
 
 fn assert_files_byte_identical(rust_path: &Path, oracle_path: &Path) {
     let rust_bytes = std::fs::read(rust_path)
-        .unwrap_or_else(|e| panic!("reading rust output {rust_path:?}: {e}"));
+        .unwrap_or_else(|e| panic!("reading rust output {}: {e}", rust_path.display()));
     let oracle_bytes = std::fs::read(oracle_path)
-        .unwrap_or_else(|e| panic!("reading oracle output {oracle_path:?}: {e}"));
+        .unwrap_or_else(|e| panic!("reading oracle output {}: {e}", oracle_path.display()));
     assert_eq!(
         rust_bytes,
         oracle_bytes,
-        "byte mismatch between {rust_path:?} ({} bytes) and {oracle_path:?} ({} bytes)",
+        "byte mismatch between {} ({} bytes) and {} ({} bytes)",
+        rust_path.display(),
         rust_bytes.len(),
+        oracle_path.display(),
         oracle_bytes.len()
     );
 }

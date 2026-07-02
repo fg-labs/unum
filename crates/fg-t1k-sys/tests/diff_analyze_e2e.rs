@@ -65,7 +65,7 @@ fn fixture(rel: &str) -> PathBuf {
 /// oracle (not the Rust `genotype` stage) is used to generate them.
 fn kir_example_analyzer_inputs(prefix: &Path) {
     let bin = binary_path(OracleStage::Genotyper);
-    assert!(bin.exists(), "oracle binary not built: {bin:?}");
+    assert!(bin.exists(), "oracle binary not built: {}", bin.display());
     let output = Command::new(&bin)
         .arg("-f")
         .arg(fixture("example/ref/kir_rna_seq.fa"))
@@ -97,7 +97,7 @@ fn run_oracle_analyzer(
     out_prefix: &Path,
 ) {
     let bin = binary_path(OracleStage::Analyzer);
-    assert!(bin.exists(), "oracle binary not built: {bin:?}");
+    assert!(bin.exists(), "oracle binary not built: {}", bin.display());
     let output = Command::new(&bin)
         .arg("-f")
         .arg(ref_fasta)
@@ -429,6 +429,8 @@ fn kir_example_allele_vcf_matches_oracle() {
 /// same 4-tuple shape as the KIR scenario; see the call sites, which pass
 /// `aligned_1` as `-u` and never touch `aligned_2`).
 fn write_synthetic_snv_inputs(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    use std::fmt::Write as _;
+
     // Reuse a REAL KIR allele consensus (no header comment, so the whole
     // sequence is treated as one exon -- see `exonic_position`'s doc
     // comment) as the single selected allele.
@@ -460,7 +462,7 @@ fn write_synthetic_snv_inputs(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
         if i < 8 {
             read[mut_pos] = alt_base;
         }
-        records.push_str(&format!(">read{i}\n{}\n", String::from_utf8(read).unwrap()));
+        writeln!(records, ">read{i}\n{}", String::from_utf8(read).unwrap()).unwrap();
     }
     let aligned_1 = dir.join("aligned_1.fa");
     std::fs::write(&aligned_1, &records).unwrap();
@@ -490,7 +492,7 @@ fn synthetic_snv_allele_vcf_matches_oracle() {
     // `run_rust_analyze` inline for the same reason `diff_genotype_e2e.rs`
     // reimplements the driver rather than spawning `fg-t1k`.
     let bin = binary_path(OracleStage::Analyzer);
-    assert!(bin.exists(), "oracle binary not built: {bin:?}");
+    assert!(bin.exists(), "oracle binary not built: {}", bin.display());
     let output = Command::new(&bin)
         .arg("-f")
         .arg(&ref_fasta)
