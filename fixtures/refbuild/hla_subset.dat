@@ -1,0 +1,3200 @@
+ID   HLA00001; SV 4; standard; DNA; HUM; 3503 BP.
+XX
+AC   HLA00001;
+XX
+SV   HLA00001.4
+XX
+DT   01-AUG-1989 (Rel. 1.00.0, Created, Version 1)
+DT   17-APR-2013 (Rel. 3.12.0, Last Updated, Version 4)
+XX
+DE   HLA-A*01:01:01:01, Human MHC Class I sequence
+XX
+KW   Human MHC; HLA; Class I; HLA-A; Allele; HLA-A*01:01:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-3503
+RX   PUBMED; 3375250.
+RA   Parham P, Lomen CE, Lawlor DA, Ways JP, Holmes N, Coppin HL, Salter RD,
+RA   Wan AM, Ennis PD;
+RT   "Nature of polymorphism in HLA-A, -B, and -C molecules.";
+RL   Proceedings of the National Academy of Sciences USA 85:4005-4009(1988).
+XX
+RN   [2]
+RP   1-3503
+RX   PUBMED; 2251137.
+RA   Girdlestone J;
+RT   "Nucleotide sequence of an HLA-A1 gene.";
+RL   Nucleic Acids Research 18:6701(1990).
+XX
+RN   [3]
+RP   1-3503
+RX   PUBMED; 9349617.
+RA   Laforet M, Froelich N, Parissiadis A, Pfeiffer B, Schell A, Faller B,
+RA   Woehl-Jaegle ML, Cazenave JP, Tongio MM;
+RT   "A nucleotide insertion in exon 4 is responsible for the absence of
+RT   expression of an HLA-A*01 allele.";
+RL   Tissue Antigens 50:347-350(1997).
+XX
+RN   [4]
+RP   1-3503
+RX   PUBMED; 15140828.
+RA   Stewart CA, Horton R, Allcock RJ, Ashurst JL, Atrazhev AM, Coggill P,
+RA   Dunham I, Forbes S, Halls K, Howson JM, Humphray SJ, Hunt S, Mungall AJ,
+RA   Osoegawa K, Palmer S, Roberts AN, Rogers J, Sims S, Wang Y, Wilming LG,
+RA   Elliott JF, de Jong PJ, Sawcer S, Todd JA, Trowsdale J, Beck S;
+RT   "Complete MHC haplotype sequencing for common disease gene mapping.";
+RL   Genome Research 14:1176-1187(2004).
+XX
+RN   [5]
+RP   1-3503
+RX   PUBMED; 18193213.
+RA   Horton R, Gibson R, Coggill P, Miretti M, Allcok RJ, Almeida J, Forbes S,
+RA   Gilbert JGR, Halls K, Harrow JL, Hart E, Howe K, Jackson DK, Palmer S,
+RA   Roberts AN, Sims S, Stewart CA, Traherne JA, Trevanion S, Wilming L,
+RA   Rogers J, de Jong PJ, Elliott JF, Sawcer S, Todd JA, Trowsdale J, Beck S;
+RT   "Variation analysis and gene annotation of eight MHC haplotypes: The MHC
+RT   Haplotype Project.";
+RL   Immunogenetics 60:1-18(2008).
+XX
+RN   [6]
+RP   1-3503
+RX   PUBMED; 19735485.
+RA   Zhu F, He Y, Zhang W, He J, He J, Xu X, Yan L;
+RT   "Analysis of the complete genomic sequence of HLA-A alleles in the Chinese
+RT   Han population.";
+RL   International Journal of Immunogenetics 36:351-360(2009).
+XX
+RN   [7]
+RP   1-3503
+RX   PUBMED; 24673518.
+RA   Lu L, Xu YP;
+RT   "Genomic full-length sequence of two HLA-A alleles, A*01:01:01:01 and
+RT   A*01:03, identified by cloning and sequencing.";
+RL   Tissue Antigens 83:423-424(2014).
+XX
+DR   EMBL; AJ278305; AJ278305.2.
+DR   EMBL; AL645935; AL645935.7.
+DR   EMBL; CR759913; CR759913.4.
+DR   EMBL; EU445470; EU445470.1.
+DR   EMBL; GU812295; GU812295.1.
+DR   EMBL; HG794373; HG794373.1.
+DR   EMBL; M24043; M24043.1.
+DR   EMBL; OR126295; OR126295.1.
+DR   EMBL; OZ079919; OZ079919.1.
+DR   EMBL; OZ257557; OZ257557.1.
+DR   EMBL; OZ257558; OZ257558.1.
+DR   EMBL; OZ257559; OZ257559.1.
+DR   EMBL; OZ257560; OZ257560.1.
+DR   EMBL; OZ257561; OZ257561.1.
+DR   EMBL; OZ257562; OZ257562.1.
+DR   EMBL; OZ257563; OZ257563.1.
+DR   EMBL; OZ257564; OZ257564.1.
+DR   EMBL; OZ257565; OZ257565.1.
+DR   EMBL; OZ257566; OZ257566.1.
+DR   EMBL; OZ257567; OZ257567.1.
+DR   EMBL; OZ257568; OZ257568.1.
+DR   EMBL; OZ257569; OZ257569.1.
+DR   EMBL; OZ257570; OZ257570.1.
+DR   EMBL; OZ257571; OZ257571.1.
+DR   EMBL; OZ257572; OZ257572.1.
+DR   EMBL; OZ257573; OZ257573.1.
+DR   EMBL; OZ257574; OZ257574.1.
+DR   EMBL; OZ257575; OZ257575.1.
+DR   EMBL; OZ257576; OZ257576.1.
+DR   EMBL; X55710; X55710.1.
+DR   EMBL; Z93949; Z93949.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..3503
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="Asian, European, Undefined"
+FT                   /cell_line="7550800303"
+FT                   /cell_line="APD"
+FT                   /cell_line="B4702"
+FT                   /cell_line="BGE"
+FT                   /cell_line="BM15"
+FT                   /cell_line="BM21"
+FT                   /cell_line="C.M.L."
+FT                   /cell_line="CB6B"
+FT                   /cell_line="COX"
+FT                   /cell_line="DE-SMS_A-575369"
+FT                   /cell_line="E4181324"
+FT                   /cell_line="FH15"
+FT                   /cell_line="FPAF"
+FT                   /cell_line="G088"
+FT                   /cell_line="J0528239"
+FT                   /cell_line="KAS011"
+FT                   /cell_line="LCL721"
+FT                   /cell_line="MOLT-4"
+FT                   /cell_line="PF04015"
+FT                   /cell_line="PP"
+FT                   /cell_line="REN"
+FT                   /cell_line="STEINLIN"
+FT                   /cell_line="VAVY"
+FT                   /cell_line="WIN"
+FT   CDS             join(301..373,504..773,1015..1290,1870..2145,2248..2364,
+FT                   2807..2839,2982..3029,3199..3203)
+FT                   /codon_start=1
+FT                   /gene="HLA-A"
+FT                   /allele="HLA-A*01:01:01:01"
+FT                   /product="MHC Class I HLA-A*01:01:01:01 sequence"
+FT                   /translation="MAVMAPRTLLLLLSGALALTQTWAGSHSMRYFFTSVSRPGRGEPR
+FT                   FIAVGYVDDTQFVRFDSDAASQKMEPRAPWIEQEGPEYWDQETRNMKAHSQTDRANLGT
+FT                   LRGYYNQSEDGSHTIQIMYGCDVGPDGRFLRGYRQDAYDGKDYIALNEDLRSWTAADMA
+FT                   AQITKRKWEAVHAAEQRRVYLEGRCVDGLRRYLENGKETLQRTDPPKTHMTHHPISDHE
+FT                   ATLRCWALGFYPAEITLTWQRDGEDQTQDTELVETRPAGDGTFQKWAAVVVPSGEEQRY
+FT                   TCHVQHEGLPKPLTLRWELSSQPTIPIVGIIAGLVLLGAVITGAVVAAVMWRRKSSDRK
+FT                   GGSYTQAASSDSAQGSDVSLTACKV"
+FT   UTR             1..300
+FT   exon            301..373
+FT                   /number="1"
+FT   intron          374..503
+FT                   /number="1"
+FT   exon            504..773
+FT                   /number="2"
+FT   intron          774..1014
+FT                   /number="2"
+FT   exon            1015..1290
+FT                   /number="3"
+FT   intron          1291..1869
+FT                   /number="3"
+FT   exon            1870..2145
+FT                   /number="4"
+FT   intron          2146..2247
+FT                   /number="4"
+FT   exon            2248..2364
+FT                   /number="5"
+FT   intron          2365..2806
+FT                   /number="5"
+FT   exon            2807..2839
+FT                   /number="6"
+FT   intron          2840..2981
+FT                   /number="6"
+FT   exon            2982..3029
+FT                   /number="7"
+FT   intron          3030..3198
+FT                   /number="7"
+FT   exon            3199..3203
+FT                   /number="8"
+FT   UTR             3204..3503
+SQ   Sequence 3503 BP; 666 A; 1012 C; 1070 G; 755 T; 0 other;
+     caggagcaga ggggtcaggg cgaagtccca gggccccagg cgtggctctc agggtctcag        60
+     gccccgaagg cggtgtatgg attggggagt cccagccttg gggattcccc aactccgcag       120
+     tttcttttct ccctctccca acctacgtag ggtccttcat cctggatact cacgacgcgg       180
+     acccagttct cactcccatt gggtgtcggg tttccagaga agccaatcag tgtcgtcgcg       240
+     gtcgctgttc taaagtccgc acgcacccac cgggactcag attctcccca gacgccgagg       300
+     atggccgtca tggcgccccg aaccctcctc ctgctactct cgggggccct ggccctgacc       360
+     cagacctggg cgggtgagtg cggggtcggg agggaaaccg cctctgcggg gagaagcaag       420
+     gggccctcct ggcgggggcg caggaccggg ggagccgcgc cgggaggagg gtcgggcagg       480
+     tctcagccac tgctcgcccc caggctccca ctccatgagg tatttcttca catccgtgtc       540
+     ccggcccggc cgcggggagc cccgcttcat cgccgtgggc tacgtggacg acacgcagtt       600
+     cgtgcggttc gacagcgacg ccgcgagcca gaagatggag ccgcgggcgc cgtggataga       660
+     gcaggagggg ccggagtatt gggaccagga gacacggaat atgaaggccc actcacagac       720
+     tgaccgagcg aacctgggga ccctgcgcgg ctactacaac cagagcgagg acggtgagtg       780
+     accccggccc ggggcgcagg tcacgacccc tcatccccca cggacgggcc aggtcgccca       840
+     cagtctccgg gtccgagatc caccccgaag ccgcgggact ccgagaccct tgtcccggga       900
+     gaggcccagg cgcctttacc cggtttcatt ttcagtttag gccaaaaatc cccccgggtt       960
+     ggtcggggcg gggcggggct cgggggactg ggctgaccgc ggggtcgggg ccaggttctc      1020
+     acaccatcca gataatgtat ggctgcgacg tggggccgga cgggcgcttc ctccgcgggt      1080
+     accggcagga cgcctacgac ggcaaggatt acatcgccct gaacgaggac ctgcgctctt      1140
+     ggaccgcggc ggacatggca gctcagatca ccaagcgcaa gtgggaggcg gtccatgcgg      1200
+     cggagcagcg gagagtctac ctggagggcc ggtgcgtgga cgggctccgc agatacctgg      1260
+     agaacgggaa ggagacgctg cagcgcacgg gtaccagggg ccacggggcg cctccctgat      1320
+     cgcctataga tctcccgggc tggcctccca caaggagggg agacaattgg gaccaacact      1380
+     agaatatcac cctccctctg gtcctgaggg agaggaatcc tcctgggttt ccagatcctg      1440
+     taccagagag tgactctgag gttccgccct gctctctgac acaattaagg gataaaatct      1500
+     ctgaaggagt gacgggaaga cgatccctcg aatactgatg agtggttccc tttgacaccg      1560
+     gcagcagcct tgggcccgtg acttttcctc tcaggccttg ttctctgctt cacactcaat      1620
+     gtgtgtgggg gtctgagtcc agcacttctg agtctctcag cctccactca ggtcaggacc      1680
+     agaagtcgct gttcccttct cagggaatag aagattatcc caggtgcctg tgtccaggct      1740
+     ggtgtctggg ttctgtgctc tcttccccat cccgggtgtc ctgtccattc tcaagatggc      1800
+     cacatgcgtg ctggtggagt gtcccatgac agatgcaaaa tgcctgaatt ttctgactct      1860
+     tcccgtcaga cccccccaag acacatatga cccaccaccc catctctgac catgaggcca      1920
+     ccctgaggtg ctgggccctg ggcttctacc ctgcggagat cacactgacc tggcagcggg      1980
+     atggggagga ccagacccag gacacggagc tcgtggagac caggcctgca ggggatggaa      2040
+     ccttccagaa gtgggcggct gtggtggtgc cttctggaga ggagcagaga tacacctgcc      2100
+     atgtgcagca tgagggtctg cccaagcccc tcaccctgag atggggtaag gagggagatg      2160
+     ggggtgtcat gtctcttagg gaaagcagga gcctctctgg agacctttag cagggtcagg      2220
+     gcccctcacc ttcccctctt ttcccagagc tgtcttccca gcccaccatc cccatcgtgg      2280
+     gcatcattgc tggcctggtt ctccttggag ctgtgatcac tggagctgtg gtcgctgccg      2340
+     tgatgtggag gaggaagagc tcaggtggag aaggggtgaa gggtggggtc tgagatttct      2400
+     tgtctcactg agggttccaa gccccagcta gaaatgtgcc ctgtctcatt actgggaagc      2460
+     accttccaca atcatgggcc gacccagcct gggccctgtg tgccagcact tactcttttg      2520
+     taaagcacct gttaaaatga aggacagatt tatcaccttg attacggcgg tgatgggacc      2580
+     tgatcccagc agtcacaagt cacaggggaa ggtccctgag gacagacctc aggagggcta      2640
+     ttggtccagg acccacacct gctttcttca tgtttcctga tcccgccctg ggtctgcagt      2700
+     cacacatttc tggaaacttc tctggggtcc aagactagga ggttcctcta ggaccttaag      2760
+     gccctggctc ctttctggta tctcacagga cattttcttc ccacagatag aaaaggaggg      2820
+     agttacactc aggctgcaag taagtatgaa ggaggctgat gcctgaggtc cttgggatat      2880
+     tgtgtttggg agcccatggg ggagctcacc caccccacaa ttcctcctct agccacatct      2940
+     tctgtgggat ctgaccaggt tctgtttttg ttctacccca ggcagtgaca gtgcccaggg      3000
+     ctctgatgtg tctctcacag cttgtaaagg tgagagcttg gagggcctga tgtgtgttgg      3060
+     gtgttgggtg gaacagtgga cacagctgtg ctatggggtt tctttgcgtt ggatgtattg      3120
+     agcatgcgat gggctgttta aggtgtgacc cctcactgtg atggatatga atttgttcat      3180
+     gaatattttt ttctatagtg tgagacagct gccttgtgtg ggactgagag gcaagagttg      3240
+     ttcctgccct tccctttgtg acttgaagaa ccctgacttt gtttctgcaa aggcacctgc      3300
+     atgtgtctgt gttcgtgtag gcataatgtg aggaggtggg gagagcaccc cacccccatg      3360
+     tccaccatga ccctcttccc acgctgacct gtgctccctc tccaatcatc tttcctgttc      3420
+     cagagaggtg gggctgaggt gtctccatct ctgtctcaac ttcatggtgc actgagctgt      3480
+     aacttcttcc ttccctatta aaa                                              3503
+//
+ID   HLA00005; SV 5; standard; DNA; HUM; 3517 BP.
+XX
+AC   HLA00005;
+XX
+SV   HLA00005.5
+XX
+DT   21-NOV-1987 (Rel. 1.00.0, Created, Version 1)
+DT   17-APR-2013 (Rel. 3.12.0, Last Updated, Version 5)
+XX
+DE   HLA-A*02:01:01:01, Human MHC Class I sequence
+XX
+KW   Human MHC; HLA; Class I; HLA-A; Allele; HLA-A*02:01:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-3517
+RX   PUBMED; 2982951.
+RA   Koller BH, Orr HT;
+RT   "Cloning and complete sequence of an HLA-A2 gene: analysis of two HLA-A
+RT   alleles at the nucleotide level.";
+RL   Journal of Immunology 134:2727-2733(1985).
+XX
+RN   [2]
+RP   1-3517
+RX   PUBMED; 3874058.
+RA   Krangel MS;
+RT   "Unusual RNA splicing generates a secreted form of HLA-A2 in a mutagenized
+RT   B lymphoblastoid cell line.";
+RL   EMBO Journal 4:1205-1210(1985).
+XX
+RN   [3]
+RP   1-3517
+RX   PUBMED; 2914713.
+RA   Cianetti L, Testa U, Scotto L, La Valle R, Simeone A, Boccoli G, Giannella
+RA   G, Peschle C, Boncinelli E;
+RT   "Three new class I HLA alleles: structure of mRNAs and alternative
+RT   mechanisms of processing.";
+RL   Immunogenetics 29:80-91(1989).
+XX
+RN   [4]
+RP   1-3517
+RX   PUBMED; 2320591.
+RA   Ennis PD, Zemmour J, Salter RD, Parham P;
+RT   "Rapid cloning of HLA-A,B cDNA by using the polymerase chain reaction:
+RT   frequency and nature of errors produced in amplification.";
+RL   Proceedings of the National Academy of Sciences USA 87:2833-2837(1990).
+XX
+RN   [5]
+RP   1-3517
+RX   PUBMED; 1317015.
+RA   Belich MP, Madrigal JA, Hildebrand WH, Zemmour J, Williams RC, Luz R,
+RA   Petzl-Erler ML, Parham P;
+RT   "Unusual HLA-B alleles in two tribes of Brazilian Indians.";
+RL   Nature 357:326-329(1992).
+XX
+RN   [6]
+RP   1-3517
+RX   PUBMED; 10727083.
+RA   Hampe A, Coriton O, Andrieux N, Carn G, Lepourcelet M, Mottier S, Dreano
+RA   S, Gatius MT, Hitte C, Soriano N, Galibert F;
+RT   "A 356-Kb sequence of the subtelomeric part of the MHC Class I region.";
+RL   DNA Sequence 10:263-299(1999).
+XX
+RN   [7]
+RP   1-3517
+RX   PUBMED; 18193213.
+RA   Horton R, Gibson R, Coggill P, Miretti M, Allcok RJ, Almeida J, Forbes S,
+RA   Gilbert JGR, Halls K, Harrow JL, Hart E, Howe K, Jackson DK, Palmer S,
+RA   Roberts AN, Sims S, Stewart CA, Traherne JA, Trevanion S, Wilming L,
+RA   Rogers J, de Jong PJ, Elliott JF, Sawcer S, Todd JA, Trowsdale J, Beck S;
+RT   "Variation analysis and gene annotation of eight MHC haplotypes: The MHC
+RT   Haplotype Project.";
+RL   Immunogenetics 60:1-18(2008).
+XX
+RN   [8]
+RP   1-3517
+RX   PUBMED; 19735485.
+RA   Zhu F, He Y, Zhang W, He J, He J, Xu X, Yan L;
+RT   "Analysis of the complete genomic sequence of HLA-A alleles in the Chinese
+RT   Han population.";
+RL   International Journal of Immunogenetics 36:351-360(2009).
+XX
+RN   [9]
+RP   1-3517
+RX   PUBMED; 24903405.
+RA   Tao H, Xu YP, Chen LX;
+RT   "Genomic full-length sequence of two HLA-A alleles, A*02:01:01:01 and
+RT   A*02:03:01, identified by cloning and sequencing.";
+RL   Tissue Antigens 84:321-323(2014).
+XX
+DR   EMBL; AF055066; AF055066.1.
+DR   EMBL; AJ555412; AJ555412.1.
+DR   EMBL; CR388220; CR388220.8.
+DR   EMBL; CR759762; CR759762.5.
+DR   EMBL; EU445471; EU445471.1.
+DR   EMBL; GQ996941; GQ996941.1.
+DR   EMBL; HG794376; HG794376.1.
+DR   EMBL; K02883; K02883.1.
+DR   EMBL; M84379; M84379.1.
+DR   EMBL; OR126293; OR126293.1.
+DR   EMBL; OZ079929; OZ079929.1.
+DR   EMBL; OZ257578; OZ257578.1.
+DR   EMBL; OZ257579; OZ257579.1.
+DR   EMBL; OZ257580; OZ257580.1.
+DR   EMBL; OZ257581; OZ257581.1.
+DR   EMBL; OZ257582; OZ257582.1.
+DR   EMBL; OZ257583; OZ257583.1.
+DR   EMBL; OZ257584; OZ257584.1.
+DR   EMBL; OZ257585; OZ257585.1.
+DR   EMBL; OZ257586; OZ257586.1.
+DR   EMBL; OZ257587; OZ257587.1.
+DR   EMBL; OZ257588; OZ257588.1.
+DR   EMBL; OZ257589; OZ257589.1.
+DR   EMBL; OZ257590; OZ257590.1.
+DR   EMBL; OZ257591; OZ257591.1.
+DR   EMBL; OZ257592; OZ257592.1.
+DR   EMBL; OZ257593; OZ257593.1.
+DR   EMBL; OZ257594; OZ257594.1.
+DR   EMBL; OZ257595; OZ257595.1.
+DR   EMBL; OZ257596; OZ257596.1.
+DR   EMBL; OZ257597; OZ257597.1.
+DR   EMBL; OZ257598; OZ257598.1.
+DR   EMBL; OZ257599; OZ257599.1.
+DR   EMBL; OZ257600; OZ257600.1.
+DR   EMBL; OZ257601; OZ257601.1.
+DR   EMBL; OZ257602; OZ257602.1.
+DR   EMBL; OZ257604; OZ257604.1.
+DR   EMBL; OZ257605; OZ257605.1.
+DR   EMBL; OZ257606; OZ257606.1.
+DR   EMBL; OZ257607; OZ257607.1.
+DR   EMBL; OZ257608; OZ257608.1.
+DR   EMBL; OZ257609; OZ257609.1.
+DR   EMBL; OZ257610; OZ257610.1.
+DR   EMBL; OZ257611; OZ257611.1.
+DR   EMBL; OZ257612; OZ257612.1.
+DR   EMBL; OZ257613; OZ257613.1.
+DR   EMBL; OZ257614; OZ257614.1.
+DR   EMBL; OZ257615; OZ257615.1.
+DR   EMBL; OZ257616; OZ257616.1.
+DR   EMBL; OZ257617; OZ257617.1.
+DR   EMBL; OZ257618; OZ257618.1.
+DR   EMBL; OZ257619; OZ257619.1.
+DR   EMBL; OZ257620; OZ257620.1.
+DR   EMBL; X02457; X02457.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..3517
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="Aboriginal Australian, African, African or African
+FT                   Descent, Asian, European, Hispanic or Latin American,
+FT                   Native American, Undefined"
+FT                   /cell_line="08009402"
+FT                   /cell_line="1416-1188"
+FT                   /cell_line="AWELLS"
+FT                   /cell_line="B9537"
+FT                   /cell_line="BEI"
+FT                   /cell_line="BEL5GB"
+FT                   /cell_line="BER"
+FT                   /cell_line="BGE"
+FT                   /cell_line="BH"
+FT                   /cell_line="BM16"
+FT                   /cell_line="BM9"
+FT                   /cell_line="BOLETH"
+FT                   /cell_line="BTB"
+FT                   /cell_line="BUR, E"
+FT                   /cell_line="CALOGERO"
+FT                   /cell_line="CAR, ML"
+FT                   /cell_line="CB"
+FT                   /cell_line="CF996"
+FT                   /cell_line="DBB"
+FT                   /cell_line="DE-SMS_A-570429"
+FT                   /cell_line="DEM"
+FT                   /cell_line="DOP-ND"
+FT                   /cell_line="EC"
+FT                   /cell_line="EK"
+FT                   /cell_line="EMJ"
+FT                   /cell_line="FH05"
+FT                   /cell_line="GM637"
+FT                   /cell_line="GRC-138"
+FT                   /cell_line="GRC-150"
+FT                   /cell_line="HAG"
+FT                   /cell_line="HERLUF"
+FT                   /cell_line="JAP-NF"
+FT                   /cell_line="JD"
+FT                   /cell_line="JESTHOM"
+FT                   /cell_line="JVM"
+FT                   /cell_line="JY"
+FT                   /cell_line="KOSE"
+FT                   /cell_line="LCL721"
+FT                   /cell_line="LK707"
+FT                   /cell_line="LKT2"
+FT                   /cell_line="LUY"
+FT                   /cell_line="MLF"
+FT                   /cell_line="OMW"
+FT                   /cell_line="RSA-ND"
+FT                   /cell_line="SLE005"
+FT                   /cell_line="SPO010"
+FT                   /cell_line="T5-1"
+FT                   /cell_line="TAB089"
+FT                   /cell_line="TER-ND"
+FT                   /cell_line="WDV"
+FT                   /cell_line="WJR076"
+FT                   /cell_line="WT24"
+FT   CDS             join(301..373,504..773,1015..1290,1891..2166,2266..2382,
+FT                   2821..2853,2996..3043,3213..3217)
+FT                   /codon_start=1
+FT                   /gene="HLA-A"
+FT                   /allele="HLA-A*02:01:01:01"
+FT                   /product="MHC Class I HLA-A*02:01:01:01 sequence"
+FT                   /translation="MAVMAPRTLVLLLSGALALTQTWAGSHSMRYFFTSVSRPGRGEPR
+FT                   FIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEGPEYWDGETRKVKAHSQTHRVDLGT
+FT                   LRGYYNQSEAGSHTVQRMYGCDVGSDWRFLRGYHQYAYDGKDYIALKEDLRSWTAADMA
+FT                   AQTTKHKWEAAHVAEQLRAYLEGTCVEWLRRYLENGKETLQRTDAPKTHMTHHAVSDHE
+FT                   ATLRCWALSFYPAEITLTWQRDGEDQTQDTELVETRPAGDGTFQKWAAVVVPSGQEQRY
+FT                   TCHVQHEGLPKPLTLRWEPSSQPTIPIVGIIAGLVLFGAVITGAVVAAVMWRRKSSDRK
+FT                   GGSYSQAASSDSAQGSDVSLTACKV"
+FT   UTR             1..300
+FT   exon            301..373
+FT                   /number="1"
+FT   intron          374..503
+FT                   /number="1"
+FT   exon            504..773
+FT                   /number="2"
+FT   intron          774..1014
+FT                   /number="2"
+FT   exon            1015..1290
+FT                   /number="3"
+FT   intron          1291..1890
+FT                   /number="3"
+FT   exon            1891..2166
+FT                   /number="4"
+FT   intron          2167..2265
+FT                   /number="4"
+FT   exon            2266..2382
+FT                   /number="5"
+FT   intron          2383..2820
+FT                   /number="5"
+FT   exon            2821..2853
+FT                   /number="6"
+FT   intron          2854..2995
+FT                   /number="6"
+FT   exon            2996..3043
+FT                   /number="7"
+FT   intron          3044..3212
+FT                   /number="7"
+FT   exon            3213..3217
+FT                   /number="8"
+FT   UTR             3218..3517
+SQ   Sequence 3517 BP; 676 A; 1014 C; 1065 G; 762 T; 0 other;
+     cagaagcaga ggggtcaggg cgaagtccca gggccccagg cgtggctctc agggtctcag        60
+     gccccgaagg cggtgtatgg attggggagt cccagccttg gggattcccc aactccgcag       120
+     tttcttttct ccctctccca acctatgtag ggtccttctt cctggatact cacgacgcgg       180
+     acccagttct cactcccatt gggtgtcggg tttccagaga agccaatcag tgtcgtcgcg       240
+     gtcgcggttc taaagtccgc acgcacccac cgggactcag attctcccca gacgccgagg       300
+     atggccgtca tggcgccccg aaccctcgtc ctgctactct cgggggctct ggccctgacc       360
+     cagacctggg cgggtgagtg cggggtcggg agggaaacgg cctctgtggg gagaagcaac       420
+     gggcccgcct ggcgggggcg caggacccgg gaagccgcgc cgggaggagg gtcgggcggg       480
+     tctcagccac tcctcgtccc caggctctca ctccatgagg tatttcttca catccgtgtc       540
+     ccggcccggc cgcggggagc cccgcttcat cgcagtgggc tacgtggacg acacgcagtt       600
+     cgtgcggttc gacagcgacg ccgcgagcca gaggatggag ccgcgggcgc cgtggataga       660
+     gcaggagggt ccggagtatt gggacgggga gacacggaaa gtgaaggccc actcacagac       720
+     tcaccgagtg gacctgggga ccctgcgcgg ctactacaac cagagcgagg ccggtgagtg       780
+     accccggccc ggggcgcagg tcacgacctc tcatccccca cggacgggcc aggtcgccca       840
+     cagtctccgg gtccgagatc cgccccgaag ccgcgggacc ccgagaccct tgccccggga       900
+     gaggcccagg cgcctttacc cggtttcatt ttcagtttag gccaaaaatc cccccaggtt       960
+     ggtcggggcg gggcggggct cgggggaccg ggctgaccgc ggggtccggg ccaggttctc      1020
+     acaccgtcca gaggatgtat ggctgcgacg tggggtcgga ctggcgcttc ctccgcgggt      1080
+     accaccagta cgcctacgac ggcaaggatt acatcgccct gaaagaggac ctgcgctctt      1140
+     ggaccgcggc ggacatggca gctcagacca ccaagcacaa gtgggaggcg gcccatgtgg      1200
+     cggagcagtt gagagcctac ctggagggca cgtgcgtgga gtggctccgc agatacctgg      1260
+     agaacgggaa ggagacgctg cagcgcacgg gtaccagggg ccacggggcg cctccctgat      1320
+     cgcctgtaga tctcccgggc tggcctccca caaggagggg agacaattgg gaccaacact      1380
+     agaatatcgc cctccctctg gtcctgaggg agaggaatcc tcctgggttt ccagatcctg      1440
+     taccagagag tgactctgag gttccgccct gctctctgac acaattaagg gataaaatct      1500
+     ctgaaggaat gacgggaaga cgatccctcg aatactgatg agtggttccc tttgacacac      1560
+     acaggcagca gccttgggcc cgtgactttt cctctcaggc cttgttctct gcttcacact      1620
+     caatgtgtgt gggggtctga gtccagcact tctgagtcct tcagcctcca ctcaggtcag      1680
+     gaccagaagt cgctgttccc tcttcaggga ctagaatttt ccacggaata ggagattatc      1740
+     ccaggtgcct gtgtccaggc tggtgtctgg gttctgtgct cccttcccca tcccaggtgt      1800
+     cctgtccatt ctcaagatag ccacatgtgt gctggaggag tgtcccatga cagatgcaaa      1860
+     atgcctgaat gatctgactc ttcctgacag acgcccccaa aacgcatatg actcaccacg      1920
+     ctgtctctga ccatgaagcc accctgaggt gctgggccct gagcttctac cctgcggaga      1980
+     tcacactgac ctggcagcgg gatggggagg accagaccca ggacacggag ctcgtggaga      2040
+     ccaggcctgc aggggatgga accttccaga agtgggcggc tgtggtggtg ccttctggac      2100
+     aggagcagag atacacctgc catgtgcagc atgagggttt gcccaagccc ctcaccctga      2160
+     gatggggtaa ggagggagac gggggtgtca tgtcttttag ggaaagcagg agcctctctg      2220
+     acctttagca gggtcagggc ccctcacctt cccctctttt cccagagccg tcttcccagc      2280
+     ccaccatccc catcgtgggc atcattgctg gcctggttct ctttggagct gtgatcactg      2340
+     gagctgtggt cgctgctgtg atgtggagga ggaagagctc aggtggggaa ggggtgaagg      2400
+     gtgggtctga gatttcttgt ctcactgagg gttccaagac ccaggtagaa gtgtgccctg      2460
+     cctcgttact gggaagcacc acccacaatt atgggcctac ccagcctggg ccctgtgtgc      2520
+     cagcacttac tcttttgtaa agcacctgtt aaaatgaagg acagatttat caccttgatt      2580
+     acagcggtga tgggacctga tcccagcagt cacaagtcac aggggaaggt ccctgaggac      2640
+     cttcaggagg gcggttggtc caggacccac acctgctttc ttcatgtttc ctgatcccgc      2700
+     cctgggtctg cagtcacaca tttctggaaa cttctctgag gtccaagact tggaggttcc      2760
+     tctaggacct taaggccctg actcctttct ggtatctcac aggacatttt cttcccacag      2820
+     atagaaaagg agggagctac tctcaggctg caagtaagta tgaaggaggc tgatgcctga      2880
+     ggtccttggg atattgtgtt tgggagccca tgggggagct cacccacccc acaattcctc      2940
+     ctctagccac atcttctgtg ggatctgacc aggttctgtt tttgttctac cccaggcagt      3000
+     gacagtgccc agggctctga tgtgtctctc acagcttgta aaggtgagag cctggagggc      3060
+     ctgatgtgtg ttgggtgttg ggcggaacag tggacacagc tgtgctatgg ggtttctttc      3120
+     cattggatgt attgagcatg cgatgggctg tttaaagtgt gacccctcac tgtgacagat      3180
+     acgaatttgt tcatgaatat ttttttctat agtgtgagac agctgccttg tgtgggactg      3240
+     agaggcaaga gttgttcctg cccttccctt tgtgacttga agaaccctga ctttgtttct      3300
+     gcaaaggcac ctgcatgtgt ctgtgttcgt gtaggcataa tgtgaggagg tggggagacc      3360
+     accccacccc catgtccacc atgaccctct tcccacgctg acctgtgctc cctccccaat      3420
+     catctttcct gttccagaga ggtggggctg aggtgtctcc atctctgtct caacttcatg      3480
+     gtgcactgag ctgtaacttc ttccttccct attaaaa                               3517
+//
+ID   HLA00132; SV 4; standard; DNA; HUM; 4081 BP.
+XX
+AC   HLA00132;
+XX
+SV   HLA00132.4
+XX
+DT   21-NOV-1987 (Rel. 1.00.0, Created, Version 1)
+DT   20-JAN-2017 (Rel. 3.27.0, Last Updated, Version 4)
+XX
+DE   HLA-B*07:02:01:01, Human MHC Class I sequence
+XX
+KW   Human MHC; HLA; Class I; HLA-B; Allele; HLA-B*07:02:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-4081
+RX   PUBMED; 518865.
+RA   Orr HT, Lopez de Castro JA, Lancet D, Strominger JL;
+RT   "Complete amino acid sequence of a papain-solubilized human
+RT   histocompatibility antigen, HLA-B7. 2. Sequence determination and search
+RT   for homologies.";
+RL   Biochemistry 18:5711-5720(1979).
+XX
+RN   [2]
+RP   1-4081
+RX   PUBMED; 6574860.
+RA   Fukumaki Y, Collins F, Kole R, Stoeckert CJ Jr, Jagadeeswaran P, Duncan
+RA   CH, Weissman SM, Jagadeeswaran P, Pan J, Forget BG, Weissman SM, Biro PA,
+RA   Pan J, Sood AK, Kole R, Reddy VB, Weissman SM;
+RT   "Sequences of human repetitive DNA, non-alpha-globin genes, and major
+RT   histocompatibility locus genes.";
+RL   Cold Spring Harbor Symposia on Quantitative Biology
+RL   47 Pt 2:1079-1086(1983).
+XX
+RN   [3]
+RP   1-4081
+RX   PUBMED; 2320591.
+RA   Ennis PD, Zemmour J, Salter RD, Parham P;
+RT   "Rapid cloning of HLA-A,B cDNA by using the polymerase chain reaction:
+RT   frequency and nature of errors produced in amplification.";
+RL   Proceedings of the National Academy of Sciences USA 87:2833-2837(1990).
+XX
+RN   [4]
+RP   1-4081
+RX   PUBMED; 10090615.
+RA   Gomez-Casado E, Vargas-Alarcon G, Martinez-Laso J, Granados J, Varela P,
+RA   Alegre R, Longas J, Gonzalez-Hevilla M, Martin-Villa JM, Arnaiz-Villena A;
+RT   "Evolutionary relationships between HLA-B alleles as indicated by an
+RT   analysis of intron sequences.";
+RL   Tissue Antigens 53:153-160(1999).
+XX
+RN   [5]
+RP   1-4081
+RX   PUBMED; 12622774.
+RA   Cox ST, McWhinnie AJ, Robinson J, Marsh SGE, Parham P, Madrigal JA, Little
+RA   AM;
+RT   "Cloning and sequencing full-length HLA-B and -C genes.";
+RL   Tissue Antigens 61:20-48(2003).
+XX
+RN   [6]
+RP   1-4081
+RX   PUBMED; 15140828.
+RA   Stewart CA, Horton R, Allcock RJ, Ashurst JL, Atrazhev AM, Coggill P,
+RA   Dunham I, Forbes S, Halls K, Howson JM, Humphray SJ, Hunt S, Mungall AJ,
+RA   Osoegawa K, Palmer S, Roberts AN, Rogers J, Sims S, Wang Y, Wilming LG,
+RA   Elliott JF, de Jong PJ, Sawcer S, Todd JA, Trowsdale J, Beck S;
+RT   "Complete MHC haplotype sequencing for common disease gene mapping.";
+RL   Genome Research 14:1176-1187(2004).
+XX
+RN   [7]
+RP   1-4081
+RX   PUBMED; 16642438.
+RA   Nair RP, Stuart PE, Nistor I, Hiremagalore R, Chia NV, Jenisch S,
+RA   Weichenthal M, Abecasis GR, Lim HW, Christophers E, Voorhees JJ, Elder JT;
+RT   "Sequence and haplotype analysis supports HLA-C as the psoriasis
+RT   susceptibility 1 gene.";
+RL   American Journal of Human Genetics 78:827-851(2006).
+XX
+DR   EMBL; AF436098; AF436098.1.
+DR   EMBL; AJ292075; AJ292075.2.
+DR   EMBL; AJ309047; AJ309047.1.
+DR   EMBL; AL671883; AL671883.3.
+DR   EMBL; DQ249181; DQ249181.1.
+DR   EMBL; HG794392; HG794392.1.
+DR   EMBL; HM596506; HM596506.1.
+DR   EMBL; KU319228; KU319228.1.
+DR   EMBL; L47338; L47338.1.
+DR   EMBL; M16102; M16102.1.
+DR   EMBL; M32317; M32317.1.
+DR   EMBL; OZ079946; OZ079946.1.
+DR   EMBL; OZ255056; OZ255056.1.
+DR   EMBL; OZ255057; OZ255057.1.
+DR   EMBL; OZ255058; OZ255058.1.
+DR   EMBL; OZ255059; OZ255059.1.
+DR   EMBL; OZ255060; OZ255060.1.
+DR   EMBL; OZ255061; OZ255061.1.
+DR   EMBL; OZ255062; OZ255062.1.
+DR   EMBL; OZ255063; OZ255063.1.
+DR   EMBL; OZ255064; OZ255064.1.
+DR   EMBL; OZ255065; OZ255065.1.
+DR   EMBL; OZ255066; OZ255066.1.
+DR   EMBL; OZ255067; OZ255067.1.
+DR   EMBL; OZ255068; OZ255068.1.
+DR   EMBL; P01889; P01889.
+DR   EMBL; U29057; U29057.1.
+DR   EMBL; U49904; U49904.1.
+DR   EMBL; U49905; U49905.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..4081
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="Aboriginal Australian, Asian, European, Hispanic
+FT                   or Latin American, Undefined"
+FT                   /cell_line="383008"
+FT                   /cell_line="7550801026"
+FT                   /cell_line="BM14"
+FT                   /cell_line="CB"
+FT                   /cell_line="EA"
+FT                   /cell_line="GN00105"
+FT                   /cell_line="HAY, BD"
+FT                   /cell_line="HHKB"
+FT                   /cell_line="HO104"
+FT                   /cell_line="JS"
+FT                   /cell_line="JY"
+FT                   /cell_line="KPE"
+FT                   /cell_line="L5"
+FT                   /cell_line="L7"
+FT                   /cell_line="LD2B"
+FT                   /cell_line="PAT541"
+FT                   /cell_line="PGF"
+FT                   /cell_line="PP"
+FT                   /cell_line="RD105"
+FT                   /cell_line="RD105U"
+FT                   /cell_line="SA"
+FT                   /cell_line="SAVC"
+FT                   /cell_line="SCHU"
+FT                   /cell_line="WILO05690"
+FT                   /cell_line="WT8"
+FT   CDS             join(285..357,486..755,1001..1276,1851..2126,2220..2336,
+FT                   2778..2810,2917..2960)
+FT                   /codon_start=1
+FT                   /gene="HLA-B"
+FT                   /allele="HLA-B*07:02:01:01"
+FT                   /product="MHC Class I HLA-B*07:02:01:01 sequence"
+FT                   /translation="MLVMAPRTVLLLLSAALALTETWAGSHSMRYFYTSVSRPGRGEPR
+FT                   FISVGYVDDTQFVRFDSDAASPREEPRAPWIEQEGPEYWDRNTQIYKAQAQTDRESLRN
+FT                   LRGYYNQSEAGSHTLQSMYGCDVGPDGRLLRGHDQYAYDGKDYIALNEDLRSWTAADTA
+FT                   AQITQRKWEAAREAEQRRAYLEGECVEWLRRYLENGKDKLERADPPKTHVTHHPISDHE
+FT                   ATLRCWALGFYPAEITLTWQRDGEDQTQDTELVETRPAGDRTFQKWAAVVVPSGEEQRY
+FT                   TCHVQHEGLPKPLTLRWEPSSQSTVPIVGIVAGLAVLAVVVIGAVVAAVMCRRKSSGGK
+FT                   GGSYSQAACSDSAQGSDVSLTA"
+FT   UTR             1..284
+FT   exon            285..357
+FT                   /number="1"
+FT   intron          358..485
+FT                   /number="1"
+FT   exon            486..755
+FT                   /number="2"
+FT   intron          756..1000
+FT                   /number="2"
+FT   exon            1001..1276
+FT                   /number="3"
+FT   intron          1277..1850
+FT                   /number="3"
+FT   exon            1851..2126
+FT                   /number="4"
+FT   intron          2127..2219
+FT                   /number="4"
+FT   exon            2220..2336
+FT                   /number="5"
+FT   intron          2337..2777
+FT                   /number="5"
+FT   exon            2778..2810
+FT                   /number="6"
+FT   intron          2811..2916
+FT                   /number="6"
+FT   exon            2917..2960
+FT                   /number="7"
+FT   UTR             2961..4081
+SQ   Sequence 4081 BP; 766 A; 1144 C; 1241 G; 930 T; 0 other;
+     gatcaggacg aagtcccagg tcccggacgg ggctctcagg gtctcaggct ccgagggccg        60
+     cgtctgcaat ggggaggcgc agcgttgggg attccccact cccctgagtt tcacttcttc       120
+     tcccaacttg tgtcgggtcc ttcttccagg atactcgtga cgcgtcccca cttcccactc       180
+     ccattgggta ttggatatct agagaagcca atcagcgtcg ccgcggtccc agttctaaag       240
+     tccccacgca cccacccgga ctcagagtct cctcagacgc cgagatgctg gtcatggcgc       300
+     cccgaaccgt cctcctgctg ctctcggcgg ccctggccct gaccgagacc tgggccggtg       360
+     agtgcgggtc gggagggaaa tggcctctgc cgggaggagc gaggggaccg caggcggggg       420
+     cgcaggacct gaggagccgc gccgggagga gggtcgggcg ggtctcagcc cctcctcacc       480
+     cccaggctcc cactccatga ggtatttcta cacctccgtg tcccggcccg gccgcgggga       540
+     gccccgcttc atctcagtgg gctacgtgga cgacacccag ttcgtgaggt tcgacagcga       600
+     cgccgcgagt ccgagagagg agccgcgggc gccgtggata gagcaggagg ggccggagta       660
+     ttgggaccgg aacacacaga tctacaaggc ccaggcacag actgaccgag agagcctgcg       720
+     gaacctgcgc ggctactaca accagagcga ggccggtgag tgaccccggc ccggggcgca       780
+     ggtcacgact ccccatcccc cacgtacggc ccgggtcgcc ccgagtctcc gggtccgaga       840
+     tccgcctccc tgaggccgcg ggacccgccc agaccctcga ccggcgagag ccccaggcgc       900
+     gtttacccgg tttcattttc agttgaggcc aaaatccccg cgggttggtc ggggcggggc       960
+     ggggctcggg ggactgggct gaccgcgggg ccggggccag ggtctcacac cctccagagc      1020
+     atgtacggct gcgacgtggg gccggacggg cgcctcctcc gcgggcatga ccagtacgcc      1080
+     tacgacggca aggattacat cgccctgaac gaggacctgc gctcctggac cgccgcggac      1140
+     acggcggctc agatcaccca gcgcaagtgg gaggcggccc gtgaggcgga gcagcggaga      1200
+     gcctacctgg agggcgagtg cgtggagtgg ctccgcagat acctggagaa cgggaaggac      1260
+     aagctggagc gcgctggtac caggggcagt ggggagcctt ccccatctcc tataggtcgc      1320
+     cggggatggc ctcccacgag aagaggagga aaatgggatc agcgctagaa tgtcgccctc      1380
+     cgttgaatgg agaatggcat gagttttcct gagtttcctc tgagggcccc ctcttctctc      1440
+     tagacaatta aggaatgacg tctctgagga aatggagggg aagacagtcc ctagaatact      1500
+     gatcaggggt cccctttgac ccctgcagca gccttgggaa ccgtgacttt tcctctcagg      1560
+     ccttgttctc tgcctcacac tcagtgtgtt tggggctctg attccagcac ttctgagtca      1620
+     ctttacctcc actcagatca ggagcagaag tccctgttcc ccgctcagag actcgaactt      1680
+     tccaatgaat aggagattat cccaggtgcc tgcgtccagg ctggtgtctg ggttctgtgc      1740
+     cccttcccca ccccaggtgt cctgtccatt ctcaggctgg tcacatgggt ggtcctaggg      1800
+     tgtcccatga aagatgcaaa gcgcctgaat tttctgactc ttcccatcag accccccaaa      1860
+     gacacacgtg acccaccacc ccatctctga ccatgaggcc accctgaggt gctgggccct      1920
+     gggtttctac cctgcggaga tcacactgac ctggcagcgg gatggcgagg accaaactca      1980
+     ggacactgag cttgtggaga ccagaccagc aggagataga accttccaga agtgggcagc      2040
+     tgtggtggtg ccttctggag aagagcagag atacacatgc catgtacagc atgaggggct      2100
+     gccgaagccc ctcaccctga gatggggtaa ggagggggat gaggggtcat atctcttctc      2160
+     agggaaagca ggagcccttc agcagggtca gggcccctca tcttcccctc ctttcccaga      2220
+     gccgtcttcc cagtccaccg tccccatcgt gggcattgtt gctggcctgg ctgtcctagc      2280
+     agttgtggtc atcggagctg tggtcgctgc tgtgatgtgt aggaggaaga gttcaggtag      2340
+     ggaaggggtg aggggtgggg tctgggtttt cttgtcccac tgggggtttc aagccccagg      2400
+     tagaagtgtt ccctgcctca ttactgggaa gcagcatgca cacaggggct aacgcagcct      2460
+     gggaccctgt gtgccagcac ttactctttt gtgcagcaca tgtgacaatg aaggatggat      2520
+     gtatcacctt gatggttgtg gtgttggggt cctgattcca gcattcatga gtcaggggaa      2580
+     ggtccctgct aaggacagac cttaggaggg cagttggtcc aggacccaca cttgctttcc      2640
+     tcgtgtttcc tgatcctgcc ctgggtctgt agtcatactt ctggaaattc cttttgggtc      2700
+     caagactagg aggttcctct aagatctcat ggccctgctt cctcccagtg ccctcacagg      2760
+     acattttctt cccacaggtg gaaaaggagg gagctactct caggctgcgt gtaagtggtg      2820
+     ggggtgggag tgtggaggag ctcacccacc ccataattcc tcctgtccca cgtctcctgc      2880
+     gggctctgac caggtcctgt ttttgttcta ctccaggcag cgacagtgcc cagggctctg      2940
+     atgtgtctct cacagcttga aaaggtgaga ttcttggggt ctagagtggg tggggtggcg      3000
+     ggtctggggg tgggtggggc agaggggaaa ggcctgggta atggggattc tttgattggg      3060
+     atgtttcgcg tgtgtggtgg gctgtttaga gtgtcatcgc ttaccatgac taaccagaat      3120
+     ttgttcatga ctgttgtttt ctgtagcctg agacagctgt cttgtgaggg actgagatgc      3180
+     aggatttctt cacgcctccc ctttgtgact tcaagagcct ctggcatctc tttctgcaaa      3240
+     ggcacctgaa tgtgtctgcg tccctgttag cataatgtga ggaggtggag agacagccca      3300
+     cccttgtgtc cactgtgacc cctgttccca tgctgacctg tgtttcctcc ccagtcatct      3360
+     ttcttgttcc agagaggtgg ggctggatgt ctccatctct gtctcaactt tacgtgcact      3420
+     gagctgcaac ttcttacttc cctactgaaa ataagaatct gaatataaat ttgttttctc      3480
+     aaatatttgc tatgagaggt tgatggatta attaaataag tcaattcctg gaatttgaga      3540
+     gagcaaataa agacctgaga accttccaga atctgcatgt tcgctgtgct gagtctgttg      3600
+     caggtggggt gtggagaagg ctgtgggggg ccgagtgtgg atggggcctg tgcccatttg      3660
+     gtgttgagtc catcatgggc tttatgtggt tagtcctcag ctgggtcacc ttcactgctc      3720
+     cattgtcctt gtcccttcag tggaaacttg tccagtggga gctgtgacca cagaggctca      3780
+     cacatcgccc agggcggccc ctgcacacgg gggtctctgt gcattctgag acaaattttc      3840
+     agagccattc acctcctgct ctgcttctag agctcctttt ctgctctgct cttctgccct      3900
+     ctctccctgc cctggttcta gtgatcttgg tgctgaatcc aatcccaact catgaatctg      3960
+     taaagcagag tctaatttag acttacattt gtctgtgaaa ttggacccgt catcaaggac      4020
+     tgttctttcc tgaagagaga acctgattgt gtgctgcagt gtgctggggc agggggtgcg      4080
+     g                                                                      4081
+//
+ID   HLA00146; SV 5; standard; DNA; HUM; 4080 BP.
+XX
+AC   HLA00146;
+XX
+SV   HLA00146.5
+XX
+DT   01-AUG-1989 (Rel. 1.00.0, Created, Version 1)
+DT   20-JAN-2017 (Rel. 3.27.0, Last Updated, Version 5)
+XX
+DE   HLA-B*08:01:01:01, Human MHC Class I sequence
+XX
+KW   Human MHC; HLA; Class I; HLA-B; Allele; HLA-B*08:01:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-4080
+RX   PUBMED; 3375250.
+RA   Parham P, Lomen CE, Lawlor DA, Ways JP, Holmes N, Coppin HL, Salter RD,
+RA   Wan AM, Ennis PD;
+RT   "Nature of polymorphism in HLA-A, -B, and -C molecules.";
+RL   Proceedings of the National Academy of Sciences USA 85:4005-4009(1988).
+XX
+RN   [2]
+RP   1-4080
+RX   PUBMED; 2714852.
+RA   Pohla H, Kuon W, Tabaczewski P, Doerner C, Weiss EH;
+RT   "Allelic variation in HLA-B and HLA-C sequences and the evolution of the
+RT   HLA-B alleles.";
+RL   Immunogenetics 29:297-307(1989).
+XX
+RN   [3]
+RP   1-4080
+RX   PUBMED; 2000377.
+RA   Bronson SK, Pei J, Taillon-Miller P, Chorney MJ, Geraghty DE, Chaplin DD;
+RT   "Isolation and characterization of yeast artificial chromosome clones
+RT   linking the HLA-B and HLA-C loci.";
+RL   Proceedings of the National Academy of Sciences USA 88:1676-1680(1991).
+XX
+RN   [4]
+RP   1-4080
+RX   PUBMED; 12622774.
+RA   Cox ST, McWhinnie AJ, Robinson J, Marsh SGE, Parham P, Madrigal JA, Little
+RA   AM;
+RT   "Cloning and sequencing full-length HLA-B and -C genes.";
+RL   Tissue Antigens 61:20-48(2003).
+XX
+RN   [5]
+RP   1-4080
+RX   PUBMED; 15140828.
+RA   Stewart CA, Horton R, Allcock RJ, Ashurst JL, Atrazhev AM, Coggill P,
+RA   Dunham I, Forbes S, Halls K, Howson JM, Humphray SJ, Hunt S, Mungall AJ,
+RA   Osoegawa K, Palmer S, Roberts AN, Rogers J, Sims S, Wang Y, Wilming LG,
+RA   Elliott JF, de Jong PJ, Sawcer S, Todd JA, Trowsdale J, Beck S;
+RT   "Complete MHC haplotype sequencing for common disease gene mapping.";
+RL   Genome Research 14:1176-1187(2004).
+XX
+RN   [6]
+RP   1-4080
+RX   PUBMED; 16642438.
+RA   Nair RP, Stuart PE, Nistor I, Hiremagalore R, Chia NV, Jenisch S,
+RA   Weichenthal M, Abecasis GR, Lim HW, Christophers E, Voorhees JJ, Elder JT;
+RT   "Sequence and haplotype analysis supports HLA-C as the psoriasis
+RT   susceptibility 1 gene.";
+RL   American Journal of Human Genetics 78:827-851(2006).
+XX
+RN   [7]
+RP   1-4080
+RX   PUBMED; 25786572.
+RA   Hayhurst JD, du Toit ED, Borrill V, Schlaphoff TEA, Brosnan N, Marsh SGE;
+RT   "Two novel HLA alleles, HLA-A*30:02:01:03 and HLA-C*08:113, identified in
+RT   a South African bone marrow donor.";
+RL   Tissue Antigens 85:291-293(2015).
+XX
+DR   EMBL; AJ295294; AJ295294.2.
+DR   EMBL; AL669854; AL669854.8.
+DR   EMBL; D84394; D84394.1.
+DR   EMBL; DQ249172; DQ249172.1.
+DR   EMBL; DQ249174; DQ249174.1.
+DR   EMBL; HG794374; HG794374.1.
+DR   EMBL; KU319232; KU319232.1.
+DR   EMBL; L76093; L76093.1.
+DR   EMBL; LN624507; LN624507.1.
+DR   EMBL; LN877354; LN877354.2.
+DR   EMBL; LT220237; LT220237.1.
+DR   EMBL; M24036; M24036.1.
+DR   EMBL; M28204; M28204.1.
+DR   EMBL; M59841; M59841.1.
+DR   EMBL; OZ079920; OZ079920.1.
+DR   EMBL; OZ255071; OZ255071.1.
+DR   EMBL; OZ255072; OZ255072.1.
+DR   EMBL; OZ255073; OZ255073.1.
+DR   EMBL; OZ255074; OZ255074.1.
+DR   EMBL; OZ255075; OZ255075.1.
+DR   EMBL; OZ255076; OZ255076.1.
+DR   EMBL; OZ255077; OZ255077.1.
+DR   EMBL; OZ255078; OZ255078.1.
+DR   EMBL; OZ255079; OZ255079.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..4080
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="African, African descent, European, Hispanic or
+FT                   Latin American, Undefined"
+FT                   /cell_line="12506397"
+FT                   /cell_line="AN00165"
+FT                   /cell_line="AN300128"
+FT                   /cell_line="C.M.L."
+FT                   /cell_line="CGM1"
+FT                   /cell_line="COX"
+FT                   /cell_line="CTM1953541"
+FT                   /cell_line="FH15"
+FT                   /cell_line="HECO"
+FT                   /cell_line="KLO"
+FT                   /cell_line="LCL721"
+FT                   /cell_line="MF"
+FT                   /cell_line="MGAR"
+FT                   /cell_line="PAT135"
+FT                   /cell_line="PAT144"
+FT                   /cell_line="PF04015"
+FT                   /cell_line="STEINLIN"
+FT                   /cell_line="VAVY"
+FT                   /cell_line="ZA3007335D"
+FT   CDS             join(285..357,486..755,1002..1277,1850..2125,2219..2335,
+FT                   2777..2809,2916..2959)
+FT                   /codon_start=1
+FT                   /gene="HLA-B"
+FT                   /allele="HLA-B*08:01:01:01"
+FT                   /product="MHC Class I HLA-B*08:01:01:01 sequence"
+FT                   /translation="MLVMAPRTVLLLLSAALALTETWAGSHSMRYFDTAMSRPGRGEPR
+FT                   FISVGYVDDTQFVRFDSDAASPREEPRAPWIEQEGPEYWDRNTQIFKTNTQTDRESLRN
+FT                   LRGYYNQSEAGSHTLQSMYGCDVGPDGRLLRGHNQYAYDGKDYIALNEDLRSWTAADTA
+FT                   AQITQRKWEAARVAEQDRAYLEGTCVEWLRRYLENGKDTLERADPPKTHVTHHPISDHE
+FT                   ATLRCWALGFYPAEITLTWQRDGEDQTQDTELVETRPAGDRTFQKWAAVVVPSGEEQRY
+FT                   TCHVQHEGLPKPLTLRWEPSSQSTVPIVGIVAGLAVLAVVVIGAVVAAVMCRRKSSGGK
+FT                   GGSYSQAACSDSAQGSDVSLTA"
+FT   UTR             1..284
+FT   exon            285..357
+FT                   /number="1"
+FT   intron          358..485
+FT                   /number="1"
+FT   exon            486..755
+FT                   /number="2"
+FT   intron          756..1001
+FT                   /number="2"
+FT   exon            1002..1277
+FT                   /number="3"
+FT   intron          1278..1849
+FT                   /number="3"
+FT   exon            1850..2125
+FT                   /number="4"
+FT   intron          2126..2218
+FT                   /number="4"
+FT   exon            2219..2335
+FT                   /number="5"
+FT   intron          2336..2776
+FT                   /number="5"
+FT   exon            2777..2809
+FT                   /number="6"
+FT   intron          2810..2915
+FT                   /number="6"
+FT   exon            2916..2959
+FT                   /number="7"
+FT   UTR             2960..4080
+SQ   Sequence 4080 BP; 764 A; 1151 C; 1242 G; 923 T; 0 other;
+     gatcaggacg aagtcccagg tcccggacgg ggctctcagg gtctcaggct ccgagggccg        60
+     cgtctgcaat ggggaggcgc agcgttgggg attccccact cccctgagtt tcacttcttc       120
+     tcccaacttg tgtcgggtcc ttcttccagg atactcgtga cgcatcccca cttcccactc       180
+     ccattgggtg tcggatatct agagaagcca atcagcgtcg ccggggtccc agttctaaag       240
+     tccccacgca cccacccgga ctcagagtct cctcagacgc cgagatgctg gtcatggcgc       300
+     cccgaaccgt cctcctgctg ctctcggcgg ccctggccct gaccgagacc tgggccggtg       360
+     agtgcgggtc gggagggaaa tggcctctgc cgggaggagc gaggggaccg caggcggggg       420
+     cgcaggacct gaggagccgc gccgggagga gggtcgggcg ggtctcagcc cctcctcgcc       480
+     cccaggctcc cactccatga ggtatttcga caccgccatg tcccggcccg gccgcgggga       540
+     gccccgcttc atctcagtgg gctacgtgga cgacacgcag ttcgtgaggt tcgacagcga       600
+     cgccgcgagt ccgagagagg agccgcgggc gccgtggata gagcaggagg ggccggagta       660
+     ttgggaccgg aacacacaga tcttcaagac caacacacag actgaccgag agagcctgcg       720
+     gaacctgcgc ggctactaca accagagcga ggccggtgag tgaccccggc ccggggcgca       780
+     ggtcacgact ccccatcccc cacggacggc ccgggtcgcc ccgagtctcc gggtccgaga       840
+     tccgcctccc tgaggccgcg ggacccgccc agaccctcga ccggcgagag ccccaggcgc       900
+     gtttacccgg tttcattttc agttgaggcc aaaatccccg cgggttggtc ggggcggggc       960
+     ggggctcggg gggacggggc tgaccgcggg gccggggcca gggtctcaca ccctccagag      1020
+     catgtacggc tgcgacgtgg ggccggacgg gcgcctcctc cgcgggcata accagtacgc      1080
+     ctacgacggc aaggattaca tcgccctgaa cgaggacctg cgctcctgga ccgcggcgga      1140
+     caccgcggct cagatcaccc agcgcaagtg ggaggcggcc cgtgtggcgg agcaggacag      1200
+     agcctacctg gagggcacgt gcgtggagtg gctccgcaga tacctggaga acgggaagga      1260
+     cacgctggag cgcgcgggta ccaggggcag tggggagcct tccccatctc ctataggtcg      1320
+     ccggggatgg cctcccacga gaagaggagg aaaatgggat cagcgctaga atgtcgccct      1380
+     cccttgaatg gagaatggca tgagttttcc tgagtttcct ctgagggccc cctcttctct      1440
+     ctagacaatt aagggatgac gtctctgagg aaatggaggg gaagacagtc cctagaatac      1500
+     tgatcagggg tcccctttga cccctgcagc agccttggga accgtgactt ttcctctcag      1560
+     gccttgttct ctgcctcaca ctcagtgtgt ttggggctct gattccagca cttctgagtc      1620
+     actttacctc cactcagatc aggagcagaa gtccctgttc cccgctcaga gactcgaact      1680
+     ttccaatgaa taggagatta tcccaggtgc ctgcatccgc tggtgtctgg gttctgtgcc      1740
+     ccttccccac cccaggtgtc ctgtccattc tcaggctggt cacatgggtg gtcctagggt      1800
+     gtgccatgag agatgcaaag cgcctgaatt ttctgactct tcccatcaga ccccccaaag      1860
+     acacacgtga cccaccaccc catctctgac catgaggcca ccctgaggtg ctgggccctg      1920
+     ggcttctacc ctgcggagat cacactgacc tggcagcggg atggcgagga ccaaactcag      1980
+     gacactgagc ttgtggagac cagaccagca ggagatagaa ccttccagaa gtgggcagct      2040
+     gtggtggtgc cttctggaga agagcagaga tacacatgcc atgtacagca tgaggggctg      2100
+     ccgaagcccc tcaccctgag atggggtaag gagggggatg aggggtcata tctcttctca      2160
+     gggaaagcag gagcccttca gcagggtcag ggcccctcat cttcccctcc tttcccagag      2220
+     ccgtcttccc agtccaccgt ccccatcgtg ggcattgttg ctggcctggc tgtcctagca      2280
+     gttgtggtca tcggagctgt ggtcgctgct gtgatgtgta ggaggaagag ctcaggtagg      2340
+     gaaggggtga ggggtggggt ctgggttttc ttgtcccact gggggtttca agccccaggt      2400
+     agaagtgttc cctgcctcat tactgggatg cagcatccac acaggggcta acgcagcctg      2460
+     ggaccctgtg tgccagcact tactcttttg tgcagcacat gtgacaatga aggacggatg      2520
+     tatcaccttg gtggttgtgg tgttggggtc ctgattccag cattcatgag tcaggggaag      2580
+     gtccctgcta aggacagacc ttaggagggc agttggtcca ggacccacac ttgctttcct      2640
+     cgtgtttcct gatcctgcct tgggtctgta gtcatacttc tggaaattcc ttttgggtcc      2700
+     aagacgagga ggttcctcta agatctcatg gccctgcttc ctcccagtcc cctcacaggg      2760
+     cattttcttc ccacaggtgg aaaaggaggg agctactctc aggctgcgtg taagtgatgg      2820
+     gggtgggagt gtggaggagc tcacccaccc cataattcct cctgtcccac gtctcctgcg      2880
+     ggctctgacc aggtcctgtt tttgttctac tccaggcagc gacagtgccc agggctctga      2940
+     tgtgtctctc acagcttgaa aaggtgagat tcttggggtc tagagtgggt ggggtggcgg      3000
+     gtctgggggt gggtggggca gtggggaaag gcctgggtaa tggagattct ttgattggga      3060
+     tgtttcgcgt gtgtggtggg ctgtttagag tgtcatcact taccatgact aaccagaatt      3120
+     tgttcatgac tgttgttttc tgtagcctga gacagctgtc ttgtgaggga ctgagatgca      3180
+     ggatttcttc acgcctcccc tttgtgactt caagagcctc tggcatctct ttctgcaaag      3240
+     gcacctgaat gtgtctgcgt ccctgttagc ataatgtgag gaggtggaga gacagcccac      3300
+     ccttgtgtcc actgtgaccc ctgttcccat gctgacctgt gtttcctccc cagtcatctt      3360
+     tcttgttcca gagaggtggg gctggatgtc tccatctctg tctcaacttt acgtgcactg      3420
+     agctgcaact tcttacttcc ctactgaaaa taagaatctg aatataaatt tgttttctca      3480
+     aatatttgct atgagaggtt gatggattaa ttaaataagt caattcctgg aatttgagag      3540
+     agcaaataaa gacctgagaa ccttccagaa tctgcatgtt cgctgtgctg agtctgttgc      3600
+     aggtggggtg tggagaaggc tgtggggggc cgagtgtgga cggggcctgt gcccatttgg      3660
+     tgttgagtcc atcatgggct ttatgtggtt agtcctcagc tgggtcacct tcactgctcc      3720
+     attgtccttg tcccttcagt ggaaacttgt ccagtgggag ctgtgaccac agaggctcac      3780
+     acatcgccct gggcggcccc tgcacacggg ggtctctgtg cattctgaga caaattttca      3840
+     gagccattca cctcctgccc tgcttctaga gctccttttc tgctctgctc ttctgccctc      3900
+     tctccctgcc ctggttctag tgatcttggt gctgaatcca atcccaactc aggaatctgt      3960
+     aaagcagagt ctaatttaga cttacatttg tctgtgaaat tggacccgtc atcaaggact      4020
+     gttctttcct gaagagagaa cctgattgtg tgctgcagtg tgctggggca gggggtgcgg      4080
+//
+ID   HLA00433; SV 3; standard; DNA; HUM; 4318 BP.
+XX
+AC   HLA00433;
+XX
+SV   HLA00433.3
+XX
+DT   01-AUG-1989 (Rel. 1.00.0, Created, Version 1)
+DT   13-APR-2017 (Rel. 3.28.0, Last Updated, Version 3)
+XX
+DE   HLA-C*07:01:01:01, Human MHC Class I sequence
+XX
+KW   Human MHC; HLA; Class I; HLA-C; Allele; HLA-C*07:01:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-4318
+RX   PUBMED; 2714852.
+RA   Pohla H, Kuon W, Tabaczewski P, Doerner C, Weiss EH;
+RT   "Allelic variation in HLA-B and HLA-C sequences and the evolution of the
+RT   HLA-B alleles.";
+RL   Immunogenetics 29:297-307(1989).
+XX
+RN   [2]
+RP   1-4318
+RX   PUBMED; 7871529.
+RA   Steinle A, Schendel DJ;
+RT   "HLA class I alleles of LCL 721 and 174 x CEM.T2 (T2).";
+RL   Tissue Antigens 44:268-270(1994).
+XX
+RN   [3]
+RP   1-4318
+RX   PUBMED; 10488744.
+RA   van der Vlies SA, Voorter CE, van den Berg-Loonen EM;
+RT   "There is more to HLA-C than exons 2 and 3: sequencing exons 1, 4 and 5.";
+RL   Tissue Antigens 54:169-177(1999).
+XX
+RN   [4]
+RP   1-4318
+RX   PUBMED; 15140828.
+RA   Stewart CA, Horton R, Allcock RJ, Ashurst JL, Atrazhev AM, Coggill P,
+RA   Dunham I, Forbes S, Halls K, Howson JM, Humphray SJ, Hunt S, Mungall AJ,
+RA   Osoegawa K, Palmer S, Roberts AN, Rogers J, Sims S, Wang Y, Wilming LG,
+RA   Elliott JF, de Jong PJ, Sawcer S, Todd JA, Trowsdale J, Beck S;
+RT   "Complete MHC haplotype sequencing for common disease gene mapping.";
+RL   Genome Research 14:1176-1187(2004).
+XX
+RN   [5]
+RP   1-4318
+RX   PUBMED; 16642438.
+RA   Nair RP, Stuart PE, Nistor I, Hiremagalore R, Chia NV, Jenisch S,
+RA   Weichenthal M, Abecasis GR, Lim HW, Christophers E, Voorhees JJ, Elder JT;
+RT   "Sequence and haplotype analysis supports HLA-C as the psoriasis
+RT   susceptibility 1 gene.";
+RL   American Journal of Human Genetics 78:827-851(2006).
+XX
+RN   [6]
+RP   1-4318
+RX   PUBMED; 21658009.
+RA   Xu Y, Deng Z, OhUign C, Wang D, Gao S, Zend J, Yang B, Jin S, Zou H;
+RT   "Charaterization and polymorphic analysis of 4.5 kb genomic full-length
+RT   HLA-C in Chinese Han population.";
+RL   Tissue Antigens 78:102-114(2011).
+XX
+RN   [7]
+RP   1-4318
+RX   PUBMED; 25786572.
+RA   Hayhurst JD, du Toit ED, Borrill V, Schlaphoff TEA, Brosnan N, Marsh SGE;
+RT   "Two novel HLA alleles, HLA-A*30:02:01:03 and HLA-C*08:113, identified in
+RT   a South African bone marrow donor.";
+RL   Tissue Antigens 85:291-293(2015).
+XX
+DR   EMBL; AL662833; AL662833.4.
+DR   EMBL; D84394; D84394.1.
+DR   EMBL; DQ249172; DQ249172.1.
+DR   EMBL; DQ249174; DQ249174.1.
+DR   EMBL; GQ472838; GQ472838.1.
+DR   EMBL; HG794375; HG794375.1.
+DR   EMBL; HG794378; HG794378.1.
+DR   EMBL; KU319188; KU319188.1.
+DR   EMBL; LN624510; LN624510.1.
+DR   EMBL; M28207; M28207.1.
+DR   EMBL; OZ079921; OZ079921.1.
+DR   EMBL; OZ258083; OZ258083.1.
+DR   EMBL; OZ258084; OZ258084.1.
+DR   EMBL; OZ258085; OZ258085.1.
+DR   EMBL; OZ258086; OZ258086.1.
+DR   EMBL; OZ258087; OZ258087.1.
+DR   EMBL; OZ258088; OZ258088.1.
+DR   EMBL; OZ258089; OZ258089.1.
+DR   EMBL; OZ258090; OZ258090.1.
+DR   EMBL; OZ258091; OZ258091.1.
+DR   EMBL; OZ258092; OZ258092.1.
+DR   EMBL; Y16418; Y16418.1.
+DR   EMBL; Z46810; Z46810.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..4318
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="African, Asian, European, Hispanic or Latin
+FT                   American, Undefined"
+FT                   /cell_line="7550800619"
+FT                   /cell_line="C.M.L."
+FT                   /cell_line="CGM1"
+FT                   /cell_line="COX"
+FT                   /cell_line="CTM1953541"
+FT                   /cell_line="FH15"
+FT                   /cell_line="KLO"
+FT                   /cell_line="LCL721"
+FT                   /cell_line="LK707"
+FT                   /cell_line="MF"
+FT                   /cell_line="MGAR"
+FT                   /cell_line="PAT135"
+FT                   /cell_line="PAT144"
+FT                   /cell_line="PF04015"
+FT                   /cell_line="STEINLIN"
+FT                   /cell_line="VAVY"
+FT                   /cell_line="WJR076"
+FT                   /cell_line="ZA3007335D"
+FT   CDS             join(501..573,704..973,1224..1499,2087..2362,2487..2606,
+FT                   3047..3079,3187..3234,3399..3403)
+FT                   /codon_start=1
+FT                   /gene="HLA-C"
+FT                   /allele="HLA-C*07:01:01:01"
+FT                   /product="MHC Class I HLA-C*07:01:01:01 sequence"
+FT                   /translation="MRVMAPRALLLLLSGGLALTETWACSHSMRYFDTAVSRPGRGEPR
+FT                   FISVGYVDDTQFVRFDSDAASPRGEPRAPWVEQEGPEYWDRETQNYKRQAQADRVSLRN
+FT                   LRGYYNQSEDGSHTLQRMYGCDLGPDGRLLRGYDQSAYDGKDYIALNEDLRSWTAADTA
+FT                   AQITQRKLEAARAAEQLRAYLEGTCVEWLRRYLENGKETLQRAEPPKTHVTHHPLSDHE
+FT                   ATLRCWALGFYPAEITLTWQRDGEDQTQDTELVETRPAGDGTFQKWAAVVVPSGQEQRY
+FT                   TCHMQHEGLQEPLTLSWEPSSQPTIPIMGIVAGLAVLVVLAVLGAVVTAMMCRRKSSGG
+FT                   KGGSCSQAACSNSAQGSDESLITCKA"
+FT   UTR             1..500
+FT   exon            501..573
+FT                   /number="1"
+FT   intron          574..703
+FT                   /number="1"
+FT   exon            704..973
+FT                   /number="2"
+FT   intron          974..1223
+FT                   /number="2"
+FT   exon            1224..1499
+FT                   /number="3"
+FT   intron          1500..2086
+FT                   /number="3"
+FT   exon            2087..2362
+FT                   /number="4"
+FT   intron          2363..2486
+FT                   /number="4"
+FT   exon            2487..2606
+FT                   /number="5"
+FT   intron          2607..3046
+FT                   /number="5"
+FT   exon            3047..3079
+FT                   /number="6"
+FT   intron          3080..3186
+FT                   /number="6"
+FT   exon            3187..3234
+FT                   /number="7"
+FT   intron          3235..3398
+FT                   /number="7"
+FT   exon            3399..3403
+FT                   /number="8"
+FT   UTR             3404..4318
+SQ   Sequence 4318 BP; 829 A; 1218 C; 1302 G; 969 T; 0 other;
+     ttattttgct ggatgtagtt taatattacc tgaggtgagg taaggtaagg caaagggtgg        60
+     gaggcaggga gtccagttca gggacgggga ttccaggagg agaagtgaag gggaaggggc       120
+     tgggcgcagc cttggggtct ctccctggtt tccacagaca gatccttgtc caggactcag       180
+     gcacacagtg tgacaaagat gcttggtgta ggagaagagg gatcaggacg aagtcccagg       240
+     tcccgggcgg ggctctcagg gtctcaggct ccaagggccg tgtctgcatt ggggaggcgc       300
+     cgcgttgggg attctccact cccctgagtt tcacttctcc caacctgcgt cgggtccttc       360
+     ttcctgaata ctcatgacgc gtccccaatt cccactccca ttgggtgtcg ggttctagag       420
+     aagccaatca gcgtctccgc agtcccggtt ctaaagtccc cagtcaccca cccggactca       480
+     cattctcccc agaggccgag atgcgggtca tggcgccccg agccctcctc ctgctgctct       540
+     cgggaggcct ggccctgacc gagacctggg cctgtgagtg cggggttggg agggaagcgg       600
+     cctctgcgga gaggagcgag gggcccgccc ggcgagggcg caggacccgg ggagccgcgc       660
+     agggaggtgg gtcgggcggg tctcagcccc tcctcgcccc caggctccca ctccatgagg       720
+     tatttcgaca ccgccgtgtc ccggcccggc cgcggagagc cccgcttcat ctcagtgggc       780
+     tacgtggacg acacgcagtt cgtgcggttc gacagcgacg ccgcgagtcc gagaggggag       840
+     ccgcgggcgc cgtgggtgga gcaggagggg ccggagtatt gggaccggga gacacagaac       900
+     tacaagcgcc aggcacaggc tgaccgagtg agcctgcgga acctgcgcgg ctactacaac       960
+     cagagcgagg acggtgagtg accccggccc ggggcgcagg tcacgacccc tccccatccc      1020
+     ccacggacgg cccgggtcgc cccgagtctc cccgtctgag atccacccca aggtggatct      1080
+     gcggaacccg cccagaccct cgaccggaga gagccccagt cgcctttacc cggtttcatt      1140
+     ttcggtttag gccaaaatcc ccgcgggttg gtcggggcgg ggcggggctc gggggactgg      1200
+     gctgaccgcg ggggcggggc cagggtctca caccctccag aggatgtatg gctgcgacct      1260
+     ggggcccgac gggcgcctcc tccgcgggta tgaccagtcc gcctacgacg gcaaggatta      1320
+     catcgccctg aacgaggacc tgcgctcctg gaccgccgcg gacaccgcgg ctcagatcac      1380
+     ccagcgcaag ttggaggcgg cccgtgcggc ggagcagctg agagcctacc tggagggcac      1440
+     gtgcgtggag tggctccgca gatacctgga gaacgggaag gagacgctgc agcgcgcagg      1500
+     taccaggggc agtggggagc cttccccatc tcctatagat ctcccgggat ggcctcccac      1560
+     gaggagggga ggaaaatggg atcagcactg gaatatcgcc ctcccttgaa tggagaatgg      1620
+     catgagtttt cctgagtttc ctctgagggc cccctctgct ctctaggaca attaagggat      1680
+     gaagtctctg aggaaatgga ggggaagaca gtccctggaa tactgatcag gggtctcctt      1740
+     tgaccacttt gaccactgca gcagctgtgg tcaggctgct gacctttctc tcaggccttg      1800
+     ttctctgcct cacactcaat gtgtctgaag gtttgattcc agcttttctg agtcctgcag      1860
+     cctccactca ggtcaggacc agaagtcgct gttcctccct cagagactag aactttccaa      1920
+     tgaataggag attatcccag gtgcctgtgt ccaggctggc gtctgggttc tgtgccgcct      1980
+     tccccacccc aggtgtcctg tccattctca ggatggtcac atgggcgctg ctggagtgtc      2040
+     ccaagagaga tgcaaagtgt ctgaattttc tgactcttcc cgtcagaacc cccaaagaca      2100
+     cacgtgaccc accaccccct ctctgaccat gaggccaccc tgaggtgctg ggccctgggc      2160
+     ttctaccctg cggagatcac actgacctgg cagcgggatg gggaggacca gacccaggac      2220
+     accgagcttg tggagaccag gccagcagga gatggaacct tccagaagtg ggcagctgtg      2280
+     gtggtgcctt ctggacaaga gcagagatac acgtgccata tgcagcacga ggggctgcaa      2340
+     gagcccctca ccctgagctg gggtaaggag gggaatgggg ggtcacatct cttatcagag      2400
+     aaagcagaag tccttctgga gcccttcagc cgggtcaggg ctgaggcttg ggggtcaggg      2460
+     cccctcacct tctcctcctt tcccagagcc atcttcccag cccaccatcc ccatcatggg      2520
+     catcgttgct ggcctggctg tcctggttgt cctagctgtc cttggagctg tggtcaccgc      2580
+     tatgatgtgt aggaggaaga gctcaggtag ggaaggggtg aagagcgggg tctgggtttt      2640
+     cttgtcccac tgggagtttc aagccccagg tagaagtgtg ccccgccttg ttactggaag      2700
+     caccatccac acatgggcca tcccagcctg ggaccctgtg tgccagcact tactcttttg      2760
+     tgaagcacat gtgacaatga aggacggatg tatcaccttg atgattatgg tgttggggtc      2820
+     ctgattccag cattcatgag tcaggggaag gtccctgcta aggacagacc ttaggagggc      2880
+     agttggtcca gaacccacaa ctgctttccc catgtttcct gatcctgccc tgggtctgca      2940
+     gtcgtagttc tggaaacttc tcttgggtcc aagactagga ggttccccta agatcacatg      3000
+     gccctgcctc ctcccagtcc cctcataggg cattttcttc ccacaggtgg aaaaggaggg      3060
+     agctgctctc aggctgcgtg taagtgatgg cggcgggcgt gtggaggagc tcacctactc      3120
+     cataattcct cttgtcccac atctcctgcg ggctctgacc aggtcttttt ttttgttcta      3180
+     ccccaggcag caacagtgcc cagggctctg atgagtctct catcacttgt aaaggtgaga      3240
+     ttctggggag ctgaagtggt cgggggtggg gcagagggaa aaggcctggg taatggggat      3300
+     tctttgattg ggacgtttcg agtgtgtggt gggccgttca gagtgtcatc acttaccatg      3360
+     actgacctga atttgttcat gactattgtg ttctgtagcc tgagacagct gcctgtgtgg      3420
+     gactgagatg caggatttct tcacacctct cctttgtgac ttcaagagcc tctggcatct      3480
+     ctttctgcaa aggcgtctga atgtgtctgc gttcctgtta gcataatgtg aggaggtgga      3540
+     gagacagccc acccccgtgt ccaccgtgac ccctgtcccc acactgacct gtgttccctc      3600
+     cccgatcatc tttcctgttc cagagaggtg gggctggatg tctccatctc tgtctcaaat      3660
+     tcatggtgca ctgagctgca acttcttact tccctaatga agttaagaac ctgaatataa      3720
+     atttgtgttc tcaaatattt gctatgaagc gttgatggat taattaaata agtcaattcc      3780
+     tagaagttga gagagcaaat aaagacctga gaaccttcca gaatttgcat gttcgctgtg      3840
+     ctgagtctgt tgcaggtggg ggtggggaag gctgtgagga gccgagtgtg gacggggcct      3900
+     gtgcctagtt gctgttcagt tcttcatggg ctttatgtgg tcagtcctca gctgggtcac      3960
+     cttcactgct ccattgtcct tgtcccttca gtggaaactt gtccagcgga agctgtgacc      4020
+     acagaggctc acccatcgcc cagggcagcc cctgcacacg ggagtccctg tgctttctga      4080
+     gacaaatttt cagacccatt cagctcctgc cctccttcta gggctcctct tctgctttgg      4140
+     tctcctgccc tctctccctt ccctgattcc agtgatcttc gtgctgactc caatcccaac      4200
+     tcatgaatct aaagcagagc ctaatttaga tttgtatttg tttgtaaaat tgggtccata      4260
+     gtctagaatt gttccttcct gaagagagaa acctgatcgt gtgctgcagt gtgcgggg        4318
+//
+ID   HLA00434; SV 5; standard; DNA; HUM; 4318 BP.
+XX
+AC   HLA00434;
+XX
+SV   HLA00434.5
+XX
+DT   04-NOV-1990 (Rel. 1.00.0, Created, Version 1)
+DT   20-OCT-2017 (Rel. 3.30.0, Last Updated, Version 5)
+XX
+DE   HLA-C*07:02:01:01, Human MHC Class I sequence
+XX
+KW   Human MHC; HLA; Class I; HLA-C; Allele; HLA-C*07:02:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-4318
+RX   PUBMED; 3899913.
+RA   Srivastava R, Duceman BW, Biro PA, Sood AK, Weissman SM;
+RT   "Molecular organization of the class I genes of human major
+RT   histocompatibility complex.";
+RL   Immunological Reviews 84:93-121(1985).
+XX
+RN   [2]
+RP   1-4318
+RX   PUBMED; 8655361.
+RA   Wang H, Tokunaga K, Ishikawa Y, Asahina A, Kuwata S, Akaza T, Tadokoro K,
+RA   Shibata Y, Takiguchi M, Juji T;
+RT   "Identification and DNA typing of two Cw7 alleles (Cw*0702 and Cw*0704) in
+RT   Japanese, with the corrected sequence of Cw*0702.";
+RL   Human Immunology 45:52-58(1996).
+XX
+RN   [3]
+RP   1-4318
+RX   PUBMED; 21585707.
+RA   Zhu F, He Y, Zhang W, He J, He J, Xu X, Lv H, Yan L;
+RT   "Analysis for complete genomic sequence of HLA-B and HLA-C alleles in the
+RT   Chinese Han population.";
+RL   International Journal of Immunogenetics 38:281-284(2011).
+XX
+RN   [4]
+RP   1-4318
+RX   PUBMED; 21658009.
+RA   Xu Y, Deng Z, OhUign C, Wang D, Gao S, Zend J, Yang B, Jin S, Zou H;
+RT   "Charaterization and polymorphic analysis of 4.5 kb genomic full-length
+RT   HLA-C in Chinese Han population.";
+RL   Tissue Antigens 78:102-114(2011).
+XX
+RN   [5]
+RP   1-4318
+RX   PUBMED; 30337930.
+RA   Suzuki S, Ranade S, Osaki K, Iyo S, Shigenari A, Ohnuki Y, Oka A, Masuya
+RA   A, Harting J, Baybayan P, Kitazume M, Sunaga J, Morishima S, Morishima Y,
+RA   Inoko H, Kulski JK, Shiina T;
+RT   "Reference grade characterization of polymorphisms in full-length HLA
+RT   class I and II genes with short-read sequencing on the ION PGM system and
+RT   long-reads generated by single molecule, real-time sequencing on the
+RT   PacBio platform.";
+RL   Frontiers in Immunology 9:2294(2018).
+XX
+DR   EMBL; AY603356; AY603356.1.
+DR   EMBL; D38526; D38526.1.
+DR   EMBL; D49819; D49819.1.
+DR   EMBL; FJ515904; FJ515904.1.
+DR   EMBL; HM543702; HM543702.1.
+DR   EMBL; KU319190; KU319190.1.
+DR   EMBL; LC257759; LC257759.1.
+DR   EMBL; OZ258099; OZ258099.1.
+DR   EMBL; OZ258100; OZ258100.1.
+DR   EMBL; OZ258101; OZ258101.1.
+DR   EMBL; Z49112; Z49112.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..4318
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="Asian, European, Hispanic or Latin American"
+FT                   /cell_line="08009370"
+FT                   /cell_line="CB"
+FT                   /cell_line="HS67"
+FT                   /cell_line="JY"
+FT                   /cell_line="KE"
+FT                   /cell_line="KOK"
+FT                   /cell_line="P4487"
+FT                   /cell_line="RSA-ND"
+FT                   /cell_line="SAM"
+FT                   /cell_line="T106"
+FT                   /cell_line="TID"
+FT                   /cell_line="WEHO"
+FT   CDS             join(501..573,704..973,1224..1499,2087..2362,2487..2606,
+FT                   3047..3079,3187..3234,3399..3403)
+FT                   /codon_start=1
+FT                   /gene="HLA-C"
+FT                   /allele="HLA-C*07:02:01:01"
+FT                   /product="MHC Class I HLA-C*07:02:01:01 sequence"
+FT                   /translation="MRVMAPRALLLLLSGGLALTETWACSHSMRYFDTAVSRPGRGEPR
+FT                   FISVGYVDDTQFVRFDSDAASPRGEPRAPWVEQEGPEYWDRETQKYKRQAQADRVSLRN
+FT                   LRGYYNQSEDGSHTLQRMSGCDLGPDGRLLRGYDQSAYDGKDYIALNEDLRSWTAADTA
+FT                   AQITQRKLEAARAAEQLRAYLEGTCVEWLRRYLENGKETLQRAEPPKTHVTHHPLSDHE
+FT                   ATLRCWALGFYPAEITLTWQRDGEDQTQDTELVETRPAGDGTFQKWAAVVVPSGQEQRY
+FT                   TCHMQHEGLQEPLTLSWEPSSQPTIPIMGIVAGLAVLVVLAVLGAVVTAMMCRRKSSGG
+FT                   KGGSCSQAACSNSAQGSDESLITCKA"
+FT   UTR             1..500
+FT   exon            501..573
+FT                   /number="1"
+FT   intron          574..703
+FT                   /number="1"
+FT   exon            704..973
+FT                   /number="2"
+FT   intron          974..1223
+FT                   /number="2"
+FT   exon            1224..1499
+FT                   /number="3"
+FT   intron          1500..2086
+FT                   /number="3"
+FT   exon            2087..2362
+FT                   /number="4"
+FT   intron          2363..2486
+FT                   /number="4"
+FT   exon            2487..2606
+FT                   /number="5"
+FT   intron          2607..3046
+FT                   /number="5"
+FT   exon            3047..3079
+FT                   /number="6"
+FT   intron          3080..3186
+FT                   /number="6"
+FT   exon            3187..3234
+FT                   /number="7"
+FT   intron          3235..3398
+FT                   /number="7"
+FT   exon            3399..3403
+FT                   /number="8"
+FT   UTR             3404..4318
+SQ   Sequence 4318 BP; 830 A; 1218 C; 1301 G; 969 T; 0 other;
+     ttattttgct ggatgtagtt taatattacc tgaggtgagg taaggtaagg caaagggtgg        60
+     gaggcaggga gtccagttca gggacgggga ttccaggagg agaagtgaag gggaaggggc       120
+     tgggcgcagc cttggggtct ctccctggtt tccacagaca gatccttgtc caggactcag       180
+     gcacacagtg tgacaaagat gcttggtgta ggagaagagg gatcaggacg aagtcccagg       240
+     tcccgggcgg ggctctcagg gtctcaggct ccaagggccg tgtctgcatt ggggaggcgc       300
+     cgcgttgggg attctccact cccctgagtt tcacttctcc caacctgcgt cgggtccttc       360
+     ttcctgaata ctcatgacgc gtccccaatt cccactccca ttgggtgtcg ggttctagag       420
+     aagccaatca gcgtctccgc agtcccggtt ctaaagtccc cagtcaccca cccggactca       480
+     cattctcccc agaggccgag atgcgggtca tggcgccccg agccctcctc ctgctgctct       540
+     cgggaggcct ggccctgacc gagacctggg cctgtgagtg cggggttggg agggaagcgg       600
+     cctctgcgga gaggagcgag gggccctccc ggcgagggcg caggacccgg ggagccgcgc       660
+     agggaggtgg gtcgggcggg tctcagcccc tcctcgcccc caggctccca ctccatgagg       720
+     tatttcgaca ccgccgtgtc ccggcccggc cgcggagagc cccgcttcat ctcagtgggc       780
+     tacgtggacg acacgcagtt cgtgcggttc gacagcgacg ccgcgagtcc gagaggggag       840
+     ccgcgggcgc cgtgggtgga gcaggagggg ccggagtatt gggaccggga gacacagaag       900
+     tacaagcgcc aggcacaggc tgaccgagtg agcctgcgga acctgcgcgg ctactacaac       960
+     cagagcgagg acggtgagtg accccggccc ggggcgcagg tcacgacccc tccccatccc      1020
+     ccacggacgg cccgggtcgc ccagagtctc cccgtctgag atccacccca aggtggatct      1080
+     gcggaacccg cccagaccct cgaccggaga gagccccagt cgcctttacc cggtttcatt      1140
+     ttcggtttag gccaaaatcc ccgcgggttg gtcggggcgg ggcggggctc gggggactgg      1200
+     gctgaccgcg ggggcggggc cagggtctca caccctccag aggatgtctg gctgcgacct      1260
+     ggggcccgac gggcgcctcc tccgcgggta tgaccagtcc gcctacgacg gcaaggatta      1320
+     catcgccctg aacgaggacc tgcgctcctg gaccgccgcg gacaccgcgg ctcagatcac      1380
+     ccagcgcaag ttggaggcgg cccgtgcggc ggagcagctg agagcctacc tggagggcac      1440
+     gtgcgtggag tggctccgca gatacctgga gaacgggaag gagacgctgc agcgcgcagg      1500
+     taccaggggc agtggggagc cttccccatc tcctatagat ctcccgggat ggcctcccac      1560
+     gaggagggga ggaaaatggg atcagcactg gaatatcgcc ctcccttgaa tggagaatgg      1620
+     catgagtttt cctgagtttc ctctgagggc cccctctgct ctctaggaca attaagggat      1680
+     gaagtctctg aggaaatgga ggggaagaca gtccctggaa tactgatcag gggtctcctt      1740
+     tgaccacttt gaccactgca gcagctgtgg tcaggctgct gacctttctc tcaggccttg      1800
+     ttctctgcct cacactcaat gtgtctgaag gtttgattcc agcttttctg agtcctgcag      1860
+     cctccactca ggtcaggacc agaagtcgct gttcctccct cagagactag aactttccaa      1920
+     tgaataggag attatcccag gtgcctgtgt ccaggctggc gtctgggttc tgtgccgcct      1980
+     tccccacccc aggtgtcctg tccattctca ggatggtcac atgggcgctg ctggagtgtc      2040
+     ccaagagaga tgcaaagtgt ctgaattttc tgactcttcc cgtcagaacc cccaaagaca      2100
+     cacgtgaccc accaccccct ctctgaccat gaggccaccc tgaggtgctg ggccctgggc      2160
+     ttctaccctg cggagatcac actgacctgg cagcgggatg gggaggacca gacccaggac      2220
+     accgagcttg tggagaccag gccagcagga gatggaacct tccagaagtg ggcagctgtg      2280
+     gtggtgcctt ctggacaaga gcagagatac acgtgccata tgcagcacga ggggctgcaa      2340
+     gagcccctca ccctgagctg gggtaaggag gggaatgggg ggtcacatct cttatcagag      2400
+     aaagcagaag tccttctgga gcccttcagc cgggtcaggg ctgaggcttg ggggtcaggg      2460
+     cccctcacct tctcctcctt tcccagagcc atcttcccag cccaccatcc ccatcatggg      2520
+     catcgttgct ggcctggctg tcctggttgt cctagctgtc cttggagctg tggtcaccgc      2580
+     tatgatgtgt aggaggaaga gctcaggtag ggaaggggtg aagagcgggg tctgggtttt      2640
+     cttgtcccac tgggagtttc aagccccagg tagaagtgtg ccccgccttg ttactggaag      2700
+     caccatccac acatgggcca tcccagcctg ggaccctgtg tgccagcact tactcttttg      2760
+     tgaagcacat gtgacaatga aggacggatg tatcaccttg atgattatgg tgttggggtc      2820
+     ctgattccag cattcatgag tcaggggaag gtccctgcta aggacagacc ttaggagggc      2880
+     agttggtcca gaacccacaa ctgctttccc catgtttcct gatcctgccc tgggtctgca      2940
+     gtcgtagttc tggaaacttc tcttgggtcc aagactagga ggttccccta agatcacatg      3000
+     gccctgcctc ctcccagtcc cctcataggg cattttcttc ccacaggtgg aaaaggaggg      3060
+     agctgctctc aggctgcgtg taagtgatgg cggcgggcgt gtggaggagc tcacctactc      3120
+     cataattcct cttgtcccac atctcctgcg ggctctgacc aggtcttttt ttttgttcta      3180
+     ccccaggcag caacagtgcc cagggctctg atgagtctct catcacttgt aaaggtgaga      3240
+     ttctggggag ctgaagtggt cgggggtggg gcagagggaa aaggcctggg taatggggat      3300
+     tctttgattg ggacgtttcg agtgtgtggt gggccgttca gagtgtcatc gcttaccatg      3360
+     actgacctga atttgttcat gactattgtg ttctgtagcc tgagacagct gcctgtgtgg      3420
+     gactgagatg caggatttct tcacacctct cctttgtgac ttcaagagcc tctggcatct      3480
+     ctttctgcaa aggcacctga atgtgtctgc gttcctgtta gcataatgtg aggaggtgga      3540
+     gagacagccc acccccgtgt ccaccgtgac ccctgtcccc acactgacct gtgttccctc      3600
+     cccgatcatc tttcctgttc cagagaggtg gggctggatg tctccatctc tgtctcaaat      3660
+     tcatggtgca ctgagctgca acttcttact tccctaatga agttaagaac ctgaatataa      3720
+     atttgtgttc tcaaatattt gctatgaagc gttgatggat taattaaata agtcaattcc      3780
+     tagaagttga gagagcaaat aaagacctga gaaccttcca gaatttgcat gttcgctgtg      3840
+     ctgagtctgt tgcaggtggg ggtggggaag gctgtgagga gccgagtgtg gacggggcct      3900
+     gtgcctagtt gctgttcagt tcttcatggg ctttatgtgg tcagtcctca gctgggtcac      3960
+     cttcactgct ccattgtcct tgtcccttca gtggaaactt gtccagcgga agctgtgacc      4020
+     acagaggctc acccatcgcc cagggcagcc cctgcacacg ggagtccctg tgctttctga      4080
+     gacaaatttt cagacccatt cagctcctgc cctccttcta gggctcctct tctgctttgg      4140
+     tctcctgccc tctctccctt ccctgattcc agtgatcttc gtgctgactc caatcccaac      4200
+     tcatgaatct aaagcagagc ctaatttaga tttgtatttg tttgtaaaat tgggtccata      4260
+     gtctagaatt gttccttcct gaagagagaa acctgatcgt gtgctgcagt gtgcaggg        4318
+//
+ID   HLA00664; SV 6; standard; DNA; HUM; 11116 BP.
+XX
+AC   HLA00664;
+XX
+SV   HLA00664.6
+XX
+DT   01-AUG-1989 (Rel. 1.00.0, Created, Version 1)
+DT   08-OCT-2025 (Rel. 3.62.0, Last Updated, Version 6)
+XX
+DE   HLA-DRB1*01:01:01:01, Human MHC Class II sequence
+XX
+KW   Human MHC; HLA; Class II; HLA-DRB1; Allele; HLA-DRB1*01:01:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-11116
+RX   PUBMED; 3858829.
+RA   Bell JI, Estess P, St John T, Saiki R, Watling DL, Erlich HA, McDevitt HO;
+RT   "DNA sequence and characterization of human class II major
+RT   histocompatibility complex beta chains from the DR1 haplotype.";
+RL   Proceedings of the National Academy of Sciences USA 82:3405-3409(1985).
+XX
+RN   [2]
+RP   1-11116
+RX   PUBMED; 2998758.
+RA   Tonnelle C, DeMars R, Long EO;
+RT   "DO beta: a new beta chain gene in HLA-D with a distinct regulation of
+RT   expression.";
+RL   EMBO Journal 4:2839-2847(1985).
+XX
+RN   [3]
+RP   1-11116
+RX   PUBMED; 21388356.
+RA   Zhu F, He Y, Tao S, Zhang W, He J, He J, Xu X, Lv H, Yan L;
+RT   "Analysis of the complete cDNA sequences of HLA-DRB1 alleles with group
+RT   specific amplification primers in the Chinese Han population.";
+RL   Tissue Antigens 77:329-332(2011).
+XX
+RN   [4]
+RP   1-11116
+RX   PUBMED; 35094503.
+RA   Turner TR, Hayward DR, Gymer AW, Barker DJ, Leen G, Cambridge CA,
+RA   Macpherson HL, Georgiou X, Cooper MA, Robinson J, Mayor NP, Marsh SGE;
+RT   "Widespread non-coding polymorphism in HLA class II genes of International
+RT   HLA and Immunogenetics Workshop cell lines.";
+RL   HLA 99:328-356(2022).
+XX
+DR   EMBL; AF029288; AF029288.1.
+DR   EMBL; AM493435; AM493435.1.
+DR   EMBL; HM067843; HM067843.1.
+DR   EMBL; JN157601; JN157601.1.
+DR   EMBL; LR828221; LR828221.1.
+DR   EMBL; LR828231; LR828231.1.
+DR   EMBL; LR828242; LR828242.1.
+DR   EMBL; LT220257; LT220257.2.
+DR   EMBL; M11161; M11161.1.
+DR   EMBL; OZ257784; OZ257784.1.
+DR   EMBL; OZ257785; OZ257785.1.
+DR   EMBL; OZ257786; OZ257786.1.
+DR   EMBL; OZ257787; OZ257787.1.
+DR   EMBL; OZ257788; OZ257788.1.
+DR   EMBL; OZ257789; OZ257789.1.
+DR   EMBL; OZ257790; OZ257790.1.
+DR   EMBL; OZ257791; OZ257791.1.
+DR   EMBL; OZ257792; OZ257792.1.
+DR   EMBL; X03069; X03069.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..11116
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="Asian, European, Undefined"
+FT                   /cell_line="45.1"
+FT                   /cell_line="7551100014"
+FT                   /cell_line="7551100028"
+FT                   /cell_line="9000610010816F"
+FT                   /cell_line="CAR, ML"
+FT                   /cell_line="CHG"
+FT                   /cell_line="DKMS-LSL_ID15893426"
+FT                   /cell_line="DKMS-LSL_ID16188406"
+FT                   /cell_line="DKMS-LSL_ID16308245"
+FT                   /cell_line="DRH"
+FT                   /cell_line="EHM"
+FT                   /cell_line="HOM-2"
+FT                   /cell_line="JESTHOM"
+FT                   /cell_line="JSA"
+FT                   /cell_line="KAS116"
+FT                   /cell_line="LCL721"
+FT                   /cell_line="LG2"
+FT                   /cell_line="SA"
+FT                   /cell_line="VEN"
+FT                   /cell_line="WT100BIS"
+FT   CDS             join(586..685,5958..6227,8457..8738,9440..9550,
+FT                   10038..10061,10883..10896)
+FT                   /codon_start=1
+FT                   /gene="HLA-DRB1"
+FT                   /allele="HLA-DRB1*01:01:01:01"
+FT                   /product="MHC Class II HLA-DRB1*01:01:01:01 sequence"
+FT                   /translation="MVCLKLPGGSCMTALTVTLMVLSSPLALAGDTRPRFLWQLKFECH
+FT                   FFNGTERVRLLERCIYNQEESVRFDSDVGEYRAVTELGRPDAEYWNSQKDLLEQRRAAV
+FT                   DTYCRHNYGVGESFTVQRRVEPKVTVYPSKTQPLQHHNLLVCSVSGFYPGSIEVRWFRN
+FT                   GQEEKAGVVSTGLIQNGDWTFQTLVMLETVPRSGEVYTCQVEHPSVTSPLTVEWRARSE
+FT                   SAQSKMLSGVGGFVLGLLFLGAGLFIYFRNQKGHSGLQPTGFLS"
+FT   UTR             1..585
+FT   exon            586..685
+FT                   /number="1"
+FT   intron          686..5957
+FT                   /number="1"
+FT   exon            5958..6227
+FT                   /number="2"
+FT   intron          6228..8456
+FT                   /number="2"
+FT   exon            8457..8738
+FT                   /number="3"
+FT   intron          8739..9439
+FT                   /number="3"
+FT   exon            9440..9550
+FT                   /number="4"
+FT   intron          9551..10037
+FT                   /number="4"
+FT   exon            10038..10061
+FT                   /number="5"
+FT   intron          10062..10882
+FT                   /number="5"
+FT   exon            10883..10896
+FT                   /number="6"
+FT   UTR             10897..11116
+SQ   Sequence 11116 BP; 2965 A; 2228 C; 2645 G; 3278 T; 0 other;
+     acattttcta gtgttgaaag acctgaaaga tcacggtgcc ttcatttcaa ctgtgagaca        60
+     tgaagtaatt ttcccaaatc tacaacatta agatatggtg caataaggac cagattaaag       120
+     gtctcctgat ttgcggccat gttccctcca tctcctttac tcctaaacac actcacactc       180
+     actactgcaa atagttgtct tgtcaagtgg gaaatgaatg ctcttacaag gctcaaactt       240
+     gtgaacacat cactgaccag cacagagctg gctacaatag ctccccaatt aaggtgtttt       300
+     acatgcaact ggttcaaacc ttccaagtgc taaattaaaa caatccttta aagaaggaaa       360
+     ttctgtttca gaagaggacc ttcatacagc atctctgacc agcaactgat gatgctattg       420
+     aactcagatg ctgattggtt ctccaacacg agattaccca acccaggagc aaggaaatca       480
+     gtaacttcct ccctataact tggaatgtgg gtggaggggt tcatagttct ccctgagtga       540
+     gacttgcctg cttctctggc ccctggtcct gtcctgttct ccagcatggt gtgtctgaag       600
+     ctccctggag gctcctgcat gacagcgctg acagtgacac tgatggtgct gagctcccca       660
+     ctggctttgg ctggggacac ccgacgtaag tgcacattgc gggtgctgag ctactatggg       720
+     gtggggaaaa tagggagttt tgttaacatt gtgcccaggc catgtccctt aagaaattgt       780
+     gacgttttct tcagagattg cccatcttta tcattggatc ccaaattatt tcctccataa       840
+     aaggagcttg ggtacttgcc ctcttcatga gacttgtgta aggggccttt gcacaagtca       900
+     tttcttttca aatctccacc aataaaacct ttgcatcaca tgtcctcagg gtctttagag       960
+     gatttagaaa taaggattct aaaataaatt ccccatacag cacttccctt tattatgttg      1020
+     acttatgtca gacaaaagga ggttcttact gaaaattttg tgggagtcaa gggaattcaa      1080
+     agggtctctc ctagacgatc cagtgttagg ttccccacag gacctttggt gttggccata      1140
+     gtcctcatat gtgaggatgg acccagtggc ctccccatta tctcctttct tttcttgctg      1200
+     aactccaatg tttataaggc ctgtatccct gtagcgtatg taggttctct gacagaagtt      1260
+     atacttagtg ctcttccttt cttgtgggga aaagtccctg gaactgaagc tgagattgtt      1320
+     agtacttgga gtcaccttac agatacagag catttatgag gtattctttg gtgcctaaag      1380
+     aacttaaggc atcctctgaa aaactagccc aggttcgtgt tcattatgaa tcttttttaa      1440
+     cctttctgta cttgtttctc ttgcatctcc tatgtgctct aactagacat gacagaagag      1500
+     atttaactaa tgtataaatt atatgaaatt ctatttttta agtcaaaaat aatcaactat      1560
+     cagaaattta ataatgttca aactatatac tctgtgtggg gttaccgaga tgatgtgaac      1620
+     attgttcacg tctcataggg ctgaaagtca atgggcaagt cttgggaact cattgtctta      1680
+     ctggggtctt gtcctaaatt tcctaggttc acccatcatg ccctcagctt tccttaacta      1740
+     gccatgtctg cttacctctt cctccagttt ctatttttcc ccagctatgt tgtcatcatt      1800
+     tccagaaatc tctaaagctt gcacagaacc ttagcactat gcgattcatt gaaagagact      1860
+     ttttttctct ttttgaggta gggcctggct ctgtcaccca gtctatagct cagtggtgtg      1920
+     atcgaggctc actgcaacct ctgccaccca tgctcaagtg atcctccctc ctcaggctcc      1980
+     agagtagctg ggaatacagg caggcaacca cgcccagcta atttttgtaa ttttggtaga      2040
+     catgagattt tgccatgttg cccaggctgg tcttaaactg ctggtttcaa gcaatcctcc      2100
+     tgccttggcc tcccaacatg ctaggattat agatgtgagc cactgtgccc aggcaaaaag      2160
+     aaatgactct taataaaaaa atttcctttt tcttaaatca ctgtttcttt atctgtgaat      2220
+     tcttcttcca actagaagga ggagaaaaaa gaagtttgcc tgtatttctc accaggagga      2280
+     gaaggggtct agtgtgacat taaaatgaaa gggtgctgga gcttgagccc cttcttgctt      2340
+     tccaggatcc ctacagtgat cagttcccat accctggttt attcatgtaa accacactta      2400
+     tttttctcag cagctactct ttactgggct ccattctagg ttcaaatcat tctatttgat      2460
+     taagttagag agcgtcccta ctctcatgga agttacacaa gagtagagga gacagacact      2520
+     aacccaataa gcatttaaca aagaagataa tgttagagag tcatagtgca ctgaagaaaa      2580
+     gacatcaggt ttgtgaaaaa gagagacatg gattcaccta ctttagttca tatgttaggg      2640
+     agctccacct gagaaagtga cattcagctg agacaacaaa ataagtagac agtcgtgaag      2700
+     atctaaggga tgaaagttcc agggagacca aatggcggga aagccctggt gtgggaaact      2760
+     atgtggaggg agagaaagaa agctagaggg gctgaagtat agaaagcaac gaaatggaga      2820
+     ggcagaagat gaggtaggac acagagagga agtcaggagc ctcatcatta taggctctga      2880
+     tgtccacggt aaaaaaaatt tgaattttat tatttattta cctatttatt tgtttattta      2940
+     ttttatttta ttttgtgatg gagtctctct ctgttgccca ggctagatgg cagtggcaca      3000
+     atctcggctc actgcaacct ccgcctcctg ggttcaagca attctcctgc ctcagcctcc      3060
+     caattagctg gggccacagg tgcatgccac cacacctggc taattttttg tatttttagt      3120
+     agggatagga tttcaccgtg ttagccagga tggtctcgat ctcctgacct cgtgatccgc      3180
+     ccgccttggc ctcccaaagt gctgggatta taggcgtgag ccactgcacc cggcctatat      3240
+     tcaattttta aaactaattc tagctactct gtggggattg gattgttggg gttcaccagt      3300
+     ggttaggaag actatttagg agcacagcag ggaattctcc agggaaaaca agcttgtggc      3360
+     ttcatggagt gcattagtga taaagacggt gaagaagata aagtggacag actcggcatg      3420
+     tatttttgct tagcttgtta atgaattact gtaaaggggg tagagcttat tcctaaggat      3480
+     tttcttttga caaataagtg ggtggtagtg ttgtttattg agataggaaa aactatggga      3540
+     ggaaatgatt tgaagtgggt ggtttgaaat aaaagttttg tttaaatatg agatgattga      3600
+     ctgacattta tgtggagcaa tcagaaggtc aatggcattt aagagactca tggtgaggct      3660
+     agggcttcag gtatttatgt tggaggcatc aatacgtgta gtgtgttaaa ttccagggag      3720
+     tggaagagga tacataggga gatggattgt gtggagaaac aagaagaggg cacaggccag      3780
+     caaagggggc tgagaaagag cccagggatg ttggagaaaa accaagagaa catcatgtat      3840
+     gtaagtcaag gaaaacagat ttttttcaag gagaagggag aggccaattg tggtgagtac      3900
+     cactaagagg agggggaagt gagaatatga cagagaagca agtgctggga ttggtggagt      3960
+     tgatatttgc agtcaatgga gtatccaggg aggaaactgg attggaccat ttggagagca      4020
+     aataaaagtg aggacgaggt taaggttgac tgttctgtgt agagagcttc agggaaggat      4080
+     tgttctctgg gttcagggag ccagctgaac ctaaaggaaa aggctaaaga agctgaagag      4140
+     aaggaggagg acctgtgaac cagagatgct cagccattat tagcaaggaa atacaagaga      4200
+     gcccctgtgt gcagtggtga ctactcatgc aaaatgtcac acagccaata tttaacacag      4260
+     ccaggatttc acacagccaa tatttattag tgacatagaa tatatttgtt attgctctag      4320
+     gtcatgagaa tggagtgaca aaatgaatcc ggtcgccatc agtatatgcc acataacatt      4380
+     ttgcagtgac tgtgtgccag gcctatgaat ttcagtattc aatttcaata atgatcctgt      4440
+     tgtatctgtg gtatttaaaa acatatacat ctctgtaatc taaaattgag aggttataag      4500
+     taaaacccag tattacaaat ttagtgctgg aaattgattg cagtttaaat ctgagcatat      4560
+     agaaagtccc tttcttctat gtcagcagat gccttttgtg tgaggtttag gtatactgca      4620
+     ttattagaca taaaccagtg tttctgccct atgttttcag aatgacaatt ctttatgaaa      4680
+     ctaatagaag aacagaagac aattgcaaaa tcatgatgaa gatactaatt gctttagaat      4740
+     taaggaatac aaataatgtg agctgcagtt atagggatca aaaaagttac aatgggaatg      4800
+     tatttgagtg tttattatgt gatcagtgct aagaagtgtc atcatttaat tttacactta      4860
+     acagtaatcc tgtgaggatt atgctattat taaatgcact tgatacatta caaaaaggct      4920
+     tatggttgat ataaattgac ccaagtagaa gagatcatgt ttttattcag gttttctgat      4980
+     tctagagttt gagagtttga ccatcattag tgagtagtga ctatattgtg tctgaattat      5040
+     tgacagaatt tctgatattc atatgtacca ggttgtttct tagagtggga gcagagatgc      5100
+     aagggctgct agttccgatg tgtaggagaa actatcattc attttgcatt tatcatttta      5160
+     aacgttctat atgtctatcc tgggcatgtg ttgaagaaca caaggaagta ttaaatcact      5220
+     ccttcttctg aagtttgact ggcaaaattg ggctagagtt acgaaataaa atacaggttc      5280
+     ctagtgaaat ctgaatttca gatacacaac cataatttat tggaaatcca aatttaactg      5340
+     gatatcttct attattctct gttctagaac tccacacttc taacatttct cattcctgtc      5400
+     taagctcttg tgtgtttggt ttttggccat cgctttcact gctctttaag ctcccccagt      5460
+     agagtggaga ggtctgtttt ccctcgtttg gattcctaca ggcagcgcag gcctggcaca      5520
+     aggtcatcac taaggaagtg ttcacagggt gaaggcggtg ggtgctgttg aaggaaccgg      5580
+     taaagcctgt gggatgagag aaggagcaga gagtgttttt ggggtggagg ctcccaggag      5640
+     gaggcgggac gggctgcggt gctgggcgga tcctcctcca gctcctgctt ggaggtctcc      5700
+     agaacaggct ggaggcaggg agggggtccc aaaagcctgg ggatgagaag gggttttccc      5760
+     gcatggtccc ccaggccccc gttcgcctca ggaagacgga ggatgagctc ctgggctgct      5820
+     ggtggtgggc gttgcgggtg gggccggtta aggttcccag tgcccgcacc ctgcccaggg      5880
+     agccccggat ggtggcgtcg ctgtcagtgt cttctcagga ggctgcccgt gtgaccggat      5940
+     ccttcgtgtc cccacagcac gtttcttgtg gcagcttaag tttgaatgtc atttcttcaa      6000
+     tgggacggag cgggtgcggt tgctggaaag atgcatctat aaccaagagg agtccgtgcg      6060
+     cttcgacagc gacgtggggg agtaccgggc ggtgacggag ctggggcggc ctgatgccga      6120
+     gtactggaac agccagaagg acctcctgga gcagaggcgg gccgcggtgg acacctactg      6180
+     cagacacaac tacggggttg gtgagagctt cacagtgcag cggcgaggtg agcgcggcgc      6240
+     ggggcggggc ctgagtccct gtaagcggag aatctgagtg tgtgtgtgtg tgtgtgtgtg      6300
+     tgtgtgtgta agaaagagag agagcgcgcc atctgtgagc atttagaatc ctctcaatcc      6360
+     ccagcaagca gttctgagag cacaggtgtg tgtgtagagt gtggatttgt ctgggtatgt      6420
+     ctgttgtggg aggggaggca ggagggggct gattcttatc cttggagacc tctgtgggga      6480
+     ggtgacaagg gaggtgggtg ctgggggctg gagagagagg agaccttgat tgtctcgggt      6540
+     ccttagagat gcggggaagg gaaatgtaag gggtgtgtga ttggggtgaa ggtttagggg      6600
+     aggactgctg aggggtaagg aaggtttggg ataatgtgag gaggccggtt ccagactctc      6660
+     cctggcatac acccttcgtg taatctctga aataaaagtg tgtgctgttt gtttgtaaaa      6720
+     gcattagatt aatttctaga ggaactgagt agacctctga ggcactcctg aagcttcttt      6780
+     atatctaaat ttcttgctag ttttttgggt ttttttagtg tgtatatttt tacatagtag      6840
+     aaatgactgt gaaactaact ttttgaatta aagttttaac acagttacta ttttattata      6900
+     atgctagttt tctagtagtt acatattatt cttttatata taatagttat gacacaactc      6960
+     acctcacttt cccctttgtt gacctttatt atgacattca ccaaaagttg aaaatgtatg      7020
+     tttctggtta atttttaatt tatatttttt atttgtaatt gctttgaatt attttgacct      7080
+     atttattggc ggattataat tattgctcta agaattccct attgtatttg gtaggcaatg      7140
+     gacaatgatc tatggtctga tatcttgagg gcttagtatt tttctcagtg actttgtggg      7200
+     ttctttgtgc tataagatta ttaacacttt attgatattt gatccagcat ttgcttcagt      7260
+     ttgtggtttg tatgtggatt ttgaaagttc ttttccatgt taagaatttg aactttttat      7320
+     ttaataaaat atattgcaaa atttttatta atgatttaca atccatctta aatctgccat      7380
+     tttgtggcat tgttgtctcc aggttcctcc ttacttctaa aaaaaatagt tgtatttatt      7440
+     gagagtatgc tagtgttggg gattttcctg ggcataagca ccccaagtaa caagtcccag      7500
+     acactgcctt aatccaaatg tgactctgga aagaaaaatc attttacaat gataggccta      7560
+     ataataatta tgcttgtgtt acacgggaga tgcattgatc agctaaatgt aaatataaga      7620
+     actttcaaaa ctaaaatgac attccctaat ccttttctct gcttcgggac tcatgctttt      7680
+     ctaggaacgt aaaaatttgg agaatcattt ctgtctgtcc cacattccca ggggcagaac      7740
+     aatttctgtt ttgttctaag gtgtgagtgc atggcagtag tattcctaaa attcatactc      7800
+     ggtttcctca tgtacccaat tctgtccctt tatctatgca tatttcttta aatcatattt      7860
+     ttctgtcatg gggtacaagg atgataaata ggtgccaagt ggagcaccca agtgtgatga      7920
+     gcgccctcac agtggaatgg agtgagaagc tttctgacct tataaactga aggctatctt      7980
+     cagtcattgt tttatatatt ttacatgcat taatcctcat ataaccccaa gaggtaaatt      8040
+     agtataatta tccttcattg taggtgacaa agttgagaca cagaagaatc aaaaaactct      8100
+     tccaggatca accagtaaaa ggcagacctt ggattcgaac caagcaacct ggctcaaata      8160
+     tcagttttaa ttactacact ctatactttc caagatttgt aaacagtttg acaatgcatg      8220
+     ccaatttaaa gctatgaaga aacaaacaca atttttcaca acacctctca aatctaatgg      8280
+     gtcctcactg tcaagattaa attccaggct gatgacactg taaggtcaca tggccagctg      8340
+     tgctataggc ctggtcaagg tcagagcctg ggtttgcaga gaagcagaca cacagccaaa      8400
+     ccaggagact tactctgtct tcctgactca ttctctctac atttgttttc tcctagttga      8460
+     gcctaaggtg actgtgtatc cttcaaagac ccagcccctg cagcaccaca acctcctggt      8520
+     ctgctctgtg agtggtttct atccaggcag cattgaagtc aggtggttcc ggaacggcca      8580
+     ggaagagaag gctggggtgg tgtccacagg cctgatccag aatggagatt ggaccttcca      8640
+     gaccctggtg atgctggaaa cagttcctcg gagtggagag gtttacacct gccaagtgga      8700
+     gcacccaagt gtgacgagcc ctctcacagt ggaatggagt gagcagcttt ctgacttcat      8760
+     aaatttctca cccaccaaga aggggactgt gctaatccct gagtgtcagg tttctcctct      8820
+     cccacaccct attttcattt gctccatgtt ctcatctcca tcagcacagg tcactggggg      8880
+     tagccctgta ggtgtttcta gaaacacctg tacctcctgg agaagcagtc tcacctgcca      8940
+     ggcaggagag actgtccctc ttttgaacct ccccatgatt tcgcaggtca gggtcaccca      9000
+     ctctccccag gctccaggcc ctgcttctgg gtctgagact gagtttctgg tgctgttgct      9060
+     ctgagttatt ttttgtgatc tgggaagagg agaagtgtag gggcctacct gacatgaggg      9120
+     gaatccaatc tcagccctgc cttttattag ctctgtcact ctagacaaac tacttagctt      9180
+     cattgagtct caggctttct gttgatcaga tgttgaacgc ttgccttaca tcaaggctgt      9240
+     aatatttgaa tgagtttgat gtctgaacat cgtaactgtt cagcgtgatt tgaaatcctt      9300
+     tttttctcct gaaatggcta gttattttaa ttcttgtggg gcaggcttct gccccatttt      9360
+     caaagctctg aatcttagag tctcaattaa agaggttcaa tttggaataa gcatcactaa      9420
+     acctggattc ctctctcagg agcacggtct gaatctgcac agagcaagat gctgagtgga      9480
+     gtcgggggct tcgtgctggg cctgctcttc cttggggccg ggctgttcat ctacttcagg      9540
+     aatcagaaag gtgaggagcc tttgggagct gactctctcc ataggctttt ctggaggagg      9600
+     aaccatggtt ttgctgagag gttagttctc agtatacgag tggccctgaa taaagccttt      9660
+     ctttccccaa acggctctaa tgtcctgcta atccagaaat catcagtgca tggttactat      9720
+     gtcaaagcat aatagcttgt ggcctgcaga gacaagagga aggttaacaa gtaggggtcc      9780
+     ttttgtttga gatcctggag caaattaagg aagagccact aaggctaatg gaattacact      9840
+     ggatcctgtg acagacactt caggcttcat gggtcacatg gtctgtctct gctcctttct      9900
+     gcccctttct gccctggttg gtgcgggttg tggtgttaga gaaatctcag gtgggagatc      9960
+     tgcggctggg acattgtgtt ggaggacaga tttgcttcaa taacttttaa gtgtatttct     10020
+     tttcctcttt ttcccaggac actctggact tcagccaaca ggtaatacct tttaatcctc     10080
+     ttttagaaac agacacagtt tccctagtga gaggtgaagc cagctggact tctgggtggg     10140
+     gtggggactt ggagaacttt tcttacaaga ggtttctaaa tgccccaatc agtgctttgt     10200
+     aaaaacacac caataggttc tctgtggcta gctggatgtt tgtaaaatgg accaatttgc     10260
+     actctgtaaa atggaccaat cagcattctt taaaatggac caatcagcac ttttaaaatg     10320
+     ggccaatcag cactctttaa aatggaccaa tcagcactct ttaaaatgga ccaatctgca     10380
+     ggacatgggc agggacaaat acaggaataa aagctggcca ccccaaccag cagtggcaac     10440
+     ccactcaggt cctcttccct gctgtggaag ttttgttctt ttgatcttca caataaatct     10500
+     tgctgctgcc tactctttgg gtccctgccg cctttaagag ctgtaacact cactgtgaag     10560
+     gtctgcttga agtcagcgag accacaaacc cactggaagg aacaaactgc ggacacacta     10620
+     gaatgatggt agaggtgata aggcatgaga cagaaataat aggaaagact ttggatccaa     10680
+     atttctgatc aggcaattta caccaaaatt cctcctctcc acttagaaaa gggctgtgct     10740
+     ctgcgggact attggctcag gggagactca ggaacttgtt tttctgcttc ctgcagtgct     10800
+     ctcatctgag cccttgaaag aggagaaaag aaactgttag tagagccagg ttgaaaacaa     10860
+     cactctcctc tgtcttttgc aggattcctg agctgaaatg cagatgacca cattcaagga     10920
+     agaaccttct gtcccagctt tgcagaatga aaagctttcc tgcttggcag ttattcttcc     10980
+     acaagagagg gctttctcag gacctggttg ctactggttc ggcaactgca gaaaatgtcc     11040
+     tcccttgtgg cttcctcagc tcctgccctt ggcctgaagt cccagcattg atgacagcgc     11100
+     ctcatcttca actttt                                                     11116
+//
+ID   HLA00671; SV 3; standard; DNA; HUM; 13908 BP.
+XX
+AC   HLA00671;
+XX
+SV   HLA00671.3
+XX
+DT   01-AUG-1989 (Rel. 1.00.0, Created, Version 1)
+DT   14-JAN-2016 (Rel. 3.23.0, Last Updated, Version 3)
+XX
+DE   HLA-DRB1*03:01:01:01, Human MHC Class II sequence
+XX
+KW   Human MHC; HLA; Class II; HLA-DRB1; Allele; HLA-DRB1*03:01:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-13908
+RX   PUBMED; 3459965.
+RA   Gorski J, Mach B;
+RT   "Polymorphism of human Ia antigens: gene conversion between two DR beta
+RT   loci results in a new HLA-D/DR specificity.";
+RL   Nature 322:67-70(1986).
+XX
+RN   [2]
+RP   1-13908
+RX   PUBMED; 3476943.
+RA   Bell JI, Denney D Jr, Foster L, Belt T, Todd JA, McDevitt HO;
+RT   "Allelic variation in the DR subregion of the human major
+RT   histocompatibility complex.";
+RL   Proceedings of the National Academy of Sciences USA 84:6234-6248(1987).
+XX
+RN   [3]
+RP   1-13908
+RX   PUBMED; 3309680.
+RA   Todd JA, Bell JI, McDevitt HO;
+RT   "HLA-DQ beta gene contributes to susceptibility and resistance to
+RT   insulin-dependent diabetes mellitus.";
+RL   Nature 329:599-604(1987).
+XX
+RN   [4]
+RP   1-13908
+RX   PUBMED; 3372263.
+RA   Horn GT, Bugawan TL, Long CM, Manos MM, Erlich HA;
+RT   "Sequence analysis of HLA class II genes from insulin-dependent diabetic
+RT   individuals.";
+RL   Human Immunology 21:249-263(1988).
+XX
+RN   [5]
+RP   1-13908
+RX   PUBMED; 7960970.
+RA   Eberle M, Asu U, Taylor M, Hunter JB, Fuller TC, Maurer D;
+RT   "Identification of a putative DR8 founder haplotype containing a novel
+RT   DRB1*08 allele.";
+RL   Human Immunology 40(S1):77(1994).
+XX
+RN   [6]
+RP   1-13908
+RX   PUBMED; 15140828.
+RA   Stewart CA, Horton R, Allcock RJ, Ashurst JL, Atrazhev AM, Coggill P,
+RA   Dunham I, Forbes S, Halls K, Howson JM, Humphray SJ, Hunt S, Mungall AJ,
+RA   Osoegawa K, Palmer S, Roberts AN, Rogers J, Sims S, Wang Y, Wilming LG,
+RA   Elliott JF, de Jong PJ, Sawcer S, Todd JA, Trowsdale J, Beck S;
+RT   "Complete MHC haplotype sequencing for common disease gene mapping.";
+RL   Genome Research 14:1176-1187(2004).
+XX
+RN   [7]
+RP   1-13908
+RX   PUBMED; 16140993.
+RA   Raymond CK, Kas A, Paddock M, Qiu R, Zhou Y, Subramanian S, Chang J,
+RA   Palmieri A, Haugen E, Kaul R, Olson MV;
+RT   "Ancient haplotypes of the HLA Class II region.";
+RL   Genome Research 15:1250-1257(2005).
+XX
+RN   [8]
+RP   1-13908
+RX   PUBMED; 21388356.
+RA   Zhu F, He Y, Tao S, Zhang W, He J, He J, Xu X, Lv H, Yan L;
+RT   "Analysis of the complete cDNA sequences of HLA-DRB1 alleles with group
+RT   specific amplification primers in the Chinese Han population.";
+RL   Tissue Antigens 77:329-332(2011).
+XX
+RN   [9]
+RP   1-13908
+RX   PUBMED; 35094503.
+RA   Turner TR, Hayward DR, Gymer AW, Barker DJ, Leen G, Cambridge CA,
+RA   Macpherson HL, Georgiou X, Cooper MA, Robinson J, Mayor NP, Marsh SGE;
+RT   "Widespread non-coding polymorphism in HLA class II genes of International
+RT   HLA and Immunogenetics Workshop cell lines.";
+RL   HLA 99:328-356(2022).
+XX
+DR   EMBL; AF029265; AF029265.1.
+DR   EMBL; AF152843; AF152843.1.
+DR   EMBL; AL662842; AL662842.3.
+DR   EMBL; AY663399; AY663399.1.
+DR   EMBL; AY663407; AY663407.1.
+DR   EMBL; HM067844; HM067844.1.
+DR   EMBL; LR878398; LR878398.1.
+DR   EMBL; LR880441; LR880441.1.
+DR   EMBL; LR882675; LR882675.1.
+DR   EMBL; LR882677; LR882677.1.
+DR   EMBL; LT220231; LT220231.2.
+DR   EMBL; LT220256; LT220256.2.
+DR   EMBL; M17379; M17379.1.
+DR   EMBL; OZ257801; OZ257801.1.
+DR   EMBL; OZ257802; OZ257802.1.
+DR   EMBL; OZ257803; OZ257803.1.
+DR   EMBL; OZ257804; OZ257804.1.
+DR   EMBL; OZ257805; OZ257805.1.
+DR   EMBL; OZ257806; OZ257806.1.
+DR   EMBL; OZ257807; OZ257807.1.
+DR   EMBL; X04054; X04054.1.
+DR   EMBL; Z84489; Z84489.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..13908
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="Asian, European, Undefined"
+FT                   /cell_line="900610018586V"
+FT                   /cell_line="ALL"
+FT                   /cell_line="APR"
+FT                   /cell_line="AVL"
+FT                   /cell_line="C.M.L."
+FT                   /cell_line="CMCC"
+FT                   /cell_line="COX"
+FT                   /cell_line="DKMS-LSL_ID15745665"
+FT                   /cell_line="DKMS-LSL_ID15902515"
+FT                   /cell_line="DKMS-LSL_ID16236105"
+FT                   /cell_line="DKMS-LSL_ID16315430"
+FT                   /cell_line="DM24"
+FT                   /cell_line="DM28"
+FT                   /cell_line="DM29"
+FT                   /cell_line="FH15"
+FT                   /cell_line="HSF7"
+FT                   /cell_line="LCL721"
+FT                   /cell_line="MUR"
+FT                   /cell_line="MVJ"
+FT                   /cell_line="NA01018"
+FT                   /cell_line="NA10923"
+FT                   /cell_line="PF04015"
+FT                   /cell_line="STEINLIN"
+FT                   /cell_line="U-STH"
+FT                   /cell_line="VAVY"
+FT                   /cell_line="WT49"
+FT   CDS             join(600..699,8694..8963,11194..11475,12174..12284,
+FT                   12760..12783,13572..13585)
+FT                   /codon_start=1
+FT                   /gene="HLA-DRB1"
+FT                   /allele="HLA-DRB1*03:01:01:01"
+FT                   /product="MHC Class II HLA-DRB1*03:01:01:01 sequence"
+FT                   /translation="MVCLRLPGGSCMAVLTVTLMVLSSPLALAGDTRPRFLEYSTSECH
+FT                   FFNGTERVRYLDRYFHNQEENVRFDSDVGEFRAVTELGRPDAEYWNSQKDLLEQKRGRV
+FT                   DNYCRHNYGVVESFTVQRRVHPKVTVYPSKTQPLQHHNLLVCSVSGFYPGSIEVRWFRN
+FT                   GQEEKTGVVSTGLIHNGDWTFQTLVMLETVPRSGEVYTCQVEHPSVTSPLTVEWRARSE
+FT                   SAQSKMLSGVGGFVLGLLFLGAGLFIYFRNQKGHSGLQPRGFLS"
+FT   UTR             1..599
+FT   exon            600..699
+FT                   /number="1"
+FT   intron          700..8693
+FT                   /number="1"
+FT   exon            8694..8963
+FT                   /number="2"
+FT   intron          8964..11193
+FT                   /number="2"
+FT   exon            11194..11475
+FT                   /number="3"
+FT   intron          11476..12173
+FT                   /number="3"
+FT   exon            12174..12284
+FT                   /number="4"
+FT   intron          12285..12759
+FT                   /number="4"
+FT   exon            12760..12783
+FT                   /number="5"
+FT   intron          12784..13571
+FT                   /number="5"
+FT   exon            13572..13585
+FT                   /number="6"
+FT   UTR             13586..13908
+SQ   Sequence 13908 BP; 3723 A; 2832 C; 3171 G; 4182 T; 0 other;
+     gcatccacag aatcacattt tccagtattg aaagacctga aagatcacgg tgccttcatt        60
+     tcaactgtga gacatgatgt aattttcaca aatctacaac agtaagatat agtgcaacag       120
+     gaccagatta aggtctcctg gtttgcaacc atgtcccctc catctccttt actcctgaac       180
+     acactcactc ctgcaaacag ttctcttgtc aagtgggaaa tgaatgctct tacaaggctc       240
+     aaacttgtga acacatcact gaccagcaca gagctaaaat aattggggct aaaaataccg       300
+     ccccaattaa agtgttttac atgcaactgg ttcaaacctt tcaagtacta aaaacaatcc       360
+     tgtaaagaag gaaattctgt ttcagaagag gaccttcata cagcatctct gaccagcaac       420
+     tgatgatgct attgaactca gatgctgatt cgttctccaa cactagatta cccaatccag       480
+     gagcaaggaa atcagtaact tactccctat aacttggaat gtgggtggag gggttcatag       540
+     ttctccctga gtgagacttg cctgctgctc tggcccctgg tcctgtcctg ttctccagca       600
+     tggtgtgtct gaggctccct ggaggctcct gcatggcagt tctgacagtg acactgatgg       660
+     tgctgagctc cccactggct ttggctgggg acaccagacg taagtgcaca ttgtgggtgc       720
+     tgagctacta tggggtgggg aaaataggga gttttgttaa cattgtgccc aggccatgta       780
+     ccttaagaaa ttgtgacgta tttttcagag attgcccatc tttatcatat ggatcccaaa       840
+     taatttcccc accacaaaag gagcttggct acttgcccac tccatgagac ttgtgtaagg       900
+     ggcctccata caggtcattt ctactcaaat ctccaccaat aaaacctttg catcacatgt       960
+     cctcagggtc tttagaggat ttagaaataa ggatgctaaa ataaattccc catacagcac      1020
+     ttgcctttat tatgttgact tatgtcagac aaaggaggtt ttttctgaaa attttgtgga      1080
+     agtcaaggga atttaaaggg tctctcctaa acgatcctgg gttatgtcac ccacaggacc      1140
+     tttggtgttg gcccctcttc ctcatatgtg aggatggacc cagtggcctc cccattatct      1200
+     actttctttt ctttctgaac tccaatgttt ataaagcctg tacccctgta gtgtatgtag      1260
+     gttgtctgac agaagttata cttagtgctc tttctttctt gtggggaaaa atccctggaa      1320
+     ctgaagctga gatctttagt acttggagtc accttacaga tacagagcat ttatgaggta      1380
+     ttctttggtg cctaaagaac ttaaggcatc ctctgaaaac ctggcccagg ttagtgttta      1440
+     ttatgaatct cttttaacct ttctatactt gtttctccta catctcctaa gtgctccaac      1500
+     tagacatgac agaagagatt taactaacgt agtatgagtt atataaaatt ctatttttgt      1560
+     aagtcaaaaa taatcaaata tcaaaaattt aataatgttc aaactatata ctctgtgtgg      1620
+     ggttaccgag acaatgtgga cattgttcac atctcatagg gctgaaagtc aatgggcaag      1680
+     tcctgggaac tcattgtctt actggggtct tgtcctaaat ttcataggtt cacccatcat      1740
+     gccctcaact ttccttaatt agccatgtct gcttacctct tcctccagtt tctctcttat      1800
+     ttttccccag ctatgttgtt atcatttcca gaaatctcta aagcttgcac agatccttag      1860
+     cactatgaga tccattgaaa gagatagttt ttttcttttt gagatagggc ctggctctgt      1920
+     cacccaggct gtagctcagt ggtgcgatcg aggctcactg caacctctgc ctcccacgct      1980
+     caagtgatcc tccctcctca ggctccagag tagctgggaa tacaggcagg caaccacgcc      2040
+     cagctaattt ttgtaatttt ggtagaaatg agattttgcc atgttgccca ggctggtctt      2100
+     aaactgctgg actcaagcaa tccacctgcc ttggcctccc aacatgctag gattatagat      2160
+     gtgagccact gtgcccaggc aaaaagagat gactctcaat aaaaaaaagt cctttttctt      2220
+     aaatcactgt ttctttatct gtgaattctt cttccaacta gaaggaggag aaagaagttt      2280
+     gcctgtattt ctcaccagga ggagaagggg tctagtgtga catcagaatg aaagagtgct      2340
+     ggagtttgag ccccttcttg ctttccaaga tccccacagt tatcacttcc cataccctgg      2400
+     tttattcatg taaaccacac ttatttttct tagcagctac tgtgtactcg gctccattct      2460
+     aggttcagat cattctattt gattaagaca gagagggtcc cgactctcat ggaagttaca      2520
+     caacaataga ggagacagac actaacccaa taagcattta acaaagaata aaatattaga      2580
+     gagtcatagt gcactgaaga aaagacatca ggtttgtgaa gaagagagac atggattcac      2640
+     ctactttagt tcatatgttt agggagctct acctgagaaa gtgacattca gctgagacaa      2700
+     caaaataagt agacagtcat gaagatctaa tggacgaaag ctccagagag accaaatggg      2760
+     gggaaagccc tggtgtggga aattatgtgg agagagagaa agacggctag aggggctgat      2820
+     gtatagaaag taaggaaatg gagaggcaga agatgaggta ggacacagag agaaagtcag      2880
+     gagcctcatc attataggct ctgatgtcca cggtaaaaaa tttgaatttt attttattta      2940
+     tttatttatt tatttattta ttttatttat ttatttattt atttttttaa gatggagtct      3000
+     cgctttgttg cccaggctgg agtgcagtgg cgtgatctca gctcactgca agctccacct      3060
+     cctgggttca tgccattctc ctgcctcagc ctccctagta gctgggacta caggcacctg      3120
+     ccaccacgcc tggctaattt ttagtatttt tagtagtgag ggcattttgt catgttaacc      3180
+     agggtggtct ccatctcctg acctcgtgat ccacctgcct cagcctccca aagtgctgag      3240
+     actacaggtg tgagccacca cgcctggcct attttttttt tttttgagac ggagtttcgt      3300
+     tcttgttgcc caggctggag tgcaatggtg caatctcggc tcactgcaac cttcgcctcc      3360
+     ctggttcaag tgattctcct gcctcagctt cccaagtatc tgagattaca ggcacccacc      3420
+     accatacctg gctaattttt atttttttgt atttttagta gacatcgggt atcaccatgt      3480
+     tgaccatgct ggtctcgaac tcctgacctc agataatctg tctgccttgg cctcccaaag      3540
+     tgctgggatt acaggcatga gccaccgcgg ccggactgaa ttttatttaa atagatacga      3600
+     gaagctactg tatggttaca aggagagtca atttatattc aatttatttt tattttattt      3660
+     tatttttttg gtgatggggt cttgctctgt tgcccaggct agattgtagt ggcacaatct      3720
+     cggctcactg caacctctgc cttctgggtt caggcgattc tcctgactca gcctccagag      3780
+     tagctgggac cacaggtaca tgccaccaca cctggctaag tttttgtatt ttttagtaga      3840
+     gacaggattt caccatgtta gccaggatgg tctcgatctc ctgatctcgt gatccaccca      3900
+     ccttggcctc ccaaagtgca gggattacag gcctgagcca ctgcgcccgg cctatattca      3960
+     atttttaaaa ctaattctag ctactctgtg gggattggaa tgttggggtt cacaagtggt      4020
+     caggaagact atttaggagc acagcaggga attctccagc gaaaacaggc ttgtggcttc      4080
+     atggagtgca ttagtgataa agacggtgaa aaagataaag tggacagact tggcatgtat      4140
+     ttttccttag cttgttaatg aattactgta aagggggtag aacaatcaag cttattccta      4200
+     aggattttgt tttgacaaat aagtgggtgg tagtgttgtt tattgagata ggaaaaacta      4260
+     tgggaggaaa ttatttgaag tgggtggttg gaaataaaag ttttgtttaa atttgagatg      4320
+     atttattgac atttatgtgg agcaatcaga aggtcaatgg catttaagag actcatggtg      4380
+     aggctagggc ttcaagtatt tatgttggcg gcatcaatac gtgtagtgtg ttaaattcca      4440
+     gggagtggaa gaggatacat agggagatgg attgtgtgga gaaaaaagaa cagggcacag      4500
+     gccagcaaag ggggctgaga aagagcccag ggatgttgga gaaaaatcaa gagaacatga      4560
+     tgcgtgtacg tcaaggaaaa tagatttttt tcaaggagaa gggagaggcc aattgtggtg      4620
+     agtaccacta agcggagggg gaagtgagaa cgtgacagag aagcaagtgc tgggtttggt      4680
+     ggagttgata tttgcagtca gtggagtatc cagggaggaa actggattgg acaatttgaa      4740
+     gagcgagtag aagtgaggat gaggttaaga ttgactgttt tgagtagaga gcttcaggga      4800
+     aggactgcac tctgggttca gggagccagc tggatcaaaa ggaaaaggct aaagaggctg      4860
+     aagagaagca ggaggacctg tgaaccagag atgctcagtc attattagcg aggaaatact      4920
+     agaaagcccc tgtgtgcagt gatgactact catgcagaag gtcacacagc caatatttaa      4980
+     cacagccagt atttcacaca gctaatattt attagtgaca tagaatatac cagttattac      5040
+     tctaggtcat gagaatggag tgataaataa aatgaatccg gtcgccatca gtatatgcca      5100
+     tgtaacattt tgcagtgact gtgtaccagg cctgtgaatt tcagtatgca atttcaataa      5160
+     tgatcctgct gtatctgtgg tgtttaaaaa catatacatc tctggaatct aaaattgaga      5220
+     ggttataagt aaaacccagt attacaaatt gagtgctgga aatcagattg cagtttaaat      5280
+     ctgagcatat agaaagtccc tttcttctat gtcagcagat gccttttgtg tgaggtttag      5340
+     ctggactgca ttattagaca taaaccagtg tttctgccct atgttttcag aatgacaatt      5400
+     ctttatgaaa ctcatagaag aacagaagac aactgcaaaa tcatgatgaa gatagtaatt      5460
+     gctttagaat taaggaatac aaaaaataat gtgagctgta gttataggga tcataaaagt      5520
+     ttaaatggga atgtatttga gtatgtgatc agtgctaaga agagtcatca tttaatttta      5580
+     cacttaacag taatctcgtg aggattacgc tattattaaa tgcatttgat agattacaaa      5640
+     aaggcttatg gttggtaaaa attgacccaa gtagaagaga tcatgttttt attcaggttt      5700
+     tctgattcta gagtttgaga gtttgtccat cattagtgag tagtgactat attgtgtctg      5760
+     aattattgac agaatttctg atattcatat gtaccaggtt gtttcttaga gtggggatag      5820
+     agatgcaagg gctgctagtt ccgatgtatt ggggaaactt tcattcattt tgcatttatc      5880
+     attttaaaag ttctgtatgt ctataatggt catgtgttga agaacacaag gaagtattaa      5940
+     atcactcctt cttctaaggt ttgactagca agttgggcta gagttaccaa ataaaataca      6000
+     tgttcctagt gaaatctgaa tttcagatac aaaaccataa tttattgaaa atccaaattt      6060
+     aactgggcat cctctggttt tatttgccac atctgtcaac cctaagtgtg acacatggac      6120
+     atggattaca gtgctaacca tgcaagccac ggtgacagca acttcacaca tgtttatttt      6180
+     taactttctc tgtaagaaag tgcttagata atttagggat aaaaagatag acattgcttg      6240
+     atccagggtg cacacctctc tgccaccatt tctaaagggc aaagggagat ttctgcaggt      6300
+     cttgctcaca gtctggggag ctgctcattt ttgtaaagtg tctgtatgag aatgtcattt      6360
+     tcttggtttc ctcctttccg aggggacttg actacaaaac caagagttct gcctctggcc      6420
+     aaggctggta atttgatgcc tgctagtatt gttgggagtg ggagactgaa agaaatgagt      6480
+     tagttggggc atttaacggg aataaaatag ctgtggttgt gactcattac tacagataat      6540
+     tagtggacca gtggcagaga aattaagaaa aaagatgatg tgaatgataa atgatatgat      6600
+     tagtgactgc ttggtaaggc aaggaaatca ttaaatcttg gttctcatca agttcatttt      6660
+     ctggaaagat agcactgtat tgggagcaga attctacaaa accttctttt tacataggac      6720
+     caagattttc aacaaatatt tttcaatgca attctcagct gctccataac taatagtagc      6780
+     ttgttcaaca cagatttttt cagatgattc acacctgtgg tacttaccca gggatggttc      6840
+     accacccctc ccttccctct catcatcgtt ggggaacggt gacaatgttt ggaacaattt      6900
+     ttggttgtca caaacagggg tttcttctga tattcaatga gtagaagcca gggacactgc      6960
+     tagagaaccc acaatgttca gaacagcctc tgccatcaac aaggaattat ctggtccaaa      7020
+     atgtcaatag tgctgaggct aagagcactg gttcacactg tgctctttct gaaaattcta      7080
+     gactcacatc tgttatacac tcaccacaca gtttagtctt ttatttttgc ttgtttcatt      7140
+     ataaacaatt agacagttgc ataaattcaa ccactttctt gttgaatcca tttagtcaat      7200
+     gcaagctcaa tattttcata tttatttttt gccttatgca atatttttca acattttcat      7260
+     gagttgtcgg tcatcactat ctctattaac tttcaacaac ttgcccttgt aagtcacaaa      7320
+     tagtgatgct gctgaaatta tttctcacta acatgcctca gatttctgta gtgattctac      7380
+     atttgatatt attcacaatg taaaatgctt ctatttattc atttcgcttt tacccaagga      7440
+     ttatttttaa gttatttttg tcattttcac acttcaaaca taaagacaaa aacatcaaaa      7500
+     atatagtgtt ttacatatgt gcatattttc acacatatat gtatgtatat ttatatgtat      7560
+     tgaaagtaca gaagcacatg tcaccaataa gagctctgag acaccttcga ccacttaccc      7620
+     ttatcagatg agttgtggaa acaagttttt ttaactgaat ttctgagctt tgtggattta      7680
+     gaaatgcaaa ggaaggtttg tggacattca cagggatcat gattttattc tccttaaaac      7740
+     tcttctgtac tttccaattg tccttagtat aaatccaaaa tcctaacacc acccaagagg      7800
+     cttttcaata cctggctcct gtgatttctc cgggctaatc tgttaccctc cttcccctca      7860
+     gcctctctgc tttagtgaac tttctcctag ttttttgaag aagttcatca attcaagctt      7920
+     ttgtacatgg gatttcctaa acctgaaatg tgcctcccgt tttgtccaaa cagacacggg      7980
+     ctccactctg ccccctggct cacacctgct taacctgtca agtcacatct gaaccgtcac      8040
+     tattaagagg gtccttctct ggcaccctaa tgtaattgag atcatcctat tattctctgt      8100
+     tctagaactc cacacttccg acatttctca ttcctgtcta agctcttgtg tgtttggtgt      8160
+     tgggccatca ctttcactgc tctttaagct cccccagcgg agtggagagg tctgttttcc      8220
+     ctcgtttgga ttcctagagg cagcgcagac caggcacaag gtcagcacta aggaagggtt      8280
+     cagaggatga acgcggtggg tgctgtttaa ggaaccggta aacatgtggg atgagagaag      8340
+     gagcagagtg tctttggggt ggaggctccc aggaggaggc ggcgcgggct gcggtgctgg      8400
+     gcggatcctc ctccagctcc tgcttggagg tctccagaac aggctggagg tagggagggg      8460
+     ggtcccaaaa gcctggggat cagacgtggt tttcccgcct ggtcccccag gccccctttc      8520
+     gcctcaggaa gacagaggag gagcccctgg gctgctggtg gtgggcgttg cggcgggggc      8580
+     cggttaaggt tcccagtgcc cgcaccccac ccagggagcc ccggatggcg gcgtcactgt      8640
+     cagtgtcttc tcaggaggcc gcctgtgtga ctggatcgtt cgtgtcccca cagcacgttt      8700
+     cttggagtac tctacgtctg agtgtcattt cttcaatggg acggagcggg tgcggtacct      8760
+     ggacagatac ttccataacc aggaggagaa cgtgcgcttc gacagcgacg tgggggagtt      8820
+     ccgggcggtg acggagctgg ggcggcctga tgccgagtac tggaacagcc agaaggacct      8880
+     cctggagcag aagcggggcc gggtggacaa ctactgcaga cacaactacg gggttgtgga      8940
+     gagcttcaca gtgcagcggc gaggtgagcg cggcgcgggg cggggcctga gtccctgtga      9000
+     gctgggaatc tgagtgtgtg tgtgtgtgtg tgtgtgtgtg tgtgtgtgag agagagagac      9060
+     agagagacag agagagagag cgccatctgt gagcatttag aatcctctct atcctgagca      9120
+     aggagttctg agggcacagg tgtgtgtgta gagtgtggat ttgtctgtgt ctgtgaggct      9180
+     gttgtgggag gggaggcagg agggggctgc ttcttattct tggaggactc tgtggggagg      9240
+     tgacaaggga ggtgggtgcg ggcggctgga gagagaggtg accttgattg tctcgggtcc      9300
+     ttagagatgc agggaaggga aatgtaaggg gtgtgtggtt ggggtgaagg tttaggggag      9360
+     gagagctgag gggtaaggaa ggtttgggat aatgtgagga ggccagttcc agactgtccc      9420
+     tggcacacac ccttcatgta atctctgaaa taaaagtgtg tgctgtttgt ttgtaaaagc      9480
+     attagattaa tttctagggg aattgaggag acctctgagg catctctgaa gcttctttag      9540
+     gtctaaattt cttgctagtt ttttgttttt tattgtgtat atttttacat agtagaaatg      9600
+     actgtgaaac taactttttg aattaaagtt ttaacacagt tactatttta ttataatgct      9660
+     aatagttttc tagtagttac atattattct tttatatata atagttgtga cacaacttac      9720
+     ctcactttcc cctttgttga cctttattat gacattcacc aaaatttgaa aatgtatgtt      9780
+     tctggttaat ttttaattta tatttttttc atttataatt cttttgaatt attttgacct      9840
+     atttattggc cagttttaat aactgctgta agaattccct attgtatttg gtagggaatg      9900
+     gacaatgatc tactgcctaa tatctcgagg gcttagtatt tttctcagtg actttgtggg      9960
+     ttctttgtac tgtgagatta ttaacacttt attgatattt gattcagcat ttgctccagt     10020
+     ttgtggtttg tatgttgatt ttgaaaattc ttttccatgt taagaatttg aacattttta     10080
+     tataataaaa tatgttgcaa aatttttatt aatgatttac aatccatctt aaatctgcca     10140
+     ttttgtggta ttgttgtctc caggtttctc cttacttcta aaaaaaattg catttattga     10200
+     gagtctgcta gtgttaggga ttttcctggg cataagcacc ccaagtgacg agtcccagac     10260
+     actgccttaa tccaaatgtg attctggaaa gaaaaatcat tttacaatga taggcctaat     10320
+     aataattaag cttgtgttgc atgggagatg cattgatcag ctaaatgtaa atataagaac     10380
+     tttcaaaact aaaatgacgt tccttaatcc ttctctctgc tttatgactc atgcttttct     10440
+     gggaaagtaa aaatttggag aatcatttct gtctgtccca ccttcccagg ggcagaacca     10500
+     tttctgtggt gttctaaggt gtgagtgcat ggcggtagta ttcctaaaaa ttcatattcg     10560
+     gtttcgtcat gtacccaact ctgtcccgtt atctatcaac attgttttaa atcatatatt     10620
+     tctgtcaagg tgtacaagga tgataaatag gtgccaagtg gagcacccaa gtgtgatgag     10680
+     ccccctcaca gtggaatgga gtgtgaagct ttatgacctc ataaattgaa ggttatcttc     10740
+     aggcattgtt ttatatattt tacatgcatt aatcctcata taatcccaag aggtaaatta     10800
+     gtataattat ccttcattat aggtgacaaa gttgagacac agaagaatca aactcttaag     10860
+     gcagaccttg gatttgaacc aggcaacctg gctcagatat cagttttaat tactacactc     10920
+     tgtactttca aagatttgta aacactttga caatgcatga caatttcaag ctatgaagaa     10980
+     acaaacacaa tttttcacaa tatctctcaa atctaatagg tcctcactat caagattaag     11040
+     ttccaggctg atgacactgt aaggccacat ggccagctgt gctggaggcc tggtcaaggt     11100
+     cagagcctgg gtttgcagag aagcagacaa acagccaaac aaggagactt actctgtctt     11160
+     catgactcat tccctctacc ttttttctcc tagtccatcc taaggtgact gtgtatcctt     11220
+     caaagaccca gcccctgcag caccataacc tcctggtctg ttctgtgagt ggtttctatc     11280
+     caggcagcat tgaagtcagg tggttccgga atggccagga agagaagact ggggtggtgt     11340
+     ccacaggcct gatccacaat ggagactgga ccttccagac cctggtgatg ctggaaacag     11400
+     ttcctcggag tggagaggtt tacacctgcc aagtggagca cccaagcgtg acaagccctc     11460
+     tcacagtgga atggagtgag cagctttctg acttcataaa tttctcaccc accaagaagg     11520
+     ggactgtgct catccctgag tgtcaggttt ctcctctccg acatcctatt ttcatttgct     11580
+     ccatgttctc atctccatca gcacaggtca ctgggggtag ccctgtaggt gtttctagaa     11640
+     acacctgtac ctcctggaga agcagtctcg cctgccaggc aggagaggct gtccctcttt     11700
+     tgaacctccc catgatgtca caggtcaggg tcacccaccc tccccgggct ccaggcactg     11760
+     cctctgggtc tgagactgag tttctggtgc tgttgatctg agttatttgt tgtgatctgg     11820
+     gaagaggaga agtgtagggg ccttcctgac atgaggggag tccaatctca gctctgcctt     11880
+     ttattagctc tgtcactcta gacaaactac ttagcctcat tgagtctcag gctttctgtg     11940
+     gatcagatgt tgaactcttg ccttacatca aggctgtaat atttgaatga gtttgatgtc     12000
+     tgaaccttgt aactgttcag tgtgatttga aatccttttt ttctccagaa atggctagtt     12060
+     attttagttc ttgtgggtca gacttcttcc ccattttcaa agctctgaat cttagagtct     12120
+     caattaaaga ggttcaattt ggaataaaca ctaaacctgg cttcctctct caggagcacg     12180
+     gtctgaatct gcacagagca agatgctgag tggagtcggg ggctttgtgc tgggcctgct     12240
+     cttccttggg gccgggctgt tcatctactt caggaatcag aaaggtgagg agcctttggt     12300
+     agctggctct ctccataggc ttttctggag gaggaactat ggctttgctg aggttagttc     12360
+     tcagtatatg agtggccctg aataaagcct ttctttcccc aaacggctct aatgtcctgc     12420
+     taatccagaa atcatcagtg catggttact atgtgaaagc ataatagctt gtggcctgca     12480
+     gagacaagag gaaggttaac aagtaggggt cctttggttt gagatcttgg agcagattaa     12540
+     ggaagagcca ctaagactaa tggaattaca ctggatcctg tgacagacac tttacccttc     12600
+     atgggtcaca tggtctgttt ctgctcctct ctgccctggc tggtgtgggt tgtagtgaca     12660
+     gagaactctc cggtgggaga tctggggctg ggacattgtg ttggaagaca gatttgcttc     12720
+     cataaatttt aagtgtatat attttcctct ttttcccagg acactctgga cttcagccaa     12780
+     gaggtaatac cttttaatcc tcttttagaa acagatacgg tttccctagt gagaggtgaa     12840
+     gccagctgga cttctgggtc gggtagggac ttgcagaact ttcctgtctt aggagaggtt     12900
+     tctaaatgca ccaatcagtg ctctgtaaaa acacaccaat tggcactctg tggctagata     12960
+     gatgtttgta aaatggacta atcagcactc tgtaaaatgg agcaatccac actctgtaaa     13020
+     atggaccaat caatgctctt taaaatggac caatcagcag gacatgggcg gggacaaata     13080
+     agggaataca agctggccac cccagccagc agcagcaacc cgctcaggtc gccttccatg     13140
+     ctgtggaagc tttgttcttt tgctcttcac aataaatctt gctgttgctc actcttcggg     13200
+     tctgtgccac ctttaagagc tgtaacactc actgtgaaga ttcgcggctt cattcttgaa     13260
+     gtcagcgaaa ccacgaaccc accggaagga acaaactctg gacacactag aattgatggt     13320
+     agaggtgata aggcatgaga cagaaataat aggaaagact ttggatccaa atttctgatc     13380
+     aggcaattta caccaaaact cctcctctcc acttagaaaa ggcctgtgct ctgtgggact     13440
+     attggctctg ggagactcag gaacttgttt ttcttcttcc tgcagtgctc tcatctgagt     13500
+     ccctgaaaga gaggaaaaga aactgttagt agagtcaggt tgaaaacaac actctcctct     13560
+     gtcttttgca ggattcctga gctgaagtgc agatgacaca ttcaaagaag aactttctgc     13620
+     cccagctttg caggatgaaa agctttccct cctggctgtt attcttccac aagagagggc     13680
+     tttctcagga cctggttgct actggttcag caactgcaga aaatgtcctc ccttgtggct     13740
+     tcctcagctc ctgttcttgg cctgaagccc cacagctttg atggcagtgc ctcatcttca     13800
+     acttttgtgc tcccctttgc ctaaacccta tggcctcctg tgcatctgta ctcaccctgt     13860
+     accacaaaca cattacatta ttaaatgttt ctcaaagatg gagttaaa                  13908
+//
+ID   HLA01028; SV 1; standard; DNA; HUM; 513 BP.
+XX
+AC   HLA01028;
+XX
+SV   HLA01028.1
+XX
+DT   01-MAY-1999 (Rel. 1.03.0, Created, Version 1)
+DT   13-JAN-2000 (Rel. 1.05.0, Last Updated, Version 1)
+XX
+DE   HLA-DRB2*01:01, Human MHC Class II sequence
+XX
+KW   Human MHC; HLA; Class II; HLA-DRB2; Allele; HLA-DRB2*01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-513
+RX   PUBMED; 3032786.
+RA   Rollini P, Mach B, Gorski J;
+RT   "Characterization of an HLA-DR beta pseudogene in the DRw52 supertypic
+RT   group.";
+RL   Immunogenetics 25:336-342(1987).
+XX
+RN   [2]
+RP   1-513
+RX   PUBMED; 1541486.
+RA   Vincek V, Klein D, Figueroa F, Hauptfeld V, Kasahara M, O'hUigin C, Mach
+RA   B, Klein J;
+RT   "The evolutionary origin of the HLA-DR3 haplotype.";
+RL   Immunogenetics 35:263-271(1992).
+XX
+DR   EMBL; M16274; M16274.1.
+DR   EMBL; M16275; M16275.1.
+DR   EMBL; M86691; M86691.1.
+DR   EMBL; M86694; M86694.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..513
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="European"
+FT                   /cell_line="AVL"
+FT   CDS             join(1..104,105..366,367..477,478..501,502..513)
+FT                   /codon_start=1
+FT                   /gene="HLA-DRB2"
+FT                   /allele="HLA-DRB2*01:01"
+FT                   /product="MHC Class II HLA-DRB2*01:01 sequence"
+FT   exon            1..104
+FT                   /number="1"
+FT   exon            105..366
+FT                   /number="3"
+FT   exon            367..477
+FT                   /number="4"
+FT   exon            478..501
+FT                   /number="5"
+FT   exon            502..513
+FT                   /number="6"
+SQ   Sequence 513 BP; 110 A; 135 C; 154 G; 114 T; 0 other;
+     atggtgtgtc tcaggctgcc tggctggagg ctcttgcatg gcacctctga cagtgacact        60
+     gatggtgctg agctccccac tggctttggc tgtgggcacc cgactccaac ctaaggggac       120
+     tatgtatcct gcaaagaccc agcccctgcc tcacagcaac ctcctggtct gctgtgtgag       180
+     tggtttctat ccaggcagca ttgaagtcag gtggttccgg aatggtcagg aagagaaggc       240
+     tgcggtggtc tccataggcc tgatccagaa tggagactgg actttccaga ccctggtgat       300
+     gctggaaaca gttcctcgga gtggaggagc atccaagcat gacgagccct ctcacagtgc       360
+     aatggagagc acggtctgaa tctgcacaga gcaagatgct gagtggagtc gggggcttcg       420
+     tgctgggcct gctcttcctt gggaccgggc tcttcatcta cttcaagaat cagaaaggac       480
+     actctggact tcagccaaaa ggactgcagc tga                                    513
+//
+ID   HLA00932; SV 1; standard; DNA; HUM; 797 BP.
+XX
+AC   HLA00932;
+XX
+SV   HLA00932.1
+XX
+DT   20-APR-1994 (Rel. 1.01.0, Created, Version 1)
+DT   13-JAN-2000 (Rel. 1.05.0, Last Updated, Version 1)
+XX
+DE   HLA-DRB7*01:01:01, Human MHC Class II sequence
+XX
+KW   Human MHC; HLA; Class II; HLA-DRB7; Allele; HLA-DRB7*01:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-797
+RX   PUBMED; 3856276.
+RA   Larhammar D, Servenius B, Rask L, Peterson PA;
+RT   "Characterization of an HLA DR beta pseudogene.";
+RL   Proceedings of the National Academy of Sciences USA 82:1475-1479(1985).
+XX
+RN   [2]
+RP   1-797
+RX   PUBMED; 9098448.
+RA   Day S, Raymond PA, Clay TM, Wood NA, Bidwell JL;
+RT   "DR7-Dw17 and DR7-DwDB1 haplotypes contain different alleles of the
+RT   HLA-DRB7 pseudogene.";
+RL   European Journal of Immunogenetics 21:383-386(1994).
+XX
+DR   EMBL; K02772; K02772.1.
+DR   EMBL; K02773; K02773.1.
+DR   EMBL; K02774; K02774.1.
+DR   EMBL; L31617; L31617.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..797
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="European"
+FT                   /cell_line="BH"
+FT                   /cell_line="BOLETH"
+FT   CDS             join(1..100,101..364,365..648,649..759,760..783,784..797)
+FT                   /codon_start=1
+FT                   /gene="HLA-DRB7"
+FT                   /allele="HLA-DRB7*01:01:01"
+FT                   /product="MHC Class II HLA-DRB7*01:01:01 sequence"
+FT   exon            1..100
+FT                   /number="1"
+FT   exon            101..364
+FT                   /number="2"
+FT   exon            365..648
+FT                   /number="3"
+FT   exon            649..759
+FT                   /number="4"
+FT   exon            760..783
+FT                   /number="5"
+FT   exon            784..797
+FT                   /number="6"
+SQ   Sequence 797 BP; 188 A; 196 C; 244 G; 169 T; 0 other;
+     atggtgtgtc tgaagccccc tggaggctcc tgcatggcag ctctgacagt gacactgatg        60
+     gtgctgagct ccccactggc tttggctggg gacacccgac cacgtttctt ggagcaggct       120
+     aagtctgagt gtcatttctt caatgggacg gagcggtacc tgtaaagata cttctataac       180
+     caagaggagt acgtgcgctt caacagcgac atgggggagt tccgggcggt gactgagctg       240
+     gggcggcctg acgctgagta ctggaacagc cagaaggaca tcctggagca gaagcgggcc       300
+     gaagtggaca actaatgcag acacaactat ggggttgtgg agagattcac agtgcagcgg       360
+     cgaatccaac ctaaggtgac tgtgtatcct tcaaaagacc agcccctgca gcaccacaac       420
+     ctcctggtct gctctgtgag tggtttctat ccaggcagca ttgaagtcag gtggttccag       480
+     aatggccagg aagagaaggc tggggtggtg tccacaggcc tgatccagaa tggagactgg       540
+     accttccaga ccctggtgat gctggaaaca gttcctcaga atgcagaggt ttacacctgt       600
+     caactggagc acccaagcat gatgagcctt ctcatgcagt ggaatggaga gcatggtctg       660
+     aatctgcaca gagcaagatg ctgagtggag tcgggggctt cgtgctgggc ctgctcttcc       720
+     ttggggccgg gctgttcatc tacttcagga atcagaaagg acactctgga cttcaaccaa       780
+     caggactcct gagctga                                                      797
+//
+ID   HLA00933; SV 1; standard; DNA; HUM; 214 BP.
+XX
+AC   HLA00933;
+XX
+SV   HLA00933.1
+XX
+DT   20-APR-1994 (Rel. 1.01.0, Created, Version 1)
+DT   13-JAN-2000 (Rel. 1.05.0, Last Updated, Version 1)
+XX
+DE   HLA-DRB7*01:01:02, Human MHC Class II sequence (partial)
+XX
+KW   Human MHC; HLA; Class II; HLA-DRB7; Allele; HLA-DRB7*01:01:02;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-214
+RX   PUBMED; 9098448.
+RA   Day S, Raymond PA, Clay TM, Wood NA, Bidwell JL;
+RT   "DR7-Dw17 and DR7-DwDB1 haplotypes contain different alleles of the
+RT   HLA-DRB7 pseudogene.";
+RL   European Journal of Immunogenetics 21:383-386(1994).
+XX
+DR   EMBL; L31618; L31618.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..214
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="European"
+FT                   /cell_line="PITOUT"
+FT   CDS             <1..214
+FT                   /codon_start=2
+FT                   /partial
+FT                   /gene="HLA-DRB7"
+FT                   /allele="HLA-DRB7*01:01:02"
+FT                   /product="MHC Class II HLA-DRB7*01:01:02 sequence"
+FT   exon            1..214
+FT                   /number="2"
+FT                   /partial
+SQ   Sequence 214 BP; 54 A; 45 C; 71 G; 44 T; 0 other;
+     tttcttggag caggctaagt ctgagtgtca tttcttcaat gggacggagc ggtacctgta        60
+     aagatatttc tataaccaag aggagtacgt gcgcttcaac agcgacatgg gggagttccg       120
+     ggcggtgact gagctggggc ggcctgacgc tgagtactgg aacagccaga aggacatcct       180
+     ggagcagaag cgggccgaag tggacaacta atgc                                   214
+//
+ID   HLA00646; SV 3; standard; DNA; HUM; 7102 BP.
+XX
+AC   HLA00646;
+XX
+SV   HLA00646.3
+XX
+DT   01-AUG-1989 (Rel. 1.00.0, Created, Version 1)
+DT   08-APR-2011 (Rel. 3.04.0, Last Updated, Version 3)
+XX
+DE   HLA-DQB1*06:02:01:01, Human MHC Class II sequence
+XX
+KW   Human MHC; HLA; Class II; HLA-DQB1; Allele; HLA-DQB1*06:02:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-7102
+RX   PUBMED; 3309680.
+RA   Todd JA, Bell JI, McDevitt HO;
+RT   "HLA-DQ beta gene contributes to susceptibility and resistance to
+RT   insulin-dependent diabetes mellitus.";
+RL   Nature 329:599-604(1987).
+XX
+RN   [2]
+RP   1-7102
+RX   PUBMED; 2886427.
+RA   Lee BS, Bell JI, Rust NA, McDevitt HO;
+RT   "Structural and functional variability among DQ beta alleles of DR2
+RT   subtypes.";
+RL   Immunogenetics 26:85-91(1987).
+XX
+RN   [3]
+RP   1-7102
+RX   PUBMED; 3259543.
+RA   Lock CB, So AK, Welsh KI, Parkes JD, Trowsdale J;
+RT   "MHC class II sequences of an HLA-DR2 narcoleptic.";
+RL   Immunogenetics 27:449-455(1988).
+XX
+RN   [4]
+RP   1-7102
+RX   PUBMED; 2892884.
+RA   Hurley CK, Gregersen P, Steiner N, Bell J, Hartzman R, Nepom G, Silver J,
+RA   Johnson AH;
+RT   "Polymorphism of the HLA-D region in American blacks. A DR3 haplotype
+RT   generated by recombination.";
+RL   Journal of Immunology 140:885-892(1988).
+XX
+RN   [5]
+RP   1-7102
+RX   PUBMED; 2925231.
+RA   Hiraiwa A, Seyfried CE, Nepom GT, Milner EC;
+RT   "Sequence analysis of HLA class II domains: characterization of the DQw3
+RT   family of DQB genes.";
+RL   Immunogenetics 29:186-190(1989).
+XX
+RN   [6]
+RP   1-7102
+RX   PUBMED; 2318676.
+RA   Wu SK, Lu D, Madden M, Liu CP, Miyokawa N, Bach FH, Saunders TL;
+RT   "Full-length DQ beta cDNA sequences of HLA-DR2/DQw1 subtypes: genetic
+RT   interactions between two DQ beta loci generate human class II HLA
+RT   diversity.";
+RL   Human Immunology 27:305-322(1990).
+XX
+RN   [7]
+RP   1-7102
+RX   PUBMED; 2010218.
+RA   Bugawan TL, Erlich HA;
+RT   "Rapid typing of HLA-DQB1 DNA polymorphism using nonradioactive
+RT   oligonucleotide probes and amplified DNA.";
+RL   Immunogenetics 33:163-170(1991).
+XX
+RN   [8]
+RP   1-7102
+RX   PUBMED; 8929711.
+RA   Yasunaga S, Kimura A, Hamaguchi K, Ronningen KS, Sasazuki T;
+RT   "Different contribution of HLA-DR and -DQ genes in susceptibility and
+RT   resistance to insulin-dependent diabetes mellitus (IDDM).";
+RL   Tissue Antigens 47:37-48(1996).
+XX
+RN   [9]
+RP   1-7102
+RX   PUBMED; 15140828.
+RA   Stewart CA, Horton R, Allcock RJ, Ashurst JL, Atrazhev AM, Coggill P,
+RA   Dunham I, Forbes S, Halls K, Howson JM, Humphray SJ, Hunt S, Mungall AJ,
+RA   Osoegawa K, Palmer S, Roberts AN, Rogers J, Sims S, Wang Y, Wilming LG,
+RA   Elliott JF, de Jong PJ, Sawcer S, Todd JA, Trowsdale J, Beck S;
+RT   "Complete MHC haplotype sequencing for common disease gene mapping.";
+RL   Genome Research 14:1176-1187(2004).
+XX
+RN   [10]
+RP   1-7102
+RX   PUBMED; 16140993.
+RA   Raymond CK, Kas A, Paddock M, Qiu R, Zhou Y, Subramanian S, Chang J,
+RA   Palmieri A, Haugen E, Kaul R, Olson MV;
+RT   "Ancient haplotypes of the HLA Class II region.";
+RL   Genome Research 15:1250-1257(2005).
+XX
+RN   [11]
+RP   1-7102
+RX   PUBMED; 35094503.
+RA   Turner TR, Hayward DR, Gymer AW, Barker DJ, Leen G, Cambridge CA,
+RA   Macpherson HL, Georgiou X, Cooper MA, Robinson J, Mayor NP, Marsh SGE;
+RT   "Widespread non-coding polymorphism in HLA class II genes of International
+RT   HLA and Immunogenetics Workshop cell lines.";
+RL   HLA 99:328-356(2022).
+XX
+DR   EMBL; AL662789; AL662789.11.
+DR   EMBL; AY663395; AY663395.1.
+DR   EMBL; AY663406; AY663406.1.
+DR   EMBL; AY663411; AY663411.1.
+DR   EMBL; L34105; L34105.1.
+DR   EMBL; LT963658; LT963658.1.
+DR   EMBL; LT963662; LT963662.1.
+DR   EMBL; M20432; M20432.1.
+DR   EMBL; M25327; M25327.1.
+DR   EMBL; M65048; M65048.1.
+DR   EMBL; OZ413466; OZ413466.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..7102
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="African descent, African or African Descent,
+FT                   European, Greater Middle Eastern, Hispanic or Latin
+FT                   American, Undefined"
+FT                   /cell_line="2041"
+FT                   /cell_line="AMAI"
+FT                   /cell_line="CaAr"
+FT                   /cell_line="CjAr"
+FT                   /cell_line="DO208915"
+FT                   /cell_line="DOP-ND"
+FT                   /cell_line="EA"
+FT                   /cell_line="ELON"
+FT                   /cell_line="HO104"
+FT                   /cell_line="KPE"
+FT                   /cell_line="LD2B"
+FT                   /cell_line="MGAR"
+FT                   /cell_line="NA10923"
+FT                   /cell_line="NA14660"
+FT                   /cell_line="NA14663"
+FT                   /cell_line="PGF"
+FT                   /cell_line="ROF-NL"
+FT                   /cell_line="SCHU"
+FT                   /cell_line="VYT"
+FT                   /cell_line="WT8"
+FT   CDS             join(526..634,2066..2335,4885..5166,5676..5786,6884..6897)
+FT                   /codon_start=1
+FT                   /gene="HLA-DQB1"
+FT                   /allele="HLA-DQB1*06:02:01:01"
+FT                   /product="MHC Class II HLA-DQB1*06:02:01:01 sequence"
+FT                   /translation="MSWKKALRIPGDLRVATVTLMLAMLSSLLAEGRDSPEDFVFQFKG
+FT                   MCYFTNGTERVRLVTRYIYNREEYARFDSDVGVYRAVTPQGRPDAEYWNSQKEVLEGTR
+FT                   AELDTVCRHNYEVAFRGILQRRVEPTVTISPSRTEALNHHNLLVCSVTDFYPGQIKVRW
+FT                   FRNDQEETAGVVSTPLIRNGDWTFQILVMLEMTPQRGDVYTCHVEHPSLQSPITVEWRA
+FT                   QSESAQSKMLSGVGGFVLGLIFLGLGLIIRQRSQKGLLH"
+FT   UTR             1..525
+FT   exon            526..634
+FT                   /number="1"
+FT   intron          635..2065
+FT                   /number="1"
+FT   exon            2066..2335
+FT                   /number="2"
+FT   intron          2336..4884
+FT                   /number="2"
+FT   exon            4885..5166
+FT                   /number="3"
+FT   intron          5167..5675
+FT                   /number="3"
+FT   exon            5676..5786
+FT                   /number="4"
+FT   intron          5787..6250
+FT                   /number="4"
+FT   exon            6251..6274
+FT                   /number="5"
+FT                   /pseudo
+FT   intron          6275..6883
+FT                   /number="5"
+FT   exon            6884..6897
+FT                   /number="6"
+FT   UTR             6898..7102
+SQ   Sequence 7102 BP; 1801 A; 1641 C; 1704 G; 1956 T; 0 other;
+     ttctaagaac tttgctcttc tccccaggac ttaaggctct tcagcgtgtc taagacaaca        60
+     gcagtaaaaa tttctgtgac agcaattttc tctcccctga aatatgatcc ccacctaatt       120
+     tgctttatta aaaatcccaa gtataataac aactggtttt taacaatatt acagagatgt       180
+     ttactgttga atcgcatttt tttcttttgc ctctcaaaat ccccgaggca ttcgttcttc       240
+     agctcttcta taatcgagag gaaattttca cctcagatgt tcatccagta caatttgaag       300
+     acgtcacagt gccaggcact ggattgagaa ccttcacaaa aaaaatgtct gcccagagac       360
+     agatgaggtc cttcagctcc agtgctgatt ggttcttttc cgagggacca tccaatcctg       420
+     ccactcacgg aaacatccac aggtttttat tctttctgcc aggtacatca gatccatcag       480
+     gtccgagctg tgttgactac cactgctttt cccttcgtct cagttatgtc ttggaagaag       540
+     gctttgcgga tccccggaga ccttcgggta gcaactgtca ccttgatgct ggcgatgctg       600
+     agctccctac tggctgaggg cagagactct cccggtaagt gcagggcagc tgctctccag       660
+     agccgccact ctgggaacag gctctccttg ggctggggta tgggggatgg tgatctctat       720
+     gatcttggac acaatctttc atcaacattt cctctctctt gggaaagaaa gctatgttgc       780
+     attcccattt atcttttagt gatgagatga ggacaatcca atccccatcc tacaggctta       840
+     agcctggaag aggaggagag aggagagaaa gaggagataa agtgtacatt tactaccagc       900
+     gataggacaa agtgagcatg gggttatttt tgaagatatg aatttctcca aagacacagc       960
+     aggatttgtc atttaggcgt gccccaagac tgcctggact taggattatg agatcctgca      1020
+     ttggaaaatg tgaggcagca atggtgtctg tagtctctgt atttgaggaa aatttgtctc      1080
+     tattcctgac cgagtggagc atttgtggag gcaaaatctt ggtgctgagg gaagctgact      1140
+     ggctgaccac agagagggag tcttcgggtt tcactgattt atgggcaaat ggtgacttga      1200
+     gtgggattca gagacccgag ttaatggtgg actgaattta gtaggaagga ggatgtaaag      1260
+     aagggaaata acacatattg tgaaaccact cacttcagac agaacaatac tttatataac      1320
+     ttctctctca ctccttctaa catcctgtgt gtagatatca tgattttctt ttacacaatt      1380
+     atacttgtga tatggatatt ctgttacata acctgcccaa actggtgact gccacagttt      1440
+     aattggaatc tagtttatca aattcaaaag cttgtgctct ttccatgaat aaatgtctct      1500
+     atctaggact cagaggtgta ggtcctttcc aacatagaag ggagtgaacc tcaacgggac      1560
+     ttgggagggt aaatctaggc atgggaagga aggtatttta cccagggacc aagagaatac      1620
+     gcgtgtcaga acgaggccag gcttaattcc tggacctatc tcgtcattcc gttgaactct      1680
+     cagatttatg tggataactt tatctctgag gtatccagga gcttcatgaa aaatgggatt      1740
+     tcatgcgaga acgccctgat ccctctaagt gcagaggtgc atgtaaaatc agcccgactg      1800
+     cctcttcgct gggttcacag gctcaggcag ggacagggct ttcctccctt tcctggatgt      1860
+     aggaaggcag attccagaag cccgcaaaga aggcgggcag agctgggcag agccgccggg      1920
+     aggatcccag gtctggagcg ccaggcacgg gcgggcggga actggaggtc gcgcgggcgg      1980
+     ttccacagct ccaggccggg tcagggcggc ggctgcgggg gcggccgggc tggggcctga      2040
+     ctgaccggcc ggtgattccc cgcagaggat ttcgtgttcc agtttaaggg catgtgctac      2100
+     ttcaccaacg ggacggagcg cgtgcgtctt gtgaccagat acatctataa ccgagaggag      2160
+     tacgcgcgct tcgacagcga cgtgggggtg taccgcgcgg tgacgccgca ggggcggcct      2220
+     gatgccgagt actggaacag ccagaaggaa gtcctggagg ggacccgggc ggagttggac      2280
+     acggtgtgca gacacaacta cgaggtggcg ttccgcggga tcttgcagag gagaggtgag      2340
+     cgtcgtcgcc cctccgtgag gcccaccctt ggccgagacc ccgagtttct gtgccgggag      2400
+     gggcgatggg ggcgaggtct ctgaaatctg agcccagttc attccacccc aggggaaagg      2460
+     aggcggcggc ggggtggtgg gggcaggtgc atcggagggg cggggaccta gggcagagca      2520
+     gggggacaag cagagttggc caggctgcct agtgtccccc ccagcctccc cgtccgtcgg      2580
+     cctcgtcctc cgctctgcac gtttctcgcc tcgtgcctta tgtgtttgcc tcctcgtacc      2640
+     ttaccttcgc taagcagttc tctctgcccc cagtgcccac cctcttcccc tgcccgccgg      2700
+     cctcgctagc actgccccac ccagcaaggc ccacgtgcgc agcttgcgcc gcaggaagct      2760
+     tcaggcttgg cctggtggag ttagggctgc cccacagctg cgcgcagggc atccagcaat      2820
+     tacagttgcg aaataagata ttttgacttt ttggcttcaa atcattattc atcgtaattc      2880
+     tgttttctta aatggctacc actaatggcg gagatctttg aggcgagaga ctgtttaatt      2940
+     attgcatgcc tggtacctga cacattgact ggtatgtggt gtgagctcaa tgatcttctg      3000
+     ttaaattcat gaataaatgt actcagctgc caatccagtt aggttcaaga aaaaaacaga      3060
+     ggcttacaaa tgaactttat caattatttt ctaacatttt gcttaatgct ttcaagtaaa      3120
+     ctcttactga cttggatctt aatagaattt gtgaatacaa agtctgagga aaatgtgttt      3180
+     gctaaaaata aaaacaatgc ttgaatgatg ttgtaaggca gagttttaat ttcttagaaa      3240
+     agctgaacaa atagcactat gcaaagatca gaagtttggg aataaatagg ttgaagctat      3300
+     taaattattg gataaaaata gtttcaggtt gcttttggcc taggttatcc cctccccccc      3360
+     atcactatcc acttcaggaa taaacattct gaaagtcaat tttacccatt caggaagcac      3420
+     ttatttctag acagttgcct tatcaaatac catctatgtt atgtcattta atctcacagc      3480
+     tacctgtgca ttagagatta gcatcaccac tttatatatc ctaatattgg tacatgataa      3540
+     acactttaag taatcagccc acaattactc accaagatct taagcctccc aaagtacaca      3600
+     acattcttat gttcctcact acacatatgt agagtctaag ggatgtaagg ccttgttaaa      3660
+     gccagttttg accagaagca gcaatgagtc tattcctgtt tgttctgtgt gttaatgcgg      3720
+     cattgaaaat tcatgattaa tcaatcccta gtctgacccc ggtgttatct atgcaggttc      3780
+     acaaaacttt tagtttgctt tacactccct tgccttcttt tgactcacat cctaatgcca      3840
+     gcaagtactt atatttttgc tatttcagtt ttatttccat aaaatttatt ttatcatctt      3900
+     ttctcataaa tttgtgccct ctatttttac tcccagtctg ttgaagatga acaaatctta      3960
+     taaggccaca tagctgactc tgatttcagt tggcctccag gaaggagaac ctaaagaaaa      4020
+     gttcaagtcc aagcagaaac catgattcct tccggatgat ggctcaagag tgccatttaa      4080
+     ttggggtgcc acctgctgac ctcagcaaat cccagttata tgtatatgtt cacattacag      4140
+     gctcattagc ccaggccgac ctctgcacgg atctcagaat attttctgtg gagaacatac      4200
+     acgataatgt ctgatttcag aacaagaaag taattgtcaa tagcaaggaa atggagtagg      4260
+     gtagacagct agtaattaaa ctcacttgtg cgttaaaaag aaattaagga aaaaaagaaa      4320
+     atgagagaac atattactaa ataaagaaag cacacattaa atatttgcta tagtttcaca      4380
+     ctaagagaat aaaggaaatg tgataaagtg gcctaaaagg aaaggatgag atgtgtaaaa      4440
+     gaggcgggga aagatgtgtc atttttttta ctatgagcag caatctgaga agataaagga      4500
+     attgagttgt ggacaaacat gatgtttgat caagggttat ttgttttgaa ggcctgccta      4560
+     cttttttttc aaatattaca aacttttgaa ataacattct actttttttt caaatattac      4620
+     aaacttttga aataacattc tttttgtttt ttgctgtctg ttactagatt gcacattcta      4680
+     taaatgcagg gaccatagta tgttatttat ctttgaattc tcagtgattg tcaaatttat      4740
+     atttgttgaa tgaaccttaa tccaagactt cgactccagg tatctttcca ctctggtcca      4800
+     aggagggatc cttcctcatg gtagacgtgg tgtgtgttct cacatctcac tcctatgtct      4860
+     tttcctgtct gttactgccc tcagtggagc ccacagtgac catctcccca tccaggacag      4920
+     aggccctcaa ccaccacaac ctgctggtct gctcggtgac agatttctat ccaggccaga      4980
+     tcaaagtccg gtggtttcgg aatgatcagg aggagacagc cggcgttgtg tccacccccc      5040
+     ttattaggaa tggtgactgg actttccaga tcctggtgat gctggaaatg actccccagc      5100
+     gtggagatgt ctacacctgc cacgtggagc accccagcct ccagagcccc atcaccgtgg      5160
+     agtggcgtaa ggggatattg agtttctgtt actatgggcc cacaagacaa agagctcctt      5220
+     ctgacccatt ccttcccatc tcttatccct gatgtcacta ctgagctggg aatcacagga      5280
+     gactagagca cctcttgctc catggcaagt gcatcagaag aatcctggtc tcatcacctt      5340
+     tccagatgct agggaaatta ctctacatac tgttgctctg aatcccagtc ctgatagctc      5400
+     tgagggactg attcttaggg ctggtgactg ggatcttagg gtctaaggtt atggatgagt      5460
+     tcttgaagag cagagatttg cttccccact ctctcaccta ttcactgtat ccaaggacct      5520
+     attggctggt ctttcccctc cttaggggtg gtctgaatgg agaactaggt tcctttgatg      5580
+     ccttcacctt ctgcacctca gactggactt caactcctca gcagggatgc tatggggtgt      5640
+     ggggacaaac acagacactc agttctgctc tttaggggct cagtctgaat ctgcccagag      5700
+     caagatgctg agtggcgttg gaggcttcgt gctggggctg atcttccttg ggctgggcct      5760
+     tatcatccgt caaaggagtc agaaaggtga ggaaccccag gggaaaaggg gaagatgggc      5820
+     tgtgacccag accctctgtt cagagtggtc ctgtctgtag attagctctt tcctcctgac      5880
+     cctgagaaga agtgcgagga gacaggacaa gatgggagga ggcattggaa tctgatttta      5940
+     ctggttgaaa ggtagcgctg tcacagagct gactgataga gcttattcca gggcatcctt      6000
+     accattcatc attgtctcac tggctccttt ccaaaagctt cctccattaa gagggtcaga      6060
+     gcctcagctt cctttctttc tagtgacaat ttcctttgtt ttaggggatt ttaaattagg      6120
+     gtgctgaagg cctggaagaa catgggtggg aagagaatgt aactctaagt catgtgtgtc      6180
+     attttccttt ggggtgagag agtggctgtt tgtgtaatga gacctttctc tgcataactt      6240
+     ccttttgtaa gacctcaagg gcctccacca gcaggtaata tttcagccat gatccagtgt      6300
+     ggggaggcac aggtataaga gggaagagca tgagctgagt gtacctgacc acagtggtcc      6360
+     atgttcatgg cctatttgct gctatgagga tcaagactta ggggagaagt ttgccagttt      6420
+     ctaggaatct ccagacattg ttccccagaa ccaagcctta actttggtgg catcttcttg      6480
+     tgaaatgtgg agccagaacc acagcttaaa tgttagacac taggatgatg cccactttgt      6540
+     gccacatgat ggtggctact gcctgtaagc attttccagt gactgaaaga ggctgctagt      6600
+     ggtcgggaag agatatcatc caatttccta aaaagactga acccttcata ttccccagaa      6660
+     gaataacagc tgttccccac ctcccacaca tctgcatcaa gctgaagttc tgtgtcctca      6720
+     tgagctgatt tcacctttgc acagatcttg ggggaggtga tgacaataca ccctggacct      6780
+     caactttctc tgtctgaagc tgcagggggc ccctgaaggg tgggggagat ggcaggccca      6840
+     ccaggatacc ctgtgctgat caatgctctt ctctcttctc cagggcttct gcactgactc      6900
+     ctgagactat tttaactagg attggttatc actcttctgt gatgcctgct tatgcctgcc      6960
+     cagaattccc agctgcctgt gtcagcttgt ccccctgaga tcaaagtcct acagtggctg      7020
+     tcacgcagcc accaggtcat ctcctttcat ccccacccca aggcgctggc tgtgactctg      7080
+     cttcctgcac tgacccagag cc                                               7102
+//
+ID   HLA00622; SV 2; standard; DNA; HUM; 7480 BP.
+XX
+AC   HLA00622;
+XX
+SV   HLA00622.2
+XX
+DT   01-AUG-1989 (Rel. 1.00.0, Created, Version 1)
+DT   08-APR-2011 (Rel. 3.04.0, Last Updated, Version 2)
+XX
+DE   HLA-DQB1*02:01:01:01, Human MHC Class II sequence
+XX
+KW   Human MHC; HLA; Class II; HLA-DQB1; Allele; HLA-DQB1*02:01:01:01;
+XX
+OS   Homo Sapiens (human)
+OC   Eukaryota; Metazoa; Chordata; Vertebrata; Mammalia; Eutheria; Primates;
+OC   Catarrhini; Hominidae; Homo.
+XX
+CC   --------------------------------------------------------------------------
+CC   IPD-IMGT/HLA Release Version 3.64.0
+CC   --------------------------------------------------------------------------
+CC   Copyrighted by the IPD-IMGT/HLA Database, Distributed under the Creative
+CC   Commons Attribution-NoDerivs License, see;
+CC   http://www.ebi.ac.uk/ipd/imgt/hla/licence/ for further details.
+CC   --------------------------------------------------------------------------
+CC   The sequence below is the official allele sequence as approved by the
+CC   WHO Nomenclature Committee for Factors of the HLA System.
+CC   Any cross references may differ from the sequence shown below.
+CC   --------------------------------------------------------------------------
+XX
+RN   [1]
+RP   1-7480
+RX   PUBMED; 6206493.
+RA   Boss JM, Strominger JL;
+RT   "Cloning and sequence analysis of the human major histocompatibility
+RT   complex gene DC-3 beta.";
+RL   Proceedings of the National Academy of Sciences USA 81:5199-5203(1984).
+XX
+RN   [2]
+RP   1-7480
+RX   PUBMED; 3309680.
+RA   Todd JA, Bell JI, McDevitt HO;
+RT   "HLA-DQ beta gene contributes to susceptibility and resistance to
+RT   insulin-dependent diabetes mellitus.";
+RL   Nature 329:599-604(1987).
+XX
+RN   [3]
+RP   1-7480
+RX   PUBMED; 2842756.
+RA   Horn GT, Bugawan TL, Long CM, Erlich HA;
+RT   "Allelic sequence variation of the HLA-DQ loci: relationship to serology
+RT   and to insulin-dependent diabetes susceptibility.";
+RL   Proceedings of the National Academy of Sciences USA 85:6012-6016(1988).
+XX
+RN   [4]
+RP   1-7480
+RX   PUBMED; 3372263.
+RA   Horn GT, Bugawan TL, Long CM, Manos MM, Erlich HA;
+RT   "Sequence analysis of HLA class II genes from insulin-dependent diabetic
+RT   individuals.";
+RL   Human Immunology 21:249-263(1988).
+XX
+RN   [5]
+RP   1-7480
+RX   PUBMED; 8138424.
+RA   Hall MA, Lanchbury JS, Lee JS, Welsh KI, Ciclitira PJ;
+RT   "HLA-DQ2 second-domain polymorphisms may explain increased
+RT   trans-associated risk in celiac disease and dermatitis herpetiformis.";
+RL   Human Immunology 38:284-292(1993).
+XX
+RN   [6]
+RP   1-7480
+RX   PUBMED; 8929711.
+RA   Yasunaga S, Kimura A, Hamaguchi K, Ronningen KS, Sasazuki T;
+RT   "Different contribution of HLA-DR and -DQ genes in susceptibility and
+RT   resistance to insulin-dependent diabetes mellitus (IDDM).";
+RL   Tissue Antigens 47:37-48(1996).
+XX
+RN   [7]
+RP   1-7480
+RX   PUBMED; 16140993.
+RA   Raymond CK, Kas A, Paddock M, Qiu R, Zhou Y, Subramanian S, Chang J,
+RA   Palmieri A, Haugen E, Kaul R, Olson MV;
+RT   "Ancient haplotypes of the HLA Class II region.";
+RL   Genome Research 15:1250-1257(2005).
+XX
+RN   [8]
+RP   1-7480
+RX   PUBMED; 16440057.
+RA   Traherne JA, Horton R, Roberts AN, Miretti MM, Hurles ME, Stewart CA,
+RA   Ashurst JL, Atrazhev AM, Coggill P, Palmer S, Almeida J, Sims S, Wilming
+RA   LG, Rogers J, de Jong PJ, Carrington M, Elliott JF, Sawcer S, Todd JA,
+RA   Trowsdale J, Beck S;
+RT   "Genetic analysis of completely sequenced disease-associated MHC
+RT   haplotypes identifies shuffling of segments in recent human history.";
+RL   PLoS Genetics 2:81-92(2006).
+XX
+DR   EMBL; AL731683; AL731683.12.
+DR   EMBL; AL935026; AL935026.4.
+DR   EMBL; AY663399; AY663399.1.
+DR   EMBL; AY663407; AY663407.1.
+DR   EMBL; K02405; K02405.1.
+DR   EMBL; L40179; L40179.1.
+DR   EMBL; M65043; M65043.1.
+DR   EMBL; M81140; M81140.1.
+DR   EMBL; MG930690; MG930690.1.
+DR   EMBL; OZ413465; OZ413465.1.
+XX
+FH   Key             Location/Qualifiers
+FH
+FT   source          1..7480
+FT                   /organism="Homo sapiens"
+FT                   /mol_type="genomic DNA"
+FT                   /db_xref="taxon:9606"
+FT                   /ethnic="European, Undefined"
+FT                   /cell_line="BEI"
+FT                   /cell_line="C.M.L."
+FT                   /cell_line="CMCC"
+FT                   /cell_line="COX"
+FT                   /cell_line="CTM1953541"
+FT                   /cell_line="DM24"
+FT                   /cell_line="DM28"
+FT                   /cell_line="DM29"
+FT                   /cell_line="FH15"
+FT                   /cell_line="HG00015622"
+FT                   /cell_line="JNP"
+FT                   /cell_line="LAM"
+FT                   /cell_line="LCL721"
+FT                   /cell_line="LD"
+FT                   /cell_line="MOR"
+FT                   /cell_line="MZ"
+FT                   /cell_line="NA01018"
+FT                   /cell_line="NA10923"
+FT                   /cell_line="PF04015"
+FT                   /cell_line="QBL"
+FT                   /cell_line="STEINLIN"
+FT                   /cell_line="VAVY"
+FT                   /cell_line="VW"
+FT                   /cell_line="WT49"
+FT   CDS             join(526..634,2073..2342,5232..5513,6030..6140,7261..7274)
+FT                   /codon_start=1
+FT                   /gene="HLA-DQB1"
+FT                   /allele="HLA-DQB1*02:01:01:01"
+FT                   /product="MHC Class II HLA-DQB1*02:01:01:01 sequence"
+FT                   /translation="MSWKKALRIPGGLRAATVTLMLSMLSTPVAEGRDSPEDFVYQFKG
+FT                   MCYFTNGTERVRLVSRSIYNREEIVRFDSDVGEFRAVTLLGLPAAEYWNSQKDILERKR
+FT                   AAVDRVCRHNYQLELRTTLQRRVEPTVTISPSRTEALNHHNLLVCSVTDFYPAQIKVRW
+FT                   FRNDQEETAGVVSTPLIRNGDWTFQILVMLEMTPQRGDVYTCHVEHPSLQSPITVEWRA
+FT                   QSESAQSKMLSGIGGFVLGLIFLGLGLIIHHRSQKGLLH"
+FT   UTR             1..525
+FT   exon            526..634
+FT                   /number="1"
+FT   intron          635..2072
+FT                   /number="1"
+FT   exon            2073..2342
+FT                   /number="2"
+FT   intron          2343..5231
+FT                   /number="2"
+FT   exon            5232..5513
+FT                   /number="3"
+FT   intron          5514..6029
+FT                   /number="3"
+FT   exon            6030..6140
+FT                   /number="4"
+FT   intron          6141..6625
+FT                   /number="4"
+FT   exon            6626..6649
+FT                   /number="5"
+FT                   /pseudo
+FT   intron          6650..7260
+FT                   /number="5"
+FT   exon            7261..7274
+FT                   /number="6"
+FT   UTR             7275..7480
+SQ   Sequence 7480 BP; 1896 A; 1741 C; 1779 G; 2064 T; 0 other;
+     ttctaagaac tttgctcttt tcaccaaaac ttaaggctcc tcagggtgtg tctaagacaa        60
+     cagcagtaaa aatgtctatg acagcaattt tctctcccct gaaatatgat ccccacttaa       120
+     tttgccctat tgaaagaatc ccaagtataa gaacaactgg tttttaatca atattacaaa       180
+     gatgtttact gttgaatcgc atttttcttt ggcttcttaa aatcccttag gcattcaatc       240
+     ttcagctctt ccataattga gaggaaattt tcacctcaaa tgttcatcca gtgcaattga       300
+     aagacgtcac agtgccaggc actggattca gaaccttcac aaaaaaaaaa tctgcccaga       360
+     gacagatgag gtccttcagc tccagtgctg attggttcct ttccaaggga ccatccaatc       420
+     ctaccacgca tggaaacatc cacagatttt tattctttct gccaggtaca tcagatccat       480
+     caggtccgag ctgtgttgac taccactttt cccttcgtct caattatgtc ttggaaaaag       540
+     gctttgcgga tccccggagg ccttcgggca gcaactgtga ccttgatgct gtcgatgctg       600
+     agcaccccag tggctgaggg cagagactct cccggtaagt gcagggcagc tgctctccag       660
+     agccgctact ctgggaacag gctctccttg ggctggggta cggggatggt gatctccata       720
+     atctcggaca caatctttta tcaacatttc ctctgttttg ggaaagagag ctatgttgca       780
+     tttccattta tcttttaatg atgaagtgag gacaatccaa tcccatccta caggcttaag       840
+     cctggaagag gaggagagag gagagaaaag aggagacaaa gtgttcattt actaccagtg       900
+     ataggacaaa gtgagcatgg ggttattttt gaagatatga atttctccaa agacacagca       960
+     ggatttgcca tttaggcgtg tcccaagact tgcctggact aaatattatg atttcctgca      1020
+     ttgggaaatg caaggcagca atggtgtctg tagtctccgt atttggggaa aagttgtctg      1080
+     tattcctgac ccagtggagc gtttgtggag gcaaaatctt ggtactgagg gaagctgact      1140
+     ggctgaccac agaaagagag ccttcaggtt tcactgattt atgggcaaat ggtgacctga      1200
+     gtgggattca gatacccgag ttgatgatgg actaaattta gtagaaagga ggatgtaaag      1260
+     aagggaaata acacatactg tgaaaccact catttcagac acagaacaat actttacata      1320
+     aattctctct cactccttct aacatcctgt gtgtagatat catgattttc ttttacacaa      1380
+     ttatacttgt gatatggata ttctgttaca taaactgccc gggctggtga ctgccacagt      1440
+     ttaatgggaa tctagtttat caaattcaaa agcttgtgct ctttcggtga ataaatgttt      1500
+     ctttctagga ctcagagatc taggactccc ttctttctaa cacagacgtg agtgaacctc      1560
+     acagggcact tgggagggta aatccaggca tgggaaggaa ggtattttac ccagggacca      1620
+     agagaatagg cgtatcggaa gaggacaggt ttaattcctg gacctgtctc gtcattccct      1680
+     tgaactgtca ggtttatgtg gataacttta tctctgaggt acccaggagc tccatggaaa      1740
+     atgagatttc atgcgagaac gccctgatcc ctctaagtgc agaggtccat gtaaaatcag      1800
+     cccgactgcc tcttcacttg gttcacaggc cgagacaggg acagggcttt cctccctttc      1860
+     ctgcctgtag gaaggcggat tcccgaagac ccccgagagg gcgggcaggg ctgggcagag      1920
+     ccgccgggag gatcccaggt ctgcagcgcg aggcacgggc cggcgggaac ttgtggtcgc      1980
+     gcgggctgtt ccacagctcc gggccgggtc agggtggcgg ctgcgggggc ggacgggctg      2040
+     ggccgcactg actggccggt gattcctcgc agaggatttc gtgtaccagt ttaagggcat      2100
+     gtgctacttc accaacggga cagagcgcgt gcgtcttgtg agcagaagca tctataaccg      2160
+     agaagagatc gtgcgcttcg acagcgacgt gggggagttc cgggcggtga cgctgctggg      2220
+     gctgcctgcc gccgagtact ggaacagcca gaaggacatc ctggagagga aacgggcggc      2280
+     ggtggacagg gtgtgcagac acaactacca gttggagctc cgcacgacct tgcagcggcg      2340
+     aggtgagcgg cgtcgcccct ctgcgaggcc cacccttggc cccaagtctc tgcgccagga      2400
+     ggggcgaagg gtcgtggcct ctggaacctg agccccgttt gttccacccc agaggacagg      2460
+     aggcagcggc gagagtggtg ggggcaggtg catcggaggt gcggggacct agggcagagc      2520
+     agggggacag gcagagttgg ccaggctgcc tagtgtcgcc ccagcctacc cgttcgtcgg      2580
+     ccttgtcctc tgctctgcat gttcttgcct cgtgccttat gcatttgcct ccttttgcct      2640
+     tacctttgct aagcagctct ctctgctcag aatgcccgcc ctcttcccct gcccgcccgc      2700
+     ccgccccact agcactgccc cacccagcaa ggcccacgtg cacagctctt gcagcaggaa      2760
+     gcttcaggct tagcctggtg gagttagggc tgttccacaa ctgcgcgcag gacattcagc      2820
+     aattacagtt gtgaaataag atattttaac ttttggcttc aaatcattat tcatcgtaat      2880
+     tctgttttct taaatggctc tcattcatgg cagagatctt tgaggtgagg gtgttttaat      2940
+     cattgcatgc ctagtacctg acacattgac tggtatgtgg tgtgagctca atgatcttct      3000
+     gttaaattaa tgaataaatg tactcagctg cccatccact taggctcaag aaaaaaaaag      3060
+     aggtaaacag agccttaaaa atggacttta ttaattattt tctataattt tgcttaatgc      3120
+     tttaaagtaa actcttattg acttggatct taatagagtt tgtgaataca aaatctgagg      3180
+     aaaaaagttt ttgctaaaaa taaaaacaac gcttgaaaga tattgtaagg cagtttaaat      3240
+     ttcttttctt ttcttttttt tttttttttg agacggattc tcactctgtc gcccaggccg      3300
+     gagtgcagtg gcgcgatctc ggctcactgc aagctccgcc tcccgggttc acgccattct      3360
+     cctgcctcag cctcctgagt aggtgggatt acaggcgcgt gccaccacgc ccggctaatt      3420
+     tttttgtatt tttagtagag gcggggtttc accgtgttag ccaggatggt ctggatctcc      3480
+     tgacctcatg atccgcccgc ctcggcctcc caaagtgctg ggattacagg tgtgagccac      3540
+     agtgcccggc cggcactttt aatttcttag aaaagctgaa caaatggcac aatgcaaaga      3600
+     gcaaaagttt tggaataaat agattgaagc cattaaatta ttggataaaa atagtttcgg      3660
+     gttgcttttg gcctaggttc tcccctcccc ccatgactat ccacttcagg aataaacatt      3720
+     ctgaaagtca attttaccca tttagtgagc atttatttct agacagttgc cttatcaaat      3780
+     accatctatg ttacgtcatt taatctcaca gttacttgtg catcagagat tagcatcacc      3840
+     actttatata ttggtacatg ataaacactt tattggtcat ggatggggag atggtcactg      3900
+     taggctaata ttggtacatg ataaacactt taagtaatca gcccataatt gctcaccaag      3960
+     accttaagcc tcccaaagta cacaacattc tttgtgttct tcactacaca tccatagagt      4020
+     ctaagggacg taaagcctcg ttaaagccag ttttgaccag aagcagcaat gagtctattc      4080
+     ctgtgtgttt tccatgttaa tgggacaaaa tgatactttc aaggcattga aaattcatga      4140
+     ttaatcaatc cctagtctga ccccagtgtt atctatgcag gtttgcaaaa cctttagttt      4200
+     acttaatact cccttgcctt cttttgattc acatcctaat gccagcaaat acttatgttt      4260
+     ttgctatttc agttccattt ccataaaatt tattttatca tcttttctca taaatttatg      4320
+     ccctctattt ttactcccaa tctgtttaag atgaacaaat cttataaggc cacatagctg      4380
+     actgttattt ctgttggact ccaggaagga gaacctaaag aaaagttcaa gtccaagcag      4440
+     aaaccgtgat ttcttccaga tgatggctca tgagtgccat ttaattgggg tgccacctgg      4500
+     tgacctcagc aaatcccagc tatatttatg tgttcacatt acaggatcat taacccagac      4560
+     cgaccactgc acagatctca gaatattttc tatggagaac atacataata atgcctgatt      4620
+     tcagaagaag aaagtaattc tcaatagcaa ggggatggag tagggtagac agctgtaatt      4680
+     aaactcactt gtgtgataaa aagaaattaa ggaaaaaaga aaatgagaga acatattact      4740
+     aaataaagaa agcatacatt aaatatttac tatagtttca cactaagaga ataaaggaaa      4800
+     tgcaataaag tggcctgaaa ggtaaaggat gagatgtgta aaggggtgta gtatttttac      4860
+     tatgagcagc aatctgagaa gataaaggaa tcgagttacg ggcaaacatg atgtttgatc      4920
+     agtgttattt gttttcaagg cctgcctaaa tttttttcaa atattacaaa cttttgaaat      4980
+     aacattcttt ttgttttttg ctgtctgtta ctaggttgca cattttataa aggcagggac      5040
+     catggtatgt tgtttgtctt tggattctca gtgattgtta tatttatatt tgttgaagga      5100
+     accttaatcc aagacttgga ctccaagtat ctttccactc tggttccaag gagggacctt      5160
+     cctcacagca ggcatgctgt gtggtctcac atctcactcc tatatctttc cctgtctgtt      5220
+     actgccctca gtggagccca cagtgaccat ctccccatcc aggacagagg ccctcaacca      5280
+     ccacaacctg ctggtctgct cggtgacaga tttctatcca gcccagatca aagtccggtg      5340
+     gtttcggaat gaccaggagg agacagctgg cgttgtgtcc acccccctta ttaggaatgg      5400
+     tgactggacc ttccagatcc tggtgatgct ggaaatgact ccccagcgtg gagacgtcta      5460
+     cacctgccac gtggagcacc ccagcctcca gagccccatc accgtggagt ggcgtaaggg      5520
+     gatattgagt ttctgttact gtgggcccca caagacaaag gacagagctc cttctgaccc      5580
+     atcccttccc atctcttatc cctgatgtca ctgctgagct gggaatcaca ggagactaga      5640
+     gcacctctag ttccatggcg agtgcatcag aagaatcctg atctcatcac ctttccagat      5700
+     gctagggaaa ttactctaca tactgttgct ctggatccca gtcctgattg ctctgaggaa      5760
+     ctgattatta gggctggtga ctgggatctt agggtctaag tttatggatg agttcctgag      5820
+     gagtggagat ctgcttcccc actctgtcac ctactcactg tatccaagga cctattggct      5880
+     ggcctttccc tcccttaggg gtggtctgaa tggagaacta ggttcctttg atgccttcac      5940
+     ctcctgcatc tcagactgga cttcagctcc tcatcaggga aactatgggg tatggggaca      6000
+     aacactgaca ctcaggctct gcttctcagg ggctcaatct gaatctgccc agagcaagat      6060
+     gctgagtggc attggaggct tcgtgctggg gctgatcttc ctcgggctgg gccttatcat      6120
+     ccatcacagg agtcagaaag gtgaggaacc ccaggggaaa aggggaagat ggcctgtgac      6180
+     ccagaccctc tgttcagaga ggtcctgtct ctagatgtag ctctttcctc ctgaccctga      6240
+     gaggaagaaa gctgagctgg aagtggaagg agacaggaca aggttggagg aggcattgga      6300
+     atctgatttt actagctgaa gggtagccct gtcacagagc tgactgatag agcttattcc      6360
+     agggcatcct taccattcat cattgtctca ctggctcctt tccaaaaact tcctccatta      6420
+     agagggtcag agcctcggcc tccttgcctt ctagtgacaa tttcctttat tttaggggat      6480
+     tttaaattag ggtgcttaag gacttgaaga acatgaatgg gaagagaata taactctaat      6540
+     taagtcacat gtgtcatttt cctttggggt gagagagtgg ctgttcatgt aatgagacct      6600
+     ttctctgcat aacttccttt tgtaagacct caagggcctc caccagcagg taatatttca      6660
+     gccgtgatcc agtgtgggga gggcacaggt gtaagaggga agagcatgag ctgagtgtac      6720
+     ctgacagtag tggtctctgt tcatggtata tttgctgcta tgaggatcaa gacttagggg      6780
+     tgaagtttgc cagtttctag gaatctccag aggttgttcc ccagaaccaa gccttaactt      6840
+     tggtggtatc ttcctgttaa atgtggagcc agaaccacgg cttaaatgtt agacactagg      6900
+     atgatgccca ctttgtgcca catgatggtg gctactgcct gtaggcattt tccagtgact      6960
+     gaaagaggct gctagtggta gggatgaggt atcatccaat ttcctaaaaa gattgaaccc      7020
+     ttcatattca ccagaagagt aacagctgtt cccccacctc ccacacatct gcatcaagct      7080
+     gaagttctgt gtcttcatga gctgatttca cctttgcaca gatcttgggg gaggtgatga      7140
+     caatacactc tggacctcag ctttgtctgt ctgaagctgc aggaggcccc tgaggggtgg      7200
+     ggaagatggc aggcccacca gcgtaccctg tgctgatcat ccctcttctc tcttcttcag      7260
+     ggctcctgca ctgactcctg agactatttt aactgggatt ggttatcact tttctgtaac      7320
+     gcctgcttgt ccctgcccag aattcccagc tgtctgtgtc agcctgtccc cctgagatca      7380
+     gagtcctaca gtggctgtca cgcagccacc aggtcatctc ctttcatccc caccttgagg      7440
+     cggatggctg tgaccctact tcctgcactg acccacagcc                            7480
+//
