@@ -7,6 +7,7 @@
 //! pipeline was oracle-only (it shelled out to the vendored C++ binaries) and
 //! was removed along with the oracle; each subcommand is invoked directly.
 
+pub mod analyze;
 pub mod build;
 pub mod extract;
 pub mod genotype;
