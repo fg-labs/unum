@@ -628,3 +628,224 @@ double fg_t1k_genotyper_read_assignment_weight(double similarity, int hasN,
                        // an unambiguous "the call threw" sentinel for this f64-returning entry.
     }
 }
+
+// Opaque-handle FFI for Genotyper's Task-5b quantification slice (see shim.h
+// for the documented scope): CoalesceReadAssignments, BuildAlleleEquivalentClass
+// (via FinalizeReadAssignments, its only stock caller), and
+// QuantifyAlleleEquivalentClass (the SQUAREM-accelerated abundance EM). Unlike
+// the Task-5a free functions above (which construct a fresh, throwaway
+// Genotyper per call), this needs a PERSISTENT Genotyper -- a scripted
+// differential test builds up allele/read-assignment state across many calls
+// (add ref seqs, init allele info, set read assignments per read, coalesce,
+// finalize, quantify, then read back results) -- so it uses the same
+// opaque-`void*`-handle pattern as fg_t1k_seqset_* above. The handle is really
+// a `Genotyper*`; callers must free it exactly once via
+// fg_t1k_genotyper2_free. (Named "genotyper2" rather than reusing
+// "fg_t1k_genotyper_" to keep it visually distinct from the free-function
+// Task-5a entries above, which take no handle.)
+void* fg_t1k_genotyper2_new(int kmerLength) {
+    try {
+        return new Genotyper(kmerLength);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void fg_t1k_genotyper2_free(void* p) { delete static_cast<Genotyper*>(p); }
+
+// Mirrors `genotyper.refSet.InputRefSeq(id, seq, weight, /*initExonInfo=*/true)`
+// (SeqSet.hpp:906-982): loads one allele reference sequence, marking its
+// entire length as a single exon (`comment == NULL` -- SeqSet.hpp:970-976)
+// so `GetSeqMissingBaseCoverage` (called by `FinalizeReadAssignments`,
+// SeqSet.hpp:2717-2755) has a populated `posWeight`/`isValidDiff` to read
+// rather than dereferencing a NULL `isValidDiff` (unset until
+// `SetSeqExonInfo` runs, SeqSet.hpp:61,638-651). `id`/`seq` must be
+// NUL-terminated C strings. Returns the 0-based seqIdx (== alleleIdx) on
+// success, or -1 if the underlying call threw.
+int fg_t1k_genotyper2_add_ref_seq(void* p, const char* id, const char* seq, int weight) {
+    try {
+        Genotyper* g = static_cast<Genotyper*>(p);
+        // InputRefSeq takes non-const char* but only reads through them
+        // (strdup's its own copies); const_cast is safe here, matching the
+        // pattern used throughout this shim.
+        return g->refSet.InputRefSeq(const_cast<char*>(id), const_cast<char*>(seq), weight,
+                                      /*initExonInfo=*/true);
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Mirrors `Genotyper::InitAlleleInfo()` (Genotyper.hpp:559-682): must be
+// called after all ref seqs are loaded via fg_t1k_genotyper2_add_ref_seq,
+// before any fg_t1k_genotyper2_set_alelle_name_structure/read-assignment
+// call. Returns 0 on success, -1 if the underlying call threw.
+int fg_t1k_genotyper2_init_allele_info(void* p) {
+    try {
+        static_cast<Genotyper*>(p)->InitAlleleInfo();
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Mirrors `Genotyper::SetAlleleNameStructure` (Genotyper.hpp:548-552). See
+// fg_t1k_genotyper_parse_allele_name's doc comment for the
+// alleleDigitUnits/alleleDelimiter semantics. Returns 0 on success, -1 if
+// the underlying call threw.
+int fg_t1k_genotyper2_set_allele_name_structure(void* p, int alleleDigitUnits,
+                                                 char alleleDelimiter) {
+    try {
+        static_cast<Genotyper*>(p)->SetAlleleNameStructure(alleleDigitUnits, alleleDelimiter);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Mirrors `Genotyper::InitReadAssignments` (Genotyper.hpp:759-777). Returns 0
+// on success, -1 if the underlying call threw.
+int fg_t1k_genotyper2_init_read_assignments(void* p, int totalReadCnt, int maxAssignCnt) {
+    try {
+        static_cast<Genotyper*>(p)->InitReadAssignments(totalReadCnt, maxAssignCnt);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Mirrors `Genotyper::SetReadAssignments(readId, assignment)`
+// (Genotyper.hpp:778-832), building the `std::vector<_fragmentOverlap>`
+// from the caller's flat parallel arrays (length `n`); every
+// `_fragmentOverlap` field this port's `FragmentOverlap` struct carries is
+// set (`overlap1`/`overlap2`, which neither `ReadAssignmentWeight` nor
+// `SetReadAssignments` reads -- see genotyper.rs's `FragmentOverlap` doc
+// comment -- are left zero-initialized). `refSeqSimilarity` is applied via
+// `genotyper.refSet.SetRefSeqSimilarity` before the call, matching
+// fg_t1k_genotyper_read_assignment_weight's own pattern. Returns 0 on
+// success, -1 if the underlying call threw.
+int fg_t1k_genotyper2_set_read_assignments(void* p, int readId, const int* seqIdx,
+                                            const int* seqStart, const int* seqEnd,
+                                            const int* matchCnt, const int* relaxedMatchCnt,
+                                            const double* similarity, const int* hasMatePair,
+                                            const int* o1FromR2, const double* qual,
+                                            const int* hasN, int n, double refSeqSimilarity) {
+    try {
+        Genotyper* g = static_cast<Genotyper*>(p);
+        g->refSet.SetRefSeqSimilarity(refSeqSimilarity);
+
+        std::vector<struct _fragmentOverlap> assignment;
+        assignment.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            struct _fragmentOverlap o;
+            memset(&o, 0, sizeof(o));
+            o.seqIdx = seqIdx[i];
+            o.seqStart = seqStart[i];
+            o.seqEnd = seqEnd[i];
+            o.matchCnt = matchCnt[i];
+            o.relaxedMatchCnt = relaxedMatchCnt[i];
+            o.similarity = similarity[i];
+            o.hasMatePair = hasMatePair[i] != 0;
+            o.o1FromR2 = o1FromR2[i] != 0;
+            o.qual = qual[i];
+            o.hasN = hasN[i] != 0;
+            assignment.push_back(o);
+        }
+        g->SetReadAssignments(readId, assignment);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Mirrors `Genotyper::CoalesceReadAssignments(begin, end)`
+// (Genotyper.hpp:841-908). Returns the C++ method's own return value (count
+// of reads in range with a non-empty assignment set), or INT32_MIN if the
+// underlying call threw.
+int fg_t1k_genotyper2_coalesce_read_assignments(void* p, int begin, int end) {
+    try {
+        return static_cast<Genotyper*>(p)->CoalesceReadAssignments(begin, end);
+    } catch (...) {
+        return INT32_MIN;
+    }
+}
+
+// Mirrors `Genotyper::FinalizeReadAssignments()` (Genotyper.hpp:912-939) --
+// this is the real, unmodified stock C++ call, so it also runs the real
+// `refSet.GetSeqMissingBaseCoverage(i, 0.01)` per allele (Genotyper.hpp:935)
+// and the real `BuildAlleleEquivalentClass()` (Genotyper.hpp:931). Returns
+// the C++ method's own return value, or INT32_MIN if the underlying call
+// threw.
+int fg_t1k_genotyper2_finalize_read_assignments(void* p) {
+    try {
+        return static_cast<Genotyper*>(p)->FinalizeReadAssignments();
+    } catch (...) {
+        return INT32_MIN;
+    }
+}
+
+// Mirrors `Genotyper::QuantifyAlleleEquivalentClass()`
+// (Genotyper.hpp:1142-1328) -- the SQUAREM-accelerated abundance EM driver,
+// run to completion (real, unmodified stock C++). Returns the number of EM
+// iterations run, or INT32_MIN if the underlying call threw.
+int fg_t1k_genotyper2_quantify(void* p) {
+    try {
+        return static_cast<Genotyper*>(p)->QuantifyAlleleEquivalentClass();
+    } catch (...) {
+        return INT32_MIN;
+    }
+}
+
+// --- Read-back accessors (all real Genotyper state -- no shim-side
+// recomputation) ---
+
+// Mirrors `Genotyper::readCnt`. Returns -1 if `p` is NULL (never expected in
+// practice; kept for symmetry with the other read-back entries below).
+int fg_t1k_genotyper2_read_cnt(void* p) { return static_cast<Genotyper*>(p)->readCnt; }
+
+// Mirrors `Genotyper::equivalentClassToAlleles.size()`.
+int fg_t1k_genotyper2_ec_count(void* p) {
+    return (int)static_cast<Genotyper*>(p)->equivalentClassToAlleles.size();
+}
+
+// Mirrors `Genotyper::equivalentClassToAlleles[ecIdx].size()`. `ecIdx` must
+// be in `0..fg_t1k_genotyper2_ec_count(p)`.
+int fg_t1k_genotyper2_ec_member_count(void* p, int ecIdx) {
+    return (int)static_cast<Genotyper*>(p)->equivalentClassToAlleles[ecIdx].size();
+}
+
+// Mirrors `Genotyper::equivalentClassToAlleles[ecIdx][memberIdx]`. `ecIdx`
+// must be in `0..fg_t1k_genotyper2_ec_count(p)`, `memberIdx` in
+// `0..fg_t1k_genotyper2_ec_member_count(p, ecIdx)`.
+int fg_t1k_genotyper2_ec_member(void* p, int ecIdx, int memberIdx) {
+    return static_cast<Genotyper*>(p)->equivalentClassToAlleles[ecIdx][memberIdx];
+}
+
+// Mirrors `Genotyper::alleleInfo[alleleIdx].equivalentClass`.
+int fg_t1k_genotyper2_allele_equivalent_class(void* p, int alleleIdx) {
+    return static_cast<Genotyper*>(p)->alleleInfo[alleleIdx].equivalentClass;
+}
+
+// Mirrors `Genotyper::alleleInfo[alleleIdx].abundance`.
+double fg_t1k_genotyper2_allele_abundance(void* p, int alleleIdx) {
+    return static_cast<Genotyper*>(p)->alleleInfo[alleleIdx].abundance;
+}
+
+// Mirrors `Genotyper::alleleInfo[alleleIdx].ecAbundance`.
+double fg_t1k_genotyper2_allele_ec_abundance(void* p, int alleleIdx) {
+    return static_cast<Genotyper*>(p)->alleleInfo[alleleIdx].ecAbundance;
+}
+
+// Mirrors `Genotyper::alleleInfo[alleleIdx].missingCoverage`.
+int fg_t1k_genotyper2_allele_missing_coverage(void* p, int alleleIdx) {
+    return static_cast<Genotyper*>(p)->alleleInfo[alleleIdx].missingCoverage;
+}
+
+// Mirrors `Genotyper::refSet.GetSeqEffectiveLen(alleleIdx)`.
+int fg_t1k_genotyper2_seq_effective_len(void* p, int alleleIdx) {
+    return static_cast<Genotyper*>(p)->refSet.GetSeqEffectiveLen(alleleIdx);
+}
+
+// Mirrors `Genotyper::refSet.GetSeqWeight(alleleIdx)`.
+int fg_t1k_genotyper2_seq_weight(void* p, int alleleIdx) {
+    return static_cast<Genotyper*>(p)->refSet.GetSeqWeight(alleleIdx);
+}
