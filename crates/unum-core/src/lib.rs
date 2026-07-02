@@ -13,3 +13,4 @@ pub mod kmer_index;
 pub mod overlap;
 pub mod ref_kmer_filter;
 pub mod refbuild;
+pub mod variant_caller;
