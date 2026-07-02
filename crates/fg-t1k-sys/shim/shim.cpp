@@ -3,14 +3,32 @@
 // KmerCount.hpp uses strlen/atoi/fopen/fscanf/printf. Include them BEFORE the
 // T1K headers so the shim compiles standalone on gcc/libstdc++ (Linux), not just
 // clang/libc++ (macOS), which pulls them in transitively.
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "KmerCode.hpp"   // header-only; declares extern nucToNum/numToNuc
 #include "KmerCount.hpp"  // header-only; depends on KmerCode.hpp above
 #include "KmerIndex.hpp"  // header-only; depends on KmerCode.hpp + SimpleVector.hpp
+
+// SeqSet::GetAlignStats (SeqSet.hpp:438-453) is declared `private`, but this
+// shim needs to call it unmodified (not reimplemented) to serve as a real
+// differential oracle for fg_t1k_core::align_algo::get_align_stats. `#define
+// private public` around ONLY this include is the standard, minimally-
+// invasive technique for a test/differential harness to reach a private
+// member without editing the vendored header at all -- it only affects how
+// THIS translation unit's compiler front-end parses SeqSet's access
+// specifiers; it does not change vendor/t1k/SeqSet.hpp on disk, and every
+// other translation unit (the real T1K binaries, any other shim TU) still
+// sees `private` as private.
+#define private public
 #include "SeqSet.hpp"     // header-only; depends on KmerIndex.hpp + ReadFiles.hpp (zlib) + AlignAlgo.hpp
+                           // (AlignAlgo.hpp is pulled in transitively by SeqSet.hpp; both
+                           // AlignAlgo::* and struct _posWeight are usable directly)
+#undef private
+
 #include "alignments.hpp" // header-only; compiled WITH -DHTSLIB (build.rs passes -DHTSLIB plus an
                            // -I alias resolving alignments.hpp's hardcoded
                            // "htslib-1.15.1/htslib/sam.h" to hts-sys's real htslib headers), matching
@@ -486,6 +504,85 @@ int fg_t1k_alignments_general_info(void* p, int stop_early, int* out_frag_stdev,
         a->GetGeneralInfo(stop_early != 0);
         *out_frag_stdev = a->fragStdev;
         *out_read_len = a->readLen;
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Free-function FFI for AlignAlgo (vendor/t1k/AlignAlgo.hpp) -- see shim.h
+// for the documented scope (GlobalAlignment, GlobalAlignment_PosWeight, plus
+// SeqSet::GetAlignStats). AlignAlgo::GlobalAlignment*  are `static`, so they
+// are called directly with no instance; GetAlignStats is a non-static SeqSet
+// member that touches no instance state, so a throwaway SeqSet is
+// constructed to call it (SeqSet's constructor is lightweight, matching
+// fg_t1k_seqset_new above).
+int fg_t1k_alignalgo_global_alignment(const char* t, int lent, const char* p, int lenp, int band,
+                                       signed char* out_align, int* out_len) {
+    try {
+        // GlobalAlignment takes non-const char* but never mutates t/p;
+        // const_cast is safe here.
+        int score = AlignAlgo::GlobalAlignment(const_cast<char*>(t), lent, const_cast<char*>(p),
+                                                lenp, out_align, band);
+        int len = 0;
+        while (out_align[len] != -1) {
+            ++len;
+        }
+        *out_len = len;
+        return score;
+    } catch (...) {
+        *out_len = 0;
+        return INT32_MIN;
+    }
+}
+
+int fg_t1k_alignalgo_global_alignment_pos_weight(const int* t_weights, int lent, const char* p,
+                                                   int lenp, signed char* out_align,
+                                                   int* out_len) {
+    try {
+        std::vector<struct _posWeight> weights(lent);
+        for (int i = 0; i < lent; ++i) {
+            weights[i].count[0] = t_weights[4 * i + 0];
+            weights[i].count[1] = t_weights[4 * i + 1];
+            weights[i].count[2] = t_weights[4 * i + 2];
+            weights[i].count[3] = t_weights[4 * i + 3];
+        }
+        // GlobalAlignment_PosWeight returns double but only ever produces
+        // integer values (see align_algo.rs module docs); the shim surfaces
+        // it as an int score to match GlobalAlignment's return type and the
+        // Rust side's AlignResult::score: i32.
+        double scoreD = AlignAlgo::GlobalAlignment_PosWeight(
+            weights.data(), lent, const_cast<char*>(p), lenp, out_align);
+        int len = 0;
+        while (out_align[len] != -1) {
+            ++len;
+        }
+        *out_len = len;
+        return static_cast<int>(scoreD);
+    } catch (...) {
+        *out_len = 0;
+        return INT32_MIN;
+    }
+}
+
+int fg_t1k_seqset_get_align_stats(const signed char* align, int align_len, int update,
+                                   int* out_match_cnt, int* out_mismatch_cnt,
+                                   int* out_indel_cnt) {
+    try {
+        // GetAlignStats scans until it hits a -1 sentinel; build a
+        // NUL(-1)-terminated copy since the Rust side passes an
+        // un-terminated slice + explicit length.
+        std::vector<signed char> buf(align, align + align_len);
+        buf.push_back(-1);
+
+        SeqSet seqSet(0);  // kmerLength is irrelevant; GetAlignStats touches no instance state.
+        int matchCnt = *out_match_cnt;
+        int mismatchCnt = *out_mismatch_cnt;
+        int indelCnt = *out_indel_cnt;
+        seqSet.GetAlignStats(buf.data(), update != 0, matchCnt, mismatchCnt, indelCnt);
+        *out_match_cnt = matchCnt;
+        *out_mismatch_cnt = mismatchCnt;
+        *out_indel_cnt = indelCnt;
         return 0;
     } catch (...) {
         return -1;

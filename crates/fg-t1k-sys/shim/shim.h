@@ -170,6 +170,44 @@ int fg_t1k_alignments_seg(void* p, int i, int64_t* out_a, int64_t* out_b);
 // `fragStdev`/`readLen` public fields into the out-params. Returns 0 on
 // success, -1 if the underlying call threw.
 int fg_t1k_alignments_general_info(void* p, int stop_early, int* out_frag_stdev, int* out_read_len);
+
+// Free-function FFI for AlignAlgo (vendor/t1k/AlignAlgo.hpp), scoped to
+// exactly the slice the genotyping path calls (see
+// crates/fg-t1k-core/src/align_algo.rs module docs for the full
+// used-vs-unused method inventory): GlobalAlignment,
+// GlobalAlignment_PosWeight, plus SeqSet::GetAlignStats (a SeqSet member
+// function that touches no instance state, so it is exposed here as a free
+// function too). AlignAlgo is header-only and pure C++ (no htslib/samtools),
+// so these entries call the real static AlignAlgo:: methods directly -- no
+// opaque handle needed, unlike SeqSet/KmerIndex above.
+//
+// `out_align` is a caller-allocated buffer; both AlignAlgo methods can emit
+// at most `lent + lenp` ops (every DP step consumes at least one base from
+// t or p), so callers must size `out_align` to at least `lent + lenp` bytes
+// (matching the 100001-byte convention used elsewhere in this shim is more
+// than sufficient for any realistic test size). `*out_len` is set to the
+// number of ops written (NOT including the C++ side's internal `-1`
+// sentinel, which this shim strips before returning -- Rust callers get the
+// op count directly, no sentinel scanning required). Returns the alignment
+// score, or INT32_MIN if the underlying call threw.
+int fg_t1k_alignalgo_global_alignment(const char* t, int lent, const char* p, int lenp, int band,
+                                       signed char* out_align, int* out_len);
+// `t_weights` is a flat array of `4 * lent` ints (four counts per reference
+// position, matching `struct _posWeight { int count[4]; }` laid out
+// contiguously); same `out_align`/`out_len` sizing/semantics as
+// fg_t1k_alignalgo_global_alignment above.
+int fg_t1k_alignalgo_global_alignment_pos_weight(const int* t_weights, int lent, const char* p,
+                                                  int lenp, signed char* out_align, int* out_len);
+// Mirrors SeqSet::GetAlignStats: `align` must be a NUL-terminated-by-`-1`
+// signed-char op sequence (i.e. exactly what
+// fg_t1k_alignalgo_global_alignment*'s C++ side produces internally before
+// this shim strips the sentinel -- this entry re-appends a `-1` sentinel
+// itself from `align`/`align_len` so it can call the real, unmodified
+// GetAlignStats unchanged). `update` mirrors the C++ `bool update` parameter
+// (0/1). Writes match/mismatch/indel counts into the out-params. Returns 0
+// on success, -1 if the underlying call threw.
+int fg_t1k_seqset_get_align_stats(const signed char* align, int align_len, int update,
+                                   int* out_match_cnt, int* out_mismatch_cnt, int* out_indel_cnt);
 #ifdef __cplusplus
 }
 #endif
