@@ -1,4 +1,5 @@
 #include "KmerCode.hpp"   // header-only; declares extern nucToNum/numToNuc
+#include "KmerCount.hpp"  // header-only; depends on KmerCode.hpp above
 #include "shim.h"
 
 // nucToNum/numToNuc are extern in the headers, defined only in the T1K .cpp files
@@ -45,3 +46,49 @@ int fg_t1k_kmercode_kmer_length(void* p) {
 // against undetected drift between the two.
 signed char fg_t1k_nuc_to_num(int i) { return nucToNum[i]; }
 char fg_t1k_num_to_nuc(int i) { return numToNuc[i]; }
+
+// Opaque-handle FFI for KmerCount. KmerCount's constructor allocates heavy
+// state (`new std::map<uint64_t,int>[103]`), which can throw std::bad_alloc;
+// letting an exception unwind through this extern "C" boundary is undefined
+// behavior, so construction is wrapped in try/catch and returns NULL on
+// failure. Every other KmerCount operation used here (AddCount/GetCount/
+// GetCountSimilarityJaccard) only touches std::map insert/lookup, which can
+// also throw (bad_alloc, or an out_of_range from map::at -- not used here),
+// but per the same exception-safety rule we do not let those propagate
+// across the boundary either.
+void* fg_t1k_kmercount_new(int k) {
+    try {
+        return new KmerCount(k);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void fg_t1k_kmercount_free(void* p) { delete static_cast<KmerCount*>(p); }
+
+int fg_t1k_kmercount_add_count(void* p, const char* read) {
+    try {
+        // KmerCount::AddCount takes `char*` (not `const char*`) but never
+        // mutates the buffer; const_cast is safe here.
+        return static_cast<KmerCount*>(p)->AddCount(const_cast<char*>(read));
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_kmercount_get_count(void* p, const char* kmer) {
+    try {
+        return static_cast<KmerCount*>(p)->GetCount(const_cast<char*>(kmer));
+    } catch (...) {
+        return -1;
+    }
+}
+
+double fg_t1k_kmercount_jaccard(void* a, void* b) {
+    try {
+        return static_cast<KmerCount*>(a)->GetCountSimilarityJaccard(
+            *static_cast<const KmerCount*>(b));
+    } catch (...) {
+        return -1.0;
+    }
+}

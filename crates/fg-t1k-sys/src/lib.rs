@@ -38,6 +38,15 @@ mod ffi {
         pub fn fg_t1k_nuc_to_num(i: i32) -> i8;
         /// Returns the shim's own `numToNuc[i]` entry (`i` in `0..4`).
         pub fn fg_t1k_num_to_nuc(i: i32) -> c_char;
+
+        /// Constructs a C++ `KmerCount(k)`. Returns NULL if construction
+        /// throws (the shim catches every exception at this boundary); the
+        /// caller MUST check for a NULL return before using the handle.
+        pub fn fg_t1k_kmercount_new(k: i32) -> *mut c_void;
+        pub fn fg_t1k_kmercount_free(p: *mut c_void);
+        pub fn fg_t1k_kmercount_add_count(p: *mut c_void, read: *const c_char) -> i32;
+        pub fn fg_t1k_kmercount_get_count(p: *mut c_void, kmer: *const c_char) -> i32;
+        pub fn fg_t1k_kmercount_jaccard(a: *mut c_void, b: *mut c_void) -> f64;
     }
 }
 #[cfg(feature = "t1k-sys")]
@@ -132,5 +141,80 @@ impl CppKmerCode {
 impl Drop for CppKmerCode {
     fn drop(&mut self) {
         unsafe { ffi::fg_t1k_kmercode_free(self.handle) }
+    }
+}
+
+/// Safe Rust wrapper around the opaque C++ `KmerCount*` handle.
+///
+/// Owns the handle for its lifetime: [`CppKmerCount::new`] allocates the C++
+/// object via `fg_t1k_kmercount_new` and `Drop` calls `fg_t1k_kmercount_free`
+/// exactly once. Construction checks the returned handle for NULL: the C++
+/// constructor allocates heavy state (`new std::map<uint64_t,int>[103]`),
+/// which can throw `std::bad_alloc`; the shim catches that at the `extern
+/// "C"` boundary (an exception may not unwind across it) and returns NULL
+/// instead, so this wrapper must -- and does -- refuse to proceed with a
+/// NULL handle rather than silently dereferencing it later.
+#[cfg(feature = "t1k-sys")]
+pub struct CppKmerCount {
+    handle: *mut std::os::raw::c_void,
+}
+
+#[cfg(feature = "t1k-sys")]
+impl CppKmerCount {
+    /// Constructs a new C++ `KmerCount` for k-mer length `k`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying `fg_t1k_kmercount_new` call returns NULL
+    /// (i.e. the C++ constructor threw an exception, most plausibly
+    /// `std::bad_alloc`).
+    #[must_use]
+    pub fn new(k: i32) -> Self {
+        let handle = unsafe { ffi::fg_t1k_kmercount_new(k) };
+        assert!(
+            !handle.is_null(),
+            "fg_t1k_kmercount_new({k}) returned NULL: C++ KmerCount construction failed"
+        );
+        Self { handle }
+    }
+
+    /// Mirrors `KmerCount::AddCount`. `read` must not contain an interior NUL
+    /// byte (mirrors the C++ side's `strlen`-based length calculation, which
+    /// would silently truncate at the first NUL).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `read` contains an interior NUL byte.
+    pub fn add_count(&mut self, read: &[u8]) -> i32 {
+        let c_read =
+            std::ffi::CString::new(read).expect("read must not contain an interior NUL byte");
+        unsafe { ffi::fg_t1k_kmercount_add_count(self.handle, c_read.as_ptr()) }
+    }
+
+    /// Mirrors `KmerCount::GetCount`. Only the first `k` bytes of `kmer` are
+    /// read (matching the C++ side, which never calls `strlen` on the query
+    /// k-mer); `kmer` must still not contain an interior NUL byte since it is
+    /// passed across the FFI boundary as a NUL-terminated C string.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `kmer` contains an interior NUL byte.
+    pub fn get_count(&self, kmer: &[u8]) -> i32 {
+        let c_kmer =
+            std::ffi::CString::new(kmer).expect("kmer must not contain an interior NUL byte");
+        unsafe { ffi::fg_t1k_kmercount_get_count(self.handle, c_kmer.as_ptr()) }
+    }
+
+    /// Mirrors `KmerCount::GetCountSimilarityJaccard`.
+    #[must_use]
+    pub fn jaccard(&self, other: &CppKmerCount) -> f64 {
+        unsafe { ffi::fg_t1k_kmercount_jaccard(self.handle, other.handle) }
+    }
+}
+
+#[cfg(feature = "t1k-sys")]
+impl Drop for CppKmerCount {
+    fn drop(&mut self) {
+        unsafe { ffi::fg_t1k_kmercount_free(self.handle) }
     }
 }
