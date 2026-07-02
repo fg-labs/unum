@@ -6,6 +6,12 @@ on:
       - main
   pull_request:
 
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR branch) so
+# stacked runs don't keep burning minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -17,7 +23,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS runners cost ~10x credits. Run them only on push to main (post-merge
+        # coverage), not on every PR / PR push. Linux still runs on PRs.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -37,7 +45,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS runners cost ~10x credits. Run them only on push to main (post-merge
+        # coverage), not on every PR / PR push. Linux still runs on PRs.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -79,7 +89,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS runners cost ~10x credits. Run them only on push to main (post-merge
+        # coverage), not on every PR / PR push. Linux still runs on PRs.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
