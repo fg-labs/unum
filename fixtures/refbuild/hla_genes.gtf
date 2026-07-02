@@ -1,0 +1,5 @@
+chr6	HAVANA	gene	29941260	29949606	.	+	.	gene_id "ENSG00000206503.17"; gene_type "protein_coding"; gene_name "HLA-A"; level 2; hgnc_id "HGNC:4931"; havana_gene "OTTHUMG00000130501.3";
+chr6	HAVANA	gene	31268746	31272171	.	-	.	gene_id "ENSG00000204525.20"; gene_type "protein_coding"; gene_name "HLA-C"; level 2; hgnc_id "HGNC:4933"; havana_gene "OTTHUMG00000031154.8";
+chr6	HAVANA	gene	31353195	31367067	.	-	.	gene_id "ENSG00000234745.16"; gene_type "protein_coding"; gene_name "HLA-B"; level 2; hgnc_id "HGNC:4932"; tag "ncRNA_host"; havana_gene "OTTHUMG00000031153.7";
+chr6	HAVANA	gene	32577902	32589848	.	-	.	gene_id "ENSG00000196126.14"; gene_type "protein_coding"; gene_name "HLA-DRB1"; level 2; hgnc_id "HGNC:4948"; havana_gene "OTTHUMG00000031196.4";
+chr6	HAVANA	gene	32640622	32668383	.	-	.	gene_id "ENSG00000179344.19"; gene_type "protein_coding"; gene_name "HLA-DQB1"; level 1; hgnc_id "HGNC:4944"; tag "overlapping_locus"; havana_gene "OTTHUMG00000031124.4";
