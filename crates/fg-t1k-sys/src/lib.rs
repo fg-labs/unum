@@ -3,6 +3,15 @@
 //! fg-t1k-sys: all C++ contact. FFI shims + vendored T1K build. Dev/test only.
 //! `unsafe` is permitted here (FFI); nowhere else in the workspace.
 
+// `hts-sys` is a *direct* dependency (not merely transitive via rust-htslib)
+// solely so Cargo forwards its `links = "hts"` `DEP_HTS_*` env vars (include
+// dir, lib dir, ...) to this crate's `build.rs`, which uses them to compile
+// the vendored T1K oracle against the same htslib rust-htslib itself links
+// (see build.rs). No Rust code calls into it directly; `extern crate` keeps
+// the dependency from looking dead to a casual reader.
+#[allow(unused_extern_crates)]
+extern crate hts_sys;
+
 // oracle module and FFI decls are feature-gated (they depend on build-script env vars).
 #[cfg(feature = "t1k-sys")]
 pub mod oracle;

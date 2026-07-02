@@ -2,39 +2,30 @@
 //!
 //! # Why a separate PROCESS, not just an in-process FFI call
 //!
-//! `vendor/t1k/samtools-0.1.19` (the bundled, legacy htslib T1K's `Alignments`
-//! links against here) and `rust-htslib`'s vendored modern htslib
+//! Historically, T1K's vendored `Alignments` linked the bundled legacy
+//! `vendor/t1k/samtools-0.1.19` while `rust-htslib`'s vendored modern htslib
 //! (`hts-sys`, pulled in transitively by `fg-t1k-core`'s
-//! `alignments::Alignments`) export a large overlapping set of IDENTICALLY
-//! NAMED C symbols with INCOMPATIBLE ABIs -- `bam_read1`, `sam_read1`,
-//! `bam_write1`, every `bgzf_*`/`fai_*` function, etc. (confirmed by
-//! disassembling a test binary that linked both: `bam1_t`'s struct layout
-//! differs between the two library generations, e.g. samtools-0.1.19's
-//! `bam1_t` is 56 bytes vs. modern htslib's larger layout). When both
-//! libraries are linked into ONE process, the platform linker resolves each
-//! duplicate symbol to exactly ONE winner (macOS `ld`'s flat-namespace
-//! archive-member resolution silently picks one, with no diagnostic) -- and
-//! T1K's own `Alignments::Next`/`GetGeneralInfo` (compiled WITHOUT
-//! `-DHTSLIB`, so it calls the LEGACY `samread`->`bam_read1` chain) ends up
-//! silently bound to modern htslib's INCOMPATIBLE `bam_read1`, corrupting the
-//! heap on the very first record read (verified via `lldb`: the crash is a
-//! `bam1_t`-sized `calloc`/`free` mismatch inside `bam_destroy1`, caused by
-//! `bam_read1` writing through the wrong struct layout).
+//! `alignments::Alignments`) was a DIFFERENT, ABI-incompatible library
+//! generation -- both exported identically named C symbols (`bam_read1`,
+//! `sam_read1`, every `bgzf_*`/`fai_*` function, etc.) with incompatible
+//! struct layouts (`bam1_t` was 56 bytes in samtools-0.1.19 vs. a larger,
+//! different layout in modern htslib). Linking both into one process let the
+//! platform linker silently resolve each duplicate symbol to exactly one
+//! winner, corrupting the heap the moment the "wrong" `Alignments` bound to
+//! the other generation's `bam_read1`.
 //!
-//! Since this ABI collision is a genuine, unavoidable consequence of linking
-//! both library generations into one address space (not a bug in either
-//! port), the fix is to run the C++ oracle in a SEPARATE PROCESS from the
-//! Rust reader (which needs `rust-htslib`/modern htslib to read the same
-//! fixture BAM). This binary is that separate process: it depends ONLY on
-//! `fg_t1k_sys` (which pulls in samtools-0.1.19 + the shim, never
-//! rust-htslib), reads a BAM path from `argv[1]`, and prints every record's
+//! As of the htslib unification (see `crates/fg-t1k-sys/build.rs`), the
+//! vendored `Alignments` class here is compiled `-DHTSLIB` against the SAME
+//! htslib build (via hts-sys) that `rust-htslib` itself links, so that
+//! original hard ABI blocker no longer exists -- an in-process
+//! `CppAlignments` FFI call would be safe today. This binary is kept as a
+//! separate process anyway purely to avoid touching a large, already-correct
+//! test harness (`diff_alignments.rs`) as a side effect of the htslib
+//! unification; it depends on `fg_t1k_sys` (the shim + `Alignments`,
+//! compiled against hts-sys's htslib, never linking `rust-htslib`
+//! directly), reads a BAM path from `argv[1]`, and prints every record's
 //! `Alignments` fields plus the `GetGeneralInfo` summary to stdout in a
 //! simple, line-oriented, tab-separated format `diff_alignments.rs` parses.
-//! `diff_alignments.rs` itself never links `fg_t1k_sys`'s FFI/shim code
-//! directly (only spawns this binary via `std::process::Command`), so its
-//! own process only ever links ONE htslib generation (rust-htslib's), same
-//! as this binary only ever links the OTHER (samtools-0.1.19's) -- neither
-//! process has the collision.
 //!
 //! # Output format
 //!
