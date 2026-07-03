@@ -189,6 +189,17 @@ struct GenotypeRead {
     has_n: bool,
 }
 
+/// Both mates' loaded reads, in file order (mate 1, mate 2) -- the payload
+/// produced by the FASTQ-reading thread spawned in [`run`]'s reference-setup
+/// overlap (see that function's doc comment).
+type ReadsPair = (Vec<GenotypeRead>, Vec<GenotypeRead>);
+
+/// Everything [`run`]'s reference-setup-vs-FASTQ-read overlap produces,
+/// bundled so `std::thread::scope` can return it as a single value.
+#[allow(clippy::type_complexity)]
+type RunSetup =
+    (LoadedRef, RefKmerFilter, Genotyper, Vec<i32>, Vec<GenotypeRead>, Vec<GenotypeRead>);
+
 fn read_all(reader: &mut FastqReader) -> Result<Vec<GenotypeRead>> {
     let mut reads = Vec::new();
     while let Some(record) = reader.next_record()? {
@@ -235,37 +246,70 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     };
     let has_mate = mate2_path.is_some();
 
-    // --- Reference loading (Genotyper.hpp:706-727) ---
-    let loaded = load_reference(Path::new(&args.ref_seq_fasta))?;
+    // --- Reference loading (Genotyper.hpp:706-727), overlapped with candidate
+    // FASTQ reading (Genotyper.cpp:362-443) ---
+    //
+    // Reference setup (`load_reference` + `build_ref_kmer_filter` +
+    // `init_allele_info`) and reading the candidate FASTQ(s) are independent:
+    // the former only touches `args.ref_seq_fasta` and a uniquely-named
+    // scratch file under `std::env::temp_dir` (see `build_ref_kmer_filter`),
+    // the latter only touches `mate1_path`/`mate2_path`. So the FASTQ read is
+    // moved onto a scoped thread that runs concurrently with reference setup
+    // on the main thread, joined immediately before `reads1`/`reads2` are
+    // first consumed. `std::thread::scope` keeps the reader thread's `Result`
+    // propagating through `?` exactly as before (just resolved after the
+    // join rather than inline), and each mate is still read in its own file
+    // order into its own `Vec`, so output is byte-identical regardless of
+    // which side finishes first.
+    let (loaded, filter, mut genotyper, effective_len, reads1, reads2): RunSetup =
+        std::thread::scope(|scope| -> Result<RunSetup> {
+            let read_handle = scope.spawn(move || -> Result<ReadsPair> {
+                let mut reader1 = FastqReader::open(Path::new(mate1_path))
+                    .with_context(|| format!("opening candidate read file {mate1_path}"))?;
+                let reads1 = read_all(&mut reader1)?;
+                let reads2 = if let Some(mate2_path) = mate2_path {
+                    let mut reader2 = FastqReader::open(Path::new(mate2_path))
+                        .with_context(|| format!("opening candidate read file {mate2_path}"))?;
+                    read_all(&mut reader2)?
+                } else {
+                    Vec::new()
+                };
+                Ok((reads1, reads2))
+            });
+
+            let ref_setup_result: Result<_> = (|| {
+                let loaded = load_reference(Path::new(&args.ref_seq_fasta))?;
+
+                let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus)?;
+                filter.set_ref_seq_similarity(args.similarity);
+
+                let mut genotyper = Genotyper::new();
+                genotyper.set_filter_frac(args.filter_frac);
+                genotyper.set_filter_cov(args.filter_cov);
+                genotyper.set_cross_gene_rate(args.cross_gene_rate);
+                let mut effective_len = loaded.effective_len.clone();
+                genotyper.init_allele_info(
+                    &loaded.names,
+                    &loaded.consensus,
+                    &loaded.weight,
+                    &mut effective_len,
+                    GENE_SIMILARITY_KMER_LENGTH,
+                );
+                Ok((loaded, filter, genotyper, effective_len))
+            })();
+
+            // Join the reader before propagating either side's error, so the
+            // spawned thread is never left detached-but-still-running on an
+            // early return (`?` on `ref_setup_result` alone would drop
+            // `read_handle` without joining it).
+            let read_result = read_handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("candidate read loading thread panicked"))?;
+            let (loaded, filter, genotyper, effective_len) = ref_setup_result?;
+            let (reads1, reads2) = read_result?;
+            Ok((loaded, filter, genotyper, effective_len, reads1, reads2))
+        })?;
     let allele_cnt = loaded.names.len();
-
-    let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus)?;
-    filter.set_ref_seq_similarity(args.similarity);
-
-    let mut genotyper = Genotyper::new();
-    genotyper.set_filter_frac(args.filter_frac);
-    genotyper.set_filter_cov(args.filter_cov);
-    genotyper.set_cross_gene_rate(args.cross_gene_rate);
-    let mut effective_len = loaded.effective_len.clone();
-    genotyper.init_allele_info(
-        &loaded.names,
-        &loaded.consensus,
-        &loaded.weight,
-        &mut effective_len,
-        GENE_SIMILARITY_KMER_LENGTH,
-    );
-
-    // --- Read candidate FASTQ(s) (Genotyper.cpp:362-443) ---
-    let mut reader1 = FastqReader::open(Path::new(mate1_path))
-        .with_context(|| format!("opening candidate read file {mate1_path}"))?;
-    let reads1 = read_all(&mut reader1)?;
-    let reads2 = if let Some(mate2_path) = mate2_path {
-        let mut reader2 = FastqReader::open(Path::new(mate2_path))
-            .with_context(|| format!("opening candidate read file {mate2_path}"))?;
-        read_all(&mut reader2)?
-    } else {
-        Vec::new()
-    };
     if has_mate {
         ensure!(
             reads1.len() == reads2.len(),
