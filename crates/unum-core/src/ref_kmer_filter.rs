@@ -91,9 +91,11 @@
 //! `get_overlaps_from_hits`/LIS port for `has_hit_in_set`'s gate 2.
 
 use crate::kmer::KmerCode;
-use crate::kmer_index::KmerIndex;
+use crate::kmer_index::{IndexInfo, IndexT, for_each_kmer};
 use crate::overlap::{self, OverlapHit};
 use anyhow::{Context, Result};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -284,16 +286,133 @@ pub struct Scratch {
     pub dp_cache: crate::align_algo::DpCache,
 }
 
+/// Flat, search-only forward-code-keyed k-mer position index.
+///
+/// Behaviorally identical to [`crate::kmer_index::KmerIndex`] for the
+/// `search` surface (the only surface `RefKmerFilter` needs) -- it returns a
+/// byte-identical `&[IndexInfo]` slice for any given forward code -- but
+/// stores all entries in ONE contiguous `positions` blob (each code mapping
+/// to a `(start, len)` window into it) rather than a heap `Vec` per code.
+/// That cuts allocator overhead and index RSS and keeps lookups
+/// cache-friendly. Keying uses [`FxHashMap`] (rustc-hash) instead of std's
+/// SipHash for faster build + lookup; rustc-hash is pure-safe, so
+/// `#![forbid(unsafe_code)]` still holds.
+///
+/// # Byte-identity with `KmerIndex`
+///
+/// `KmerIndex::build_index_from_read` pushes each code's entries in (`id`
+/// ascending, then `offset` ascending within an `id`) order, because
+/// `from_reference_fasta`/`update_kmer_length` process sequence `id` 0 fully
+/// before `id` 1 and roll offsets left->right within a sequence. This flat
+/// build collects `(code, idx, offset)` tuples from every sequence via the
+/// SAME shared [`for_each_kmer`] emitter, then `par_sort_unstable`s them
+/// lexicographically. Since a given forward code occurs at most once per
+/// `(seq, offset)`, the `(code, idx, offset)` tuples are all-distinct within
+/// a code, so the sort order is unambiguous and reproduces the sequential
+/// push order EXACTLY. Grouping consecutive-equal-`code` runs then yields,
+/// for each code, a `positions` slice byte-identical to the old per-code
+/// `Vec`.
+#[derive(Debug, Default)]
+struct FlatKmerIndex {
+    /// Forward `KmerCode::get_code()` -> `(start, len)` window into
+    /// [`positions`](Self::positions).
+    map: FxHashMap<u64, (u32, u32)>,
+    /// All `IndexInfo` entries across every code, contiguous and grouped by
+    /// code, each group in (idx, offset)-ascending order (see type docs).
+    positions: Vec<IndexInfo>,
+}
+
+impl FlatKmerIndex {
+    /// Builds the flat index over `seqs` at k-mer length `kmer_length`, in
+    /// parallel across the current rayon thread pool. Mirrors the result of
+    /// running [`KmerIndex::build_index_from_read`] over `seqs` in 0-based
+    /// load order (`id` = index), byte-for-byte (see type docs for the
+    /// ordering proof).
+    fn build(seqs: &[Vec<u8>], kmer_length: usize) -> Self {
+        // 1. Emit every (code, idx, offset) tuple, in parallel per sequence,
+        //    via the SAME shared emitter the sequential build uses.
+        let mut tuples: Vec<(u64, IndexT, IndexT)> = seqs
+            .par_iter()
+            .enumerate()
+            .flat_map_iter(|(seq_idx, seq)| {
+                // `seqs.len()` is bounded by an `i32` at load time
+                // (`from_reference_fasta`'s `i32::try_from`), so this cannot
+                // truncate; matches the `id: i32` the sequential build uses.
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                let id = seq_idx as i32;
+                let mut local: Vec<(u64, IndexT, IndexT)> = Vec::new();
+                for_each_kmer(seq, id, kmer_length, 0, &mut |code, idx, offset| {
+                    local.push((code, idx, offset));
+                });
+                local.into_iter()
+            })
+            .collect();
+
+        // 2. Sort lexicographically by (code, idx, offset). This is exactly
+        //    the sequential push order per code (see type docs). Unstable is
+        //    safe because the tuples are all-distinct within a code.
+        tuples.par_sort_unstable();
+
+        // 3. Group consecutive-equal-`code` runs into `(start, len)` windows
+        //    and flatten into the contiguous `positions` blob.
+        let mut map: FxHashMap<u64, (u32, u32)> = FxHashMap::default();
+        let mut positions: Vec<IndexInfo> = Vec::with_capacity(tuples.len());
+        let mut run_start = 0usize;
+        while run_start < tuples.len() {
+            let code = tuples[run_start].0;
+            let mut run_end = run_start + 1;
+            while run_end < tuples.len() && tuples[run_end].0 == code {
+                run_end += 1;
+            }
+            // Positions indices fit in u32: total entries are bounded by the
+            // reference size (well under u32::MAX for any real T1K reference).
+            #[allow(clippy::cast_possible_truncation)]
+            let start = positions.len() as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let len = (run_end - run_start) as u32;
+            map.insert(code, (start, len));
+            for &(_, idx, offset) in &tuples[run_start..run_end] {
+                positions.push(IndexInfo { idx, offset });
+            }
+            run_start = run_end;
+        }
+
+        Self { map, positions }
+    }
+
+    /// Ported search surface, byte-identical to
+    /// [`KmerIndex::search`](crate::kmer_index::KmerIndex::search): returns an
+    /// empty slice if `!kmer_code.is_valid()` or the forward code has no
+    /// entries, otherwise the code's full entry slice in insertion order.
+    #[must_use]
+    fn search(&self, kmer_code: &KmerCode) -> &[IndexInfo] {
+        if !kmer_code.is_valid() {
+            return &[];
+        }
+        match self.map.get(&kmer_code.get_code()) {
+            Some(&(start, len)) => {
+                let start = start as usize;
+                let end = start + len as usize;
+                &self.positions[start..end]
+            }
+            None => &[],
+        }
+    }
+}
+
 /// Reference-k-mer read-candidate filter: the pure-Rust port of the
 /// `SeqSet` slice `FastqExtractor`/`BamExtractor` use to decide whether a
 /// read is a genotyping candidate. See the module docs for exact scope and
 /// the deliberate `GetOverlapsFromHits`/`AlignAlgo` scope cut.
 pub struct RefKmerFilter {
     /// Forward-code-keyed k-mer position index over every loaded reference
-    /// sequence, built via repeated `KmerIndex::build_index_from_read` calls
-    /// (one per sequence, `id` = 0-based load order) -- mirrors
-    /// `SeqSet::seqIndex` after `InputRefFa` (`SeqSet.hpp:220,872-904`).
-    seq_index: KmerIndex,
+    /// sequence, built (in parallel) via the shared [`for_each_kmer`] emitter
+    /// -- byte-identical to the sequential `KmerIndex::build_index_from_read`
+    /// path (one emission per sequence, `id` = 0-based load order) -- mirrors
+    /// `SeqSet::seqIndex` after `InputRefFa` (`SeqSet.hpp:220,872-904`). Stored
+    /// flat (contiguous positions blob) rather than a heap `Vec` per code; see
+    /// [`FlatKmerIndex`].
+    seq_index: FlatKmerIndex,
     /// The k-mer length every sequence was indexed at (`SeqSet::kmerLength`,
     /// `SeqSet.hpp:221`). See the module docs for why this is an explicit
     /// caller-supplied parameter rather than a fixed default.
@@ -356,20 +475,24 @@ impl RefKmerFilter {
         let text = fs::read_to_string(path)
             .with_context(|| format!("reading reference FASTA {}", path.display()))?;
 
-        let mut seq_index = KmerIndex::new();
         let mut seq_names = Vec::new();
-        let mut seqs = Vec::new();
-        let mut kmer_code = KmerCode::new(kmer_length);
+        let mut seqs: Vec<Vec<u8>> = Vec::new();
 
         for record in parse_fasta(&text) {
             let seq_idx = seq_names.len();
-            let id = i32::try_from(seq_idx).with_context(|| {
+            // Preserve the historical bound check (id must fit in i32) even
+            // though the flat build derives ids from the `enumerate` index.
+            i32::try_from(seq_idx).with_context(|| {
                 format!("reference FASTA {} has more than i32::MAX sequences", path.display())
             })?;
-            seq_index.build_index_from_read(&mut kmer_code, record.seq.as_bytes(), id, 0);
             seq_names.push(record.id);
             seqs.push(record.seq.into_bytes());
         }
+
+        // Build the flat k-mer index in parallel over all sequences (byte-
+        // identical to the sequential per-sequence `build_index_from_read`
+        // path; see `FlatKmerIndex` docs for the ordering proof).
+        let seq_index = FlatKmerIndex::build(&seqs, kmer_length);
 
         let seq_count = seq_names.len();
         Ok(Self {
@@ -504,16 +627,10 @@ impl RefKmerFilter {
     pub fn update_kmer_length(&mut self, kl: usize) {
         assert!(kl >= 1, "kmer_length must be >= 1, got {kl}");
         self.kmer_length = kl;
-        let mut kmer_code = KmerCode::new(kl);
-        self.seq_index = KmerIndex::new();
-        for (id, seq) in self.seqs.iter().enumerate() {
-            // `seqs.len() == seq_count`, itself bounded by an `i32` at load
-            // time (`from_reference_fasta`'s own `i32::try_from` check), so
-            // this cannot truncate.
-            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-            let id = id as i32;
-            self.seq_index.build_index_from_read(&mut kmer_code, seq, id, 0);
-        }
+        // Rebuild the flat index from scratch at the new k over the stored
+        // sequences (same 0-based load order, so `id`s match exactly) --
+        // byte-identical to the old sequential rebuild.
+        self.seq_index = FlatKmerIndex::build(&self.seqs, kl);
     }
 
     /// Ergonomic entry point: `!is_low_complexity(read) &&
