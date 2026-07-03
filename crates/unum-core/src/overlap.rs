@@ -116,8 +116,16 @@ pub struct Overlap {
     /// (`= 2 * hitLen`, `SeqSet.hpp:1531`). NOT actually derived from
     /// alignment in this path; see module docs.
     pub match_cnt: i32,
-    /// `_overlap::similarity`. Always `0.0` on this `AlignAlgo`-free path
-    /// (`SeqSet.hpp:1532`).
+    /// `_overlap::similarity`. Zero at raw hit construction (`SeqSet.hpp:1532`),
+    /// but [`crate::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read`]
+    /// REFINES it per overlap (`SeqSet.hpp:1837-1845`): a full-length
+    /// exact-band alignment gets `matchCnt / (seqSpan + readSpan)` (in `(0, 1]`),
+    /// otherwise `0.0`. Every overlap a caller receives has survived that
+    /// function's final similarity filter, so for ref alleles it has
+    /// `similarity >= ref_seq_similarity` (default 0.8), NOT `0.0`. (An earlier
+    /// version of this comment claimed "always 0.0" -- true only of the
+    /// pre-refinement placeholder; [`crate::genotyper::assign_read`]'s
+    /// `needClip` `similarity < 0.95` gate depends on the refined value.)
     pub similarity: f64,
 }
 
