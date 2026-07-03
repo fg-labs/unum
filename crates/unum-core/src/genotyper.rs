@@ -977,23 +977,27 @@ pub fn parse_exon_comment(comment: &str, seq_len: usize) -> Vec<(i32, i32)> {
 /// unreachable here since `allele_refs` is non-empty by construction in every
 /// caller).
 ///
-/// # `AssignRead`'s OWN two `IsSeparatorInRange` calls are still unported (scope gap, tracked separately from #39)
+/// # `AssignRead`'s OWN two `IsSeparatorInRange` calls (fixes #40)
 ///
 /// `AssignRead` (`SeqSet.hpp:2163-2169`) calls `IsSeparatorInRange` twice,
 /// independently of [`Genotyper::set_read_assignments`]'s
 /// `IsFragmentSpanSeparator` filter (see [`is_separator_in_range`]'s doc
 /// comment, which #39 fixed): a per-overlap skip (`continue` when
-/// `[seqStart, seqEnd]` spans a separator) and a `needClip` computation that
-/// feeds `onlyConsiderClip`'s `similarity < 0.95` escape hatch. This function
-/// still omits BOTH -- for `kir_rna_seq.fa` (no interior `N` runs, so
-/// `separator` is always exactly `[-1, len]`) that is a no-op, matching the
-/// oracle exactly; for references with interior `N`s (e.g. the HLA DNA
-/// reference #39 was diagnosed against) it is NOT a no-op and this function
-/// diverges from `AssignRead` on such inputs. Left unported here (a separate,
-/// not-yet-fixed gap from #39's `IsFragmentSpanSeparator` filter) rather than
-/// threaded through as part of this fix, to keep #39's fix scoped to the
-/// already-diagnosed `SetReadAssignments`/`ReadAssignmentToFragmentAssignment`
-/// path.
+/// `[seqStart, seqEnd]` spans a separator, `SeqSet.hpp:2163-2164`) and a
+/// `needClip` computation (`SeqSet.hpp:2166-2169`) that feeds
+/// `onlyConsiderClip`'s `similarity < 0.95` escape hatch
+/// (`SeqSet.hpp:2170-2172`). This function ports BOTH, inline in the loop
+/// below. For `kir_rna_seq.fa` (no interior `N` runs, so `separator` is
+/// always exactly `[-1, len]`) both are a no-op, matching the oracle exactly.
+/// For references with interior `N`s (e.g. the HLA DNA reference #39 was
+/// diagnosed against) neither is a no-op: `similarity` for overlaps reaching
+/// this loop is NOT always `0.0` (a real, `matchCnt`-derived ratio survives
+/// `GetOverlapsFromRead`'s own `>= refSeqSimilarity` filter, `SeqSet.hpp:
+/// 1836-1845,1896`, typically landing in `[0.8, 1.0]` for ref alleles since
+/// `radius = 10` by default means per-overlap indels don't force it to `0`
+/// either, `SeqSet.hpp:1754,1763`), so `needClip`'s `similarity < 0.95`
+/// escape hatch is a genuinely reachable condition, not dead code -- both
+/// calls are ported for fidelity.
 ///
 /// # Panics
 ///
@@ -1002,6 +1006,7 @@ pub fn parse_exon_comment(comment: &str, seq_len: usize) -> Vec<(i32, i32)> {
 /// [`crate::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read`] against
 /// the same reference set `allele_refs` was built from).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn assign_read(
     read: &[u8],
     overlaps: &[overlap::Overlap],
@@ -1031,14 +1036,26 @@ pub fn assign_read(
     let mut only_consider_clip = false;
     let mut good_match_cnt: i32 = -1;
 
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let len = r.len() as i32;
     for o in &sorted_overlaps {
-        if only_consider_clip && o.match_cnt < good_match_cnt {
-            // `needClip` is always false in this port's fixtures (see doc
-            // comment), so the `(!needClip || similarity < 0.95)` escape
-            // hatch never fires -- this is an unconditional `continue` here.
+        let allele_idx = usize::try_from(o.seq_idx).expect("seq_idx is non-negative");
+        // SeqSet.hpp:2163-2172 (fixes #40): see this function's doc comment
+        // ("AssignRead's OWN two IsSeparatorInRange calls") for why both
+        // calls are ported and why `needClip` is NOT dead code here.
+        let separator = &allele_refs[allele_idx].separator;
+        if is_separator_in_range(separator, o.seq_start, o.seq_end) {
             continue;
         }
-        let allele_idx = usize::try_from(o.seq_idx).expect("seq_idx is non-negative");
+        let need_clip = is_separator_in_range(
+            separator,
+            o.seq_start - o.read_start,
+            o.seq_end + (len - o.read_end - 1),
+        );
+        if only_consider_clip && o.match_cnt < good_match_cnt && (!need_clip || o.similarity < 0.95)
+        {
+            continue;
+        }
         let consensus = &allele_refs[allele_idx].consensus;
         if let Some(extended) = extend_overlap(r, consensus, o, ref_seq_similarity) {
             extended_overlaps.push(extended);
