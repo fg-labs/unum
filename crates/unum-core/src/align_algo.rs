@@ -158,6 +158,67 @@ impl PosWeight {
     }
 }
 
+/// Interior-mutable variant of [`PosWeight`] used for the SHARED per-allele
+/// base-coverage counters in `AlleleRef::pos_weight`, so the base-coverage
+/// marking step of `assign_read` can run across `rayon` workers in parallel
+/// without a data race and WITHOUT per-thread copies of the (RSS-dominating)
+/// coverage structures.
+///
+/// The only shared mutation `assign_read` performs is `count[code] += weight`
+/// (an integer add). Integer addition is associative and commutative, so the
+/// FINAL sum after all workers join is independent of the order the adds land
+/// -- `fetch_add(_, Relaxed)` therefore yields byte-identical results to the
+/// sequential `+=` loop while `Relaxed` avoids any unnecessary fences (we only
+/// require the exact total once all threads have joined; no add ever depends
+/// on the value another add produced, and no code reads `count` mid-pass, so
+/// no `Acquire`/`Release` ordering is needed). Each `AtomicI32` is the same
+/// size as an `i32`, so switching to this type does not grow peak RSS.
+///
+/// Reads (`sum`, `count`) are only ever performed AFTER the parallel
+/// assignment pass has fully joined (`get_seq_missing_base_coverage`,
+/// `exon_base_coverage`), where `Relaxed` loads observe every prior
+/// `fetch_add`.
+#[derive(Debug, Default)]
+pub struct AtomicPosWeight {
+    /// Per-base observed counts, indexed by `nucToNum['A'..'T']` (A=0, C=1,
+    /// G=2, T=3) -- the atomic counterpart of [`PosWeight::count`].
+    pub count: [std::sync::atomic::AtomicI32; 4],
+}
+
+impl AtomicPosWeight {
+    /// Atomically adds `weight` to the `code`-th base count (mirrors
+    /// `count[code] += weight`). `Relaxed` is sufficient -- see the type-level
+    /// doc comment.
+    pub fn add(&self, code: usize, weight: i32) {
+        self.count[code].fetch_add(weight, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Loads the `code`-th base count. `Relaxed` is sufficient; only ever
+    /// called after the parallel pass has joined.
+    #[must_use]
+    pub fn get(&self, code: usize) -> i32 {
+        self.count[code].load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Clone for AtomicPosWeight {
+    /// A fresh, independent copy of the current counts (loads each atomic with
+    /// `Relaxed`). Only used off the hot path -- `AlleleRef::pos_weight` is
+    /// built once and shared by reference during assignment, never cloned per
+    /// read.
+    fn clone(&self) -> Self {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        Self {
+            count: [
+                AtomicI32::new(self.count[0].load(Ordering::Relaxed)),
+                AtomicI32::new(self.count[1].load(Ordering::Relaxed)),
+                AtomicI32::new(self.count[2].load(Ordering::Relaxed)),
+                AtomicI32::new(self.count[3].load(Ordering::Relaxed)),
+            ],
+        }
+    }
+}
+
 /// Maps `A`/`C`/`G`/`T` to their `nucToNum` index (0-3), matching the table
 /// defined in `Genotyper.cpp:37-40` (the binary that actually links
 /// `SeqSet`/`AlignAlgo`): every letter other than `A`/`C`/`G`/`T` maps to

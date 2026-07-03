@@ -827,7 +827,14 @@ pub struct AlleleRef {
     /// `SeqSet::AssignRead`'s `weight > 0` branch, `SeqSet.hpp:2253-2274`).
     /// Initialized to all-zero (`SetSeqExonInfo`'s `posWeight.SetZero`,
     /// `SeqSet.hpp:646`).
-    pub pos_weight: Vec<crate::align_algo::PosWeight>,
+    ///
+    /// Uses the interior-mutable [`crate::align_algo::AtomicPosWeight`] so the
+    /// base-coverage marking (`count[code] += weight`, an order-independent
+    /// integer add) can run across `rayon` workers via a SHARED `&[AlleleRef]`
+    /// in [`assign_reads_parallel`]'s fused pass, byte-identically to the
+    /// sequential loop (see `AtomicPosWeight`'s doc comment) and without
+    /// per-thread copies of these RSS-dominating structures.
+    pub pos_weight: Vec<crate::align_algo::AtomicPosWeight>,
     /// `_seqWrapper::separator` -- computed once at load time, identically in
     /// both `InputRefFa` (`SeqSet.hpp:~896`) and `InputRefSeq` (`SeqSet.hpp:
     /// ~913`): `[-1, <index of each 'N' byte>, seq_len]`, in that
@@ -853,7 +860,7 @@ impl AlleleRef {
         Self {
             consensus,
             exons,
-            pos_weight: vec![crate::align_algo::PosWeight::default(); len],
+            pos_weight: (0..len).map(|_| crate::align_algo::AtomicPosWeight::default()).collect(),
             separator,
         }
     }
@@ -1013,7 +1020,7 @@ pub fn parse_exon_comment(comment: &str, seq_len: usize) -> Vec<(i32, i32)> {
 pub fn assign_read(
     read: &[u8],
     overlaps: &[overlap::Overlap],
-    allele_refs: &mut [AlleleRef],
+    allele_refs: &[AlleleRef],
     ref_seq_similarity: f64,
     weight: i32,
     dp_cache: &mut crate::align_algo::DpCache,
@@ -1107,10 +1114,18 @@ pub fn assign_read(
             // otherwise recompute it.
             eo.relaxed_match_cnt = eo.match_cnt;
 
-            // Mark the base coverage (SeqSet.hpp:2252-2274). No locking
-            // needed: `assign_read` runs sequentially -- only the per-read
-            // overlap computation is parallelized (`-t N`); this shared
-            // mutation stays on the single sequential path (see module docs).
+            // Mark the base coverage (SeqSet.hpp:2252-2274). This is the ONLY
+            // shared mutation `assign_read` performs and the ONLY reason
+            // `assign_read` had to run sequentially. It is an order-independent
+            // integer add (`count[code] += weight`), so `pos_weight` uses
+            // `AtomicPosWeight` (`add` -> `fetch_add(_, Relaxed)`): the fused
+            // parallel pass in `assign_reads_parallel` can mark coverage across
+            // `rayon` workers via a shared `&[AlleleRef]` and still land the
+            // exact same totals as the sequential loop (see `AtomicPosWeight`).
+            // `assign_read` never READS `pos_weight` (of this or any allele)
+            // during its own execution -- it only writes here -- so there is no
+            // read-during-write race; all `pos_weight` reads happen after the
+            // pass joins (`get_seq_missing_base_coverage`).
             if weight > 0 {
                 let mut ref_pos = eo.seq_start;
                 let mut read_pos = eo.read_start;
@@ -1120,7 +1135,7 @@ pub fn assign_read(
                         if rb != b'N' {
                             if let Some(code) = nuc_to_num(rb) {
                                 let pos = usize::try_from(ref_pos).unwrap();
-                                allele_refs[allele_idx].pos_weight[pos].count[code] += weight;
+                                allele_refs[allele_idx].pos_weight[pos].add(code, weight);
                             }
                         }
                     }
@@ -1168,53 +1183,47 @@ pub fn assign_read(
 /// `sorted_seqs` entry, in the SAME order as `sorted_seqs` (index `i` of the
 /// result corresponds to `sorted_seqs[i]`).
 ///
-/// # Parallelism: read-only `get_overlaps_from_read` in parallel, `assign_read`
-/// always sequential, in `sorted_seqs` order
+/// # Parallelism: one fused, order-preserving work-stealing pass
 ///
 /// `threads <= 1` runs the plain sequential loop (no `rayon` pool is built at
 /// all): for each `seq`, call `get_overlaps_from_read` then immediately
 /// `assign_read`, exactly as the single-threaded reference driver always has.
 ///
-/// `threads > 1` splits the work into two phases:
-/// 1. **Parallel, read-only.** `get_overlaps_from_read` -- the dominant cost
-///    (k-mer hit lookup, LIS chaining, and `AlignAlgo`-based similarity
-///    refinement) -- is computed for every `sorted_seqs[i]` across `threads`
-///    `rayon` worker threads, each reusing its own [`Scratch`] via
-///    `map_init` (so `get_hits_from_read`'s hit list/bucket map/RC buffer are
-///    never shared across threads) and only ever borrowing `filter`/
-///    `allele_refs` (both `&`, hence `Sync`) -- no shared mutable state is
-///    touched in this phase. `rayon`'s `collect()` on an
-///    `IndexedParallelIterator` (`(&[&[u8]]).par_iter()` here) preserves
-///    input order, so the result `Vec` lines up with `sorted_seqs` regardless
-///    of which worker computed which entry or in what order they finished.
-/// 2. **Sequential, shared-mutation.** [`assign_read`] -- which mutates
-///    `allele_refs`' `pos_weight` base-coverage counters in place -- is then
-///    run over the precomputed overlaps SEQUENTIALLY, in `sorted_seqs` order
-///    (a plain `for` loop, zero `rayon`). Because this is the ONLY step that
-///    touches shared state, and it always runs in the same fixed order
-///    regardless of `threads`, the resulting `allele_refs` mutations (and
-///    therefore every downstream computation built on them) are
-///    thread-count-invariant -- `-t N` output is byte-identical to `-t 1` at
-///    any `N`. This is the SAFE-MINIMUM split documented in the P2
-///    parallelism task: `assign_read` itself (`SeqSet::AssignRead`,
-///    `SeqSet.hpp:2119-2303`) intersperses its own read-only
-///    `extend_overlap`/scoring loop with the `pos_weight` mutation loop
-///    inside a single ported, heavily cross-referenced function; splitting
-///    that function's two loops apart would risk introducing a genuine
-///    behavioral divergence from the C++ for a marginal additional speedup
-///    (the mutation loop itself is comparatively cheap -- one more
-///    `AlignAlgo::GlobalAlignment` per extended overlap, not the
-///    k-mer-index/LIS/hit-refinement work `get_overlaps_from_read` already
-///    does), so this port deliberately keeps `assign_read` a single
-///    sequential unit rather than splitting it further.
+/// `threads > 1` runs `get_overlaps_from_read` AND `assign_read` for each
+/// `sorted_seqs[i]` inside ONE `par_iter().map_init(...)` pass, with no
+/// barrier between them (an earlier design ran a parallel `get_overlaps`
+/// phase, `collect()`ed at a barrier, then a fully-sequential `assign_read`
+/// phase -- that barrier left ~24% of thread-time idle at `-t4`; fusing the
+/// two halves into one work-stealing pass removes it). Details:
 ///
-/// No global/thread-local mutable state is touched by either phase:
-/// `get_overlaps_from_read`'s `AlignAlgo`-based refinement
-/// (`crate::align_algo::global_alignment`/`global_alignment_pos_weight`)
-/// allocates fresh local buffers on every call -- there is no shared
-/// alignment scratch object to thread through, unlike `Scratch`'s
-/// hit-list/bucket-map/RC buffers, which are already per-worker via
-/// `map_init`.
+/// - **Per-worker state, never shared.** Each `rayon` worker threads its own
+///   [`Scratch`] (for `get_overlaps_from_read`'s hit list / bucket map / RC
+///   buffer) AND its own [`crate::align_algo::DpCache`] DP memo via
+///   `map_init`. The DP cache stays a pure per-worker memo -- exactly as it
+///   was when it lived in the old sequential phase -- so memoization changes
+///   nothing observable => byte-identical.
+/// - **`allele_refs` shared `&[AlleleRef]`.** The only shared mutation is
+///   `assign_read`'s `pos_weight` base-coverage marking, done through
+///   [`crate::align_algo::AtomicPosWeight`] (`add` ->
+///   `fetch_add(_, Relaxed)`). That marking is an order-independent integer
+///   add, so the FINAL accumulated coverage is identical no matter which
+///   worker's add lands first (see `AtomicPosWeight`'s doc comment).
+///   `assign_read` never READS `pos_weight` mid-pass (it only writes there),
+///   and `get_overlaps_from_read` uses only local zero-count `PosWeight`
+///   slices (never `allele_refs.pos_weight`), so there is no read-during-write
+///   race anywhere in the fused body. Every real `pos_weight` read
+///   (`get_seq_missing_base_coverage`) happens only after this pass joins.
+/// - **Order-preserving.** `collect()` on this `IndexedParallelIterator`
+///   (`(&[&[u8]]).par_iter()`) preserves input order, so the result `Vec`
+///   lines up with `sorted_seqs` regardless of which worker computed which
+///   entry or in what order they finished.
+///
+/// Together these make `-t N` output byte-identical to `-t 1` at any `N`
+/// (proven by the `parallel_threads_1_4_8` differential): the coverage totals
+/// are thread-count-invariant, and no other shared or global/thread-local
+/// mutable state is touched (`get_overlaps_from_read`'s `AlignAlgo`-based
+/// refinement allocates fresh local buffers per call -- there is no shared
+/// alignment scratch object beyond the per-worker `Scratch`/`DpCache`).
 ///
 /// # Panics
 ///
@@ -1228,7 +1237,7 @@ pub fn assign_read(
 pub fn assign_reads_parallel(
     filter: &RefKmerFilter,
     sorted_seqs: &[&[u8]],
-    allele_refs: &mut [AlleleRef],
+    allele_refs: &[AlleleRef],
     ref_seq_similarity: f64,
     weight_of: impl Fn(&[u8]) -> i32 + Sync,
     threads: usize,
@@ -1252,32 +1261,51 @@ pub fn assign_reads_parallel(
             .collect();
     }
 
-    // Phase 1: parallel, read-only get_overlaps_from_read, order-preserving.
+    // One fused, order-preserving parallel pass: each `rayon` worker computes
+    // `get_overlaps_from_read` AND then `assign_read` for the sequences it is
+    // handed, with NO barrier between the two (removes the ~24%-of-thread-time
+    // rayon idle that the old two-phase `collect()`-then-sequential-loop
+    // structure spent stalled at the barrier). Per-worker state (`Scratch` for
+    // `get_overlaps_from_read`'s hit list/bucket map/RC buffer, plus the
+    // `DpCache` DP memo) is threaded via `map_init`, so it is never shared
+    // across workers -- exactly as the DP cache was per-worker before, keeping
+    // it a pure per-worker memo => byte-identical results.
+    //
+    // `allele_refs` is now shared `&[AlleleRef]`: `assign_read`'s only shared
+    // mutation is the `pos_weight` base-coverage marking, which is an
+    // order-independent integer add done through `AtomicPosWeight` (see its doc
+    // comment and `assign_read`'s marking loop). No other shared state is
+    // touched by either half of the fused body, and no thread ever reads
+    // `pos_weight` mid-pass, so the accumulated coverage is thread-count-
+    // invariant -- `-t N` output is byte-identical to `-t 1` at any `N`.
+    //
+    // `collect()` on this `IndexedParallelIterator` (`(&[&[u8]]).par_iter()`)
+    // preserves input order, so the result `Vec` lines up with `sorted_seqs`
+    // regardless of which worker computed which entry or in what order they
+    // finished (`extended_by_seq` stays in `sorted_seqs` order downstream).
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
         .expect("building rayon thread pool for parallel read assignment");
-    let raw_overlaps: Vec<Vec<overlap::Overlap>> = pool.install(|| {
+    pool.install(|| {
         sorted_seqs
             .par_iter()
-            .map_init(Scratch::default, |scratch, &seq| {
-                filter.get_overlaps_from_read(seq, scratch).unwrap_or_default()
-            })
+            .map_init(
+                || (Scratch::default(), crate::align_algo::DpCache::new()),
+                |(scratch, dp_cache), &seq| {
+                    let raw = filter.get_overlaps_from_read(seq, scratch).unwrap_or_default();
+                    assign_read(
+                        seq,
+                        &raw,
+                        allele_refs,
+                        ref_seq_similarity,
+                        weight_of(seq),
+                        dp_cache,
+                    )
+                },
+            )
             .collect()
-    });
-
-    // Phase 2: sequential assign_read, in sorted_seqs order -- the only step
-    // that mutates shared allele_refs state. One reused `DpCache` for the whole
-    // loop (Phase 2 is single-threaded), memoizing the DP alignments across all
-    // reads (folds fork commit `a35ed72`).
-    let mut dp_cache = crate::align_algo::DpCache::new();
-    sorted_seqs
-        .iter()
-        .zip(raw_overlaps)
-        .map(|(&seq, raw)| {
-            assign_read(seq, &raw, allele_refs, ref_seq_similarity, weight_of(seq), &mut dp_cache)
-        })
-        .collect()
+    })
 }
 
 /// Ported from `SeqSet::GetSeqMissingBaseCoverage` (`SeqSet.hpp:2717-2755`):
@@ -1301,7 +1329,7 @@ pub fn get_seq_missing_base_coverage(allele_ref: &AlleleRef, ratio: f64) -> i32 
         let i_i32 = i as i32;
         if allele_ref.is_exon(i_i32) {
             let code = nuc_to_num(base).expect("consensus base is A/C/G/T");
-            exon_base_coverage.push(allele_ref.pos_weight[i].count[code]);
+            exon_base_coverage.push(allele_ref.pos_weight[i].get(code));
         }
     }
     exon_base_coverage.sort_unstable();
@@ -5176,12 +5204,19 @@ mod tests {
 
     #[test]
     fn get_seq_missing_base_coverage_counts_low_coverage_exon_bases() {
-        let mut allele_ref = AlleleRef::new(b"ACGTACGTAC".to_vec(), None); // whole-seq exon [0,9]
+        let allele_ref = AlleleRef::new(b"ACGTACGTAC".to_vec(), None); // whole-seq exon [0,9]
         // Give most positions high coverage, one position near-zero.
-        for pw in &mut allele_ref.pos_weight {
-            pw.count[0] = 10; // every position "looks like" high-A coverage for this synthetic test
+        for pw in &allele_ref.pos_weight {
+            pw.add(0, 10); // every position "looks like" high-A coverage for this synthetic test
         }
-        allele_ref.pos_weight[3].count = [0, 0, 0, 0]; // one position with a T base but 0 T-count
+        // one position with a T base but 0 T-count: leave pos_weight[3] at its
+        // all-zero default (do NOT add the synthetic count[0]=10 there).
+        {
+            use std::sync::atomic::Ordering;
+            for c in &allele_ref.pos_weight[3].count {
+                c.store(0, Ordering::Relaxed);
+            }
+        }
         // Position 3 is 'T' (0-indexed "ACGTACGTAC"), whose own base-count
         // is 0 (not the synthetic count[0]=10 written above) -- so it reads
         // as a true low-coverage exon base.
@@ -5275,31 +5310,32 @@ mod tests {
 
     // --- assign_read ---
 
+    /// Snapshots an [`AlleleRef`]'s `pos_weight` into plain `[i32; 4]` arrays
+    /// so tests can compare coverage totals with `assert_eq!` (the atomics
+    /// themselves are neither `Clone` into a comparable value nor `PartialEq`).
+    fn pos_weight_counts(allele_ref: &AlleleRef) -> Vec<[i32; 4]> {
+        allele_ref.pos_weight.iter().map(|w| [w.get(0), w.get(1), w.get(2), w.get(3)]).collect()
+    }
+
     #[test]
     fn assign_read_returns_none_for_empty_overlaps() {
-        let mut refs = vec![AlleleRef::new(b"ACGTACGT".to_vec(), None)];
-        let result = assign_read(
-            b"ACGTACGT",
-            &[],
-            &mut refs,
-            0.8,
-            1,
-            &mut crate::align_algo::DpCache::new(),
-        );
+        let refs = vec![AlleleRef::new(b"ACGTACGT".to_vec(), None)];
+        let result =
+            assign_read(b"ACGTACGT", &[], &refs, 0.8, 1, &mut crate::align_algo::DpCache::new());
         assert!(result.is_none());
     }
 
     #[test]
     fn assign_read_marks_base_coverage_for_matched_positions() {
         let consensus = b"ACGTACGTACGT".to_vec();
-        let mut refs = vec![AlleleRef::new(consensus.clone(), None)];
+        let refs = vec![AlleleRef::new(consensus.clone(), None)];
         let read = b"ACGTACGTACGT";
         let core = simple_overlap(0, 0, 11, 0, 11, 1);
 
         let result = assign_read(
             read,
             std::slice::from_ref(&core),
-            &mut refs,
+            &refs,
             0.8,
             1,
             &mut crate::align_algo::DpCache::new(),
@@ -5309,7 +5345,7 @@ mod tests {
         for (i, &base) in consensus.iter().enumerate() {
             let base_code = nuc_to_num(base).unwrap();
             assert!(
-                refs[0].pos_weight[i].count[base_code] > 0,
+                refs[0].pos_weight[i].get(base_code) > 0,
                 "position {i} (base {base}) should have coverage"
             );
         }
@@ -5349,7 +5385,7 @@ mod tests {
         sorted_seqs.sort_unstable();
 
         // Manual sequential loop (mirrors the pre-P2 driver code).
-        let mut manual_refs = vec![AlleleRef::new(consensus.clone(), None)];
+        let manual_refs = vec![AlleleRef::new(consensus.clone(), None)];
         let mut manual_dp_cache = crate::align_algo::DpCache::new();
         let manual: Vec<Option<Vec<ExtendedOverlap>>> = sorted_seqs
             .iter()
@@ -5357,19 +5393,19 @@ mod tests {
                 let raw = filter
                     .get_overlaps_from_read(seq, &mut crate::ref_kmer_filter::Scratch::default())
                     .unwrap_or_default();
-                assign_read(seq, &raw, &mut manual_refs, 0.8, 1, &mut manual_dp_cache)
+                assign_read(seq, &raw, &manual_refs, 0.8, 1, &mut manual_dp_cache)
             })
             .collect();
 
         // assign_reads_parallel at threads=1.
-        let mut parallel_refs = vec![AlleleRef::new(consensus, None)];
+        let parallel_refs = vec![AlleleRef::new(consensus, None)];
         let via_helper =
-            assign_reads_parallel(&filter, &sorted_seqs, &mut parallel_refs, 0.8, |_| 1, 1);
+            assign_reads_parallel(&filter, &sorted_seqs, &parallel_refs, 0.8, |_| 1, 1);
 
         assert_eq!(manual, via_helper, "threads=1 must match the manual sequential loop exactly");
         assert_eq!(
-            manual_refs[0].pos_weight.iter().map(|w| w.count).collect::<Vec<_>>(),
-            parallel_refs[0].pos_weight.iter().map(|w| w.count).collect::<Vec<_>>(),
+            pos_weight_counts(&manual_refs[0]),
+            pos_weight_counts(&parallel_refs[0]),
             "threads=1 must mutate pos_weight identically to the manual sequential loop"
         );
     }
@@ -5395,16 +5431,16 @@ mod tests {
         sorted_seqs.sort_unstable();
         sorted_seqs.dedup();
 
-        let mut refs_t1 = vec![AlleleRef::new(consensus.clone(), None)];
-        let result_t1 = assign_reads_parallel(&filter, &sorted_seqs, &mut refs_t1, 0.8, |_| 1, 1);
+        let refs_t1 = vec![AlleleRef::new(consensus.clone(), None)];
+        let result_t1 = assign_reads_parallel(&filter, &sorted_seqs, &refs_t1, 0.8, |_| 1, 1);
 
-        let mut refs_t4 = vec![AlleleRef::new(consensus, None)];
-        let result_t4 = assign_reads_parallel(&filter, &sorted_seqs, &mut refs_t4, 0.8, |_| 1, 4);
+        let refs_t4 = vec![AlleleRef::new(consensus, None)];
+        let result_t4 = assign_reads_parallel(&filter, &sorted_seqs, &refs_t4, 0.8, |_| 1, 4);
 
         assert_eq!(result_t1, result_t4, "threads=1 vs threads=4 ExtendedOverlaps must match");
         assert_eq!(
-            refs_t1[0].pos_weight.iter().map(|w| w.count).collect::<Vec<_>>(),
-            refs_t4[0].pos_weight.iter().map(|w| w.count).collect::<Vec<_>>(),
+            pos_weight_counts(&refs_t1[0]),
+            pos_weight_counts(&refs_t4[0]),
             "threads=1 vs threads=4 pos_weight mutations must match exactly"
         );
         assert!(

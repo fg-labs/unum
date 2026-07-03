@@ -39,6 +39,7 @@
 //! populate.
 use crate::cli::AnalyzeArgs;
 use anyhow::{Context, Result, bail, ensure};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
@@ -344,7 +345,10 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
     genotyper.set_read_length(i32::try_from(max_read_length).unwrap_or(0));
 
     // --- Read-end alignment, reusing identical sequences (Analyzer.cpp:455-511) ---
-    let mut allele_refs = loaded.allele_refs;
+    // Not `mut`: `assign_read` takes `&[AlleleRef]` (coverage marking, when it
+    // runs, goes through interior-mutable `AtomicPosWeight`); the analyzer path
+    // passes `weight=0` so no coverage is marked at all here.
+    let allele_refs = loaded.allele_refs;
     let mut all_seqs: Vec<&[u8]> = reads1.iter().map(|r| r.seq.as_slice()).collect();
     all_seqs.extend(reads2.iter().map(|r| r.seq.as_slice()));
     let mut sorted_seqs = all_seqs.clone();
@@ -365,7 +369,7 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
         let extended = genotyper::assign_read(
             seq,
             &raw_overlaps,
-            &mut allele_refs,
+            &allele_refs,
             args.similarity,
             0,
             &mut dp_cache,
@@ -460,7 +464,10 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
     // No `RemoveLowLikelihoodAlleleInEquivalentClass`/`SelectAllelesForGenes`
     // call here -- those are genotype-SELECTION steps `analyzer` does not run
     // (see this module's doc comment).
+    // Per-allele independent -> embarrassingly parallel, byte-identical to the
+    // serial map (each allele reads only its own `pos_weight`).
     let missing_coverage: Vec<i32> = (0..allele_cnt)
+        .into_par_iter()
         .map(|i| genotyper::get_seq_missing_base_coverage(&allele_refs[i], 0.01))
         .collect();
     genotyper.finalize_read_assignments(&missing_coverage);

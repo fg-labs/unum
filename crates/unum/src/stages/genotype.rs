@@ -40,6 +40,7 @@
 //! filesystem I/O as an implementation detail.
 use crate::cli::GenotypeArgs;
 use anyhow::{Context, Result, bail, ensure};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::Path;
@@ -332,7 +333,11 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     // `sorted_seqs`; `assign_read`'s `allele_refs` mutation always runs
     // sequentially in `sorted_seqs` order, so output is byte-identical at any
     // thread count -- see `genotyper::assign_reads_parallel`'s doc comment.
-    let mut allele_refs = loaded.allele_refs;
+    // Not `mut`: `assign_reads_parallel` mutates each allele's `pos_weight`
+    // base-coverage counters through interior mutability (`AtomicPosWeight`),
+    // so it takes `&[AlleleRef]` -- the shared borrow is what lets the fused
+    // pass mark coverage across `rayon` workers.
+    let allele_refs = loaded.allele_refs;
     let mut all_seqs: Vec<&[u8]> = reads1.iter().map(|r| r.seq.as_slice()).collect();
     all_seqs.extend(reads2.iter().map(|r| r.seq.as_slice()));
     let mut sorted_seqs = all_seqs.clone();
@@ -347,7 +352,7 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     let extended_by_seq = genotyper::assign_reads_parallel(
         &filter,
         &sorted_seqs,
-        &mut allele_refs,
+        &allele_refs,
         args.similarity,
         |seq| counted[seq],
         threads,
@@ -411,7 +416,11 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     genotyper.coalesce_read_assignments(0, i32::try_from(read_cnt.saturating_sub(1)).unwrap_or(0));
 
     // --- FinalizeReadAssignments + quantification + selection (Genotyper.cpp:634-650) ---
+    // Per-allele independent (each reads only its own `pos_weight`, which is
+    // fully accumulated once `assign_reads_parallel` above has joined), so this
+    // is embarrassingly parallel and byte-identical to the serial map.
     let missing_coverage: Vec<i32> = (0..allele_cnt)
+        .into_par_iter()
         .map(|i| genotyper::get_seq_missing_base_coverage(&allele_refs[i], 0.01))
         .collect();
     genotyper.finalize_read_assignments(&missing_coverage);
