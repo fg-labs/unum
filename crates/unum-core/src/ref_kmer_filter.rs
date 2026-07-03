@@ -274,6 +274,14 @@ pub struct Scratch {
     /// Reused `(tag, seqIdx) -> count` bucket map for `has_hit_in_set`'s
     /// add02ca touched-buckets bucket sort (see that function's doc comment).
     buckets: HashMap<(i8, u32), u32>,
+    /// Per-thread memoization cache for the DP alignment path
+    /// (`global_alignment`). `assign_reads_parallel`'s `map_init` gives one
+    /// `Scratch` -- hence one `DpCache` -- per rayon worker, which is the
+    /// lock-free thread-local equivalent of the fork's `thread_local`
+    /// `unordered_map` (folds fork commit `a35ed72`). See [`DpCache`].
+    ///
+    /// [`DpCache`]: crate::align_algo::DpCache
+    pub dp_cache: crate::align_algo::DpCache,
 }
 
 /// Reference-k-mer read-candidate filter: the pure-Rust port of the
@@ -842,10 +850,11 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment(
+                            crate::align_algo::global_alignment_cached(
                                 seq_slice,
                                 read_slice,
                                 crate::align_algo::DEFAULT_BAND,
+                                &mut scratch.dp_cache,
                             )
                         } else {
                             // Novel-seq path: ported but unreachable from
@@ -926,10 +935,11 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment(
+                            crate::align_algo::global_alignment_cached(
                                 seq_slice,
                                 read_slice,
                                 crate::align_algo::DEFAULT_BAND,
+                                &mut scratch.dp_cache,
                             )
                         } else {
                             let gap_len = cur.b - (prev.b + kmer_length_i32);

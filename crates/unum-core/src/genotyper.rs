@@ -649,6 +649,7 @@ pub fn extend_overlap(
     allele_consensus: &[u8],
     overlap: &overlap::Overlap,
     ref_seq_similarity: f64,
+    dp_cache: &mut crate::align_algo::DpCache,
 ) -> Option<ExtendedOverlap> {
     let len = i32::try_from(read.len()).expect("read length fits in i32");
     let consensus_len =
@@ -674,10 +675,11 @@ pub fn extend_overlap(
     let left_seq_end = usize::try_from(overlap.seq_start).unwrap();
     let left_read_start = usize::try_from(overlap.read_start - left_overhang_size).unwrap();
     let left_read_end = usize::try_from(overlap.read_start).unwrap();
-    let left_align = crate::align_algo::global_alignment(
+    let left_align = crate::align_algo::global_alignment_cached(
         &allele_consensus[left_seq_start..left_seq_end],
         &read[left_read_start..left_read_end],
         crate::align_algo::DEFAULT_BAND,
+        dp_cache,
     );
     let (mut match_cnt, mut mismatch_cnt, mut indel_cnt) = (0, 0, 0);
     crate::align_algo::get_align_stats(
@@ -709,10 +711,11 @@ pub fn extend_overlap(
     let right_seq_end = usize::try_from(overlap.seq_end + 1 + right_overhang_size).unwrap();
     let right_read_start = usize::try_from(overlap.read_end + 1).unwrap();
     let right_read_end = usize::try_from(overlap.read_end + 1 + right_overhang_size).unwrap();
-    let right_align = crate::align_algo::global_alignment(
+    let right_align = crate::align_algo::global_alignment_cached(
         &allele_consensus[right_seq_start..right_seq_end],
         &read[right_read_start..right_read_end],
         crate::align_algo::DEFAULT_BAND,
+        dp_cache,
     );
     // `update = true`: accumulate onto the left-extension's stats (SeqSet.hpp:2057).
     crate::align_algo::get_align_stats(
@@ -1013,6 +1016,7 @@ pub fn assign_read(
     allele_refs: &mut [AlleleRef],
     ref_seq_similarity: f64,
     weight: i32,
+    dp_cache: &mut crate::align_algo::DpCache,
 ) -> Option<Vec<ExtendedOverlap>> {
     if overlaps.is_empty() {
         return None;
@@ -1057,7 +1061,7 @@ pub fn assign_read(
             continue;
         }
         let consensus = &allele_refs[allele_idx].consensus;
-        if let Some(extended) = extend_overlap(r, consensus, o, ref_seq_similarity) {
+        if let Some(extended) = extend_overlap(r, consensus, o, ref_seq_similarity, dp_cache) {
             extended_overlaps.push(extended);
             if !only_consider_clip && (good_match_cnt == -1 || o.match_cnt > good_match_cnt) {
                 good_match_cnt = o.match_cnt;
@@ -1091,10 +1095,11 @@ pub fn assign_read(
             let seq_end = usize::try_from(eo.seq_end).unwrap();
             let read_start = usize::try_from(eo.read_start).unwrap();
             let read_end = usize::try_from(eo.read_end).unwrap();
-            let align = crate::align_algo::global_alignment(
+            let align = crate::align_algo::global_alignment_cached(
                 &allele_refs[allele_idx].consensus[seq_start..=seq_end],
                 &r[read_start..=read_end],
                 crate::align_algo::DEFAULT_BAND,
+                dp_cache,
             );
 
             // `ignoreNonExonDiff == false`: `relaxedMatchCnt = matchCnt`
@@ -1229,12 +1234,20 @@ pub fn assign_reads_parallel(
     threads: usize,
 ) -> Vec<Option<Vec<ExtendedOverlap>>> {
     if threads <= 1 {
+        let mut scratch = Scratch::default();
+        let mut dp_cache = crate::align_algo::DpCache::new();
         return sorted_seqs
             .iter()
             .map(|&seq| {
-                let raw =
-                    filter.get_overlaps_from_read(seq, &mut Scratch::default()).unwrap_or_default();
-                assign_read(seq, &raw, allele_refs, ref_seq_similarity, weight_of(seq))
+                let raw = filter.get_overlaps_from_read(seq, &mut scratch).unwrap_or_default();
+                assign_read(
+                    seq,
+                    &raw,
+                    allele_refs,
+                    ref_seq_similarity,
+                    weight_of(seq),
+                    &mut dp_cache,
+                )
             })
             .collect();
     }
@@ -1254,11 +1267,16 @@ pub fn assign_reads_parallel(
     });
 
     // Phase 2: sequential assign_read, in sorted_seqs order -- the only step
-    // that mutates shared allele_refs state.
+    // that mutates shared allele_refs state. One reused `DpCache` for the whole
+    // loop (Phase 2 is single-threaded), memoizing the DP alignments across all
+    // reads (folds fork commit `a35ed72`).
+    let mut dp_cache = crate::align_algo::DpCache::new();
     sorted_seqs
         .iter()
         .zip(raw_overlaps)
-        .map(|(&seq, raw)| assign_read(seq, &raw, allele_refs, ref_seq_similarity, weight_of(seq)))
+        .map(|(&seq, raw)| {
+            assign_read(seq, &raw, allele_refs, ref_seq_similarity, weight_of(seq), &mut dp_cache)
+        })
         .collect()
 }
 
@@ -5213,7 +5231,8 @@ mod tests {
         let read = b"ACGTACGTACGT";
         let core = simple_overlap(0, 0, 11, 0, 11, 1);
         let extended =
-            extend_overlap(read, consensus, &core, 0.8).expect("should pass ref_seq_similarity");
+            extend_overlap(read, consensus, &core, 0.8, &mut crate::align_algo::DpCache::new())
+                .expect("should pass ref_seq_similarity");
         assert_eq!(extended.read_start, 0);
         assert_eq!(extended.read_end, 11);
         #[allow(clippy::float_cmp)]
@@ -5229,7 +5248,9 @@ mod tests {
         let consensus = b"AAAACGTACGTAAAA";
         let read = b"AAAACGTACGTAAAA";
         let core = simple_overlap(0, 4, 10, 4, 10, 1);
-        let extended = extend_overlap(read, consensus, &core, 0.8).unwrap();
+        let extended =
+            extend_overlap(read, consensus, &core, 0.8, &mut crate::align_algo::DpCache::new())
+                .unwrap();
         assert_eq!(extended.read_start, 0);
         assert_eq!(extended.read_end, 14);
         assert_eq!(extended.seq_start, 0);
@@ -5247,7 +5268,8 @@ mod tests {
         let read = b"AAAACCCCCCCCAAAA";
         let mut core = simple_overlap(0, 4, 11, 4, 11, 1); // the mismatching middle only
         core.match_cnt = 0; // no real matches in the core region
-        let extended = extend_overlap(read, consensus, &core, 0.99);
+        let extended =
+            extend_overlap(read, consensus, &core, 0.99, &mut crate::align_algo::DpCache::new());
         assert!(extended.is_none() || extended.unwrap().similarity < 0.99);
     }
 
@@ -5256,7 +5278,14 @@ mod tests {
     #[test]
     fn assign_read_returns_none_for_empty_overlaps() {
         let mut refs = vec![AlleleRef::new(b"ACGTACGT".to_vec(), None)];
-        let result = assign_read(b"ACGTACGT", &[], &mut refs, 0.8, 1);
+        let result = assign_read(
+            b"ACGTACGT",
+            &[],
+            &mut refs,
+            0.8,
+            1,
+            &mut crate::align_algo::DpCache::new(),
+        );
         assert!(result.is_none());
     }
 
@@ -5267,7 +5296,14 @@ mod tests {
         let read = b"ACGTACGTACGT";
         let core = simple_overlap(0, 0, 11, 0, 11, 1);
 
-        let result = assign_read(read, std::slice::from_ref(&core), &mut refs, 0.8, 1);
+        let result = assign_read(
+            read,
+            std::slice::from_ref(&core),
+            &mut refs,
+            0.8,
+            1,
+            &mut crate::align_algo::DpCache::new(),
+        );
         assert!(result.is_some());
         // Every position should now have nonzero coverage for its own base.
         for (i, &base) in consensus.iter().enumerate() {
@@ -5314,13 +5350,14 @@ mod tests {
 
         // Manual sequential loop (mirrors the pre-P2 driver code).
         let mut manual_refs = vec![AlleleRef::new(consensus.clone(), None)];
+        let mut manual_dp_cache = crate::align_algo::DpCache::new();
         let manual: Vec<Option<Vec<ExtendedOverlap>>> = sorted_seqs
             .iter()
             .map(|&seq| {
                 let raw = filter
                     .get_overlaps_from_read(seq, &mut crate::ref_kmer_filter::Scratch::default())
                     .unwrap_or_default();
-                assign_read(seq, &raw, &mut manual_refs, 0.8, 1)
+                assign_read(seq, &raw, &mut manual_refs, 0.8, 1, &mut manual_dp_cache)
             })
             .collect();
 

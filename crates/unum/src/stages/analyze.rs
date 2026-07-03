@@ -352,18 +352,24 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
     sorted_seqs.dedup();
 
     let mut overlaps_by_seq: HashMap<&[u8], Option<Vec<ExtendedOverlap>>> = HashMap::new();
+    let mut scratch = unum_core::ref_kmer_filter::Scratch::default();
+    let mut dp_cache = unum_core::align_algo::DpCache::new();
     for &seq in &sorted_seqs {
-        let raw_overlaps = filter
-            .get_overlaps_from_read(seq, &mut unum_core::ref_kmer_filter::Scratch::default())
-            .unwrap_or_default();
+        let raw_overlaps = filter.get_overlaps_from_read(seq, &mut scratch).unwrap_or_default();
         // Analyzer.cpp:476 calls AssignRead(..., weight=0): unlike the genotyper,
         // the analyzer does NOT accumulate per-base pos_weight coverage here (its
         // `missing_coverage` is never read on the analyzer path -- em_update /
         // set_allele_abundance use only ec length, and the missing-coverage
         // consumers are the genotype-selection steps analyzer never runs). Pass 0
         // to match the oracle exactly rather than the genotyper's occurrence count.
-        let extended =
-            genotyper::assign_read(seq, &raw_overlaps, &mut allele_refs, args.similarity, 0);
+        let extended = genotyper::assign_read(
+            seq,
+            &raw_overlaps,
+            &mut allele_refs,
+            args.similarity,
+            0,
+            &mut dp_cache,
+        );
         overlaps_by_seq.insert(seq, extended);
     }
 
