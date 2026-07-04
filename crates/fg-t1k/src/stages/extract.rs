@@ -1,37 +1,68 @@
-//! Thin CLI wrapper around `fg_t1k_core::extract`, the Rust port of
-//! `fastq-extractor` (`vendor/t1k/FastqExtractor.cpp`). All extraction
-//! logic (data-dependent setup, per-pair filtering, `OutputSeq` formatting)
-//! lives in `fg-t1k-core`; this module only:
-//! 1. Constructs the initial `k=9` [`fg_t1k_core::ref_kmer_filter::RefKmerFilter`]
-//!    from `-f`.
-//! 2. Constructs the paired/single-end read source from `-1`/`-2` or `-u`.
-//! 3. Opens the output file(s) (`{prefix}_1.fq`/`_2.fq` for paired,
-//!    `{prefix}.fq` for single-end -- `FastqExtractor.cpp:425-439`) and
-//!    wraps them in a [`FastqFileSink`].
-//! 4. Calls [`fg_t1k_core::extract::extract_candidates`].
+//! Thin CLI wrapper around `fg_t1k_core::extract` (the Rust port of
+//! `fastq-extractor`, `vendor/t1k/FastqExtractor.cpp`) and
+//! `fg_t1k_core::bam_extract` (the Rust port of `bam-extractor`,
+//! `vendor/t1k/BamExtractor.cpp`). All extraction logic (data-dependent
+//! setup, per-pair/per-pass filtering, `OutputSeq` formatting) lives in
+//! `fg-t1k-core`; this module only:
+//! 1. Dispatches on `-b`: BAM mode ([`run_bam`]) if given, else FASTQ mode
+//!    ([`run_fastq`]).
+//! 2. FASTQ mode: constructs the initial `k=9`
+//!    [`fg_t1k_core::ref_kmer_filter::RefKmerFilter`] from `-f`, the
+//!    paired/single-end read source from `-1`/`-2` or `-u`, and calls
+//!    [`fg_t1k_core::extract::extract_candidates`].
+//! 3. BAM mode: parses `-f` as a `_coord.fa` (via
+//!    [`fg_t1k_core::bam_extract::parse_coord_fa`]), builds the
+//!    [`RefKmerFilter`] from its sequences and the sorted gene-interval list
+//!    (via [`fg_t1k_core::bam_extract::build_genes`]), opens `-b` as an
+//!    [`fg_t1k_core::alignments::Alignments`], and calls
+//!    [`fg_t1k_core::bam_extract::extract_from_bam`].
+//!
+//! Both modes share [`FastqFileSink`] (`{prefix}_1.fq`/`_2.fq` for paired,
+//! `{prefix}.fq` for single-end -- `FastqExtractor.cpp:425-439` /
+//! `BamExtractor.cpp:599-610`, identical naming convention).
 //!
 //! # Follow-up: wiring into the `--engine` strangler router
 //!
 //! `stages::run`'s `extract` stage currently only dispatches to the C++
 //! oracle (`Engine::Cpp` in `stages::run`'s `match overrides.engine_for(...)`)
-//! and returns an error for `Engine::Rust`. Wiring `extract_candidates` in as
-//! that `Engine::Rust` implementation is a deliberate follow-up, not done in
-//! this task -- this module currently only exposes a standalone `fg-t1k
-//! extract` subcommand.
+//! and returns an error for `Engine::Rust`. Wiring `extract_candidates`/
+//! `extract_from_bam` in as that `Engine::Rust` implementation is a
+//! deliberate follow-up, not done in this task -- this module currently only
+//! exposes a standalone `fg-t1k extract` subcommand.
 use crate::cli::ExtractArgs;
 use anyhow::{Context, Result, bail, ensure};
+use fg_t1k_core::alignments::Alignments;
+use fg_t1k_core::bam_extract;
 use fg_t1k_core::extract::{self, CandidateSink, ReadRecord};
 use fg_t1k_core::ref_kmer_filter::RefKmerFilter;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-/// `FastqExtractor.cpp:272`: the literal initial k-mer length the reference
-/// is first loaded at, before any data-dependent `InferKmerLength`/
-/// `UpdateKmerLength` adjustment.
+/// `FastqExtractor.cpp:272` / `BamExtractor.cpp:480`: the literal initial
+/// k-mer length the reference is first loaded at, before any data-dependent
+/// `InferKmerLength`/`UpdateKmerLength` adjustment. Shared by both modes
+/// (both vendored `main`s use the same literal `9`).
 const INITIAL_KMER_LENGTH: usize = 9;
 
-/// Runs the `extract` subcommand for `args`.
+/// Runs the `extract` subcommand for `args`: dispatches to [`run_bam`] if
+/// `-b` was given, else [`run_fastq`].
+///
+/// # Errors
+///
+/// See [`run_bam`]/[`run_fastq`].
+pub fn run(args: &ExtractArgs) -> Result<()> {
+    if let Some(bam_path) = args.bam.as_deref() {
+        ensure!(
+            args.mate1.is_none() && args.mate2.is_none() && args.single.is_none(),
+            "-b (BAM mode) is mutually exclusive with -1/-2/-u (FASTQ mode)"
+        );
+        return run_bam(args, bam_path);
+    }
+    run_fastq(args)
+}
+
+/// Runs FASTQ-mode extraction (the pre-existing `fastq-extractor` port).
 ///
 /// # Errors
 ///
@@ -40,7 +71,7 @@ const INITIAL_KMER_LENGTH: usize = 9;
 /// files cannot be opened/parsed; or [`fg_t1k_core::extract::extract_candidates`]
 /// itself fails (e.g. an empty read-1 file or mismatched mate-pair counts --
 /// see that function's doc comment).
-pub fn run(args: &ExtractArgs) -> Result<()> {
+fn run_fastq(args: &ExtractArgs) -> Result<()> {
     let mate2 = args.mate2.as_deref();
     let paired = args.mate1.is_some() || mate2.is_some();
     let single = args.single.as_deref();
@@ -59,7 +90,7 @@ pub fn run(args: &ExtractArgs) -> Result<()> {
     } else if let Some(single) = single {
         (single, None)
     } else {
-        bail!("must specify either -u (single-end) or -1/-2 (paired) read input");
+        bail!("must specify either -u (single-end) or -1/-2 (paired) read input, or -b (BAM)");
     };
 
     let mut filter =
@@ -85,6 +116,86 @@ pub fn run(args: &ExtractArgs) -> Result<()> {
     );
 
     sink.flush()?;
+    Ok(())
+}
+
+/// Runs BAM-mode extraction (the `bam-extractor` port): parses `-f` as a
+/// `_coord.fa`, opens `bam_path`, builds the [`RefKmerFilter`] and sorted
+/// gene-interval list, and calls
+/// [`fg_t1k_core::bam_extract::extract_from_bam`]. Output file naming
+/// (single-end vs. paired) is decided by the BAM's own sampled
+/// `frag_stdev` (`BamExtractor.cpp:599-610`), not a CLI flag -- so this
+/// function samples `general_info` itself up front (before opening
+/// [`FastqFileSink`]) purely to pick the right filename(s); see this
+/// function's body for why re-sampling here (rather than letting
+/// `extract_from_bam`'s own internal sample decide) is harmless.
+///
+/// # Errors
+///
+/// Returns an error if the coord FASTA or BAM/CRAM file cannot be
+/// opened/parsed, or if [`fg_t1k_core::bam_extract::extract_from_bam`] itself
+/// fails (e.g. an unaligned-template mate-pairing error -- see that
+/// function's doc comment).
+fn run_bam(args: &ExtractArgs, bam_path: &str) -> Result<()> {
+    let coord_records = bam_extract::parse_coord_fa(Path::new(&args.ref_seq_fasta))
+        .with_context(|| format!("parsing coord FASTA {}", args.ref_seq_fasta))?;
+
+    let mut filter =
+        RefKmerFilter::from_reference_fasta(Path::new(&args.ref_seq_fasta), INITIAL_KMER_LENGTH)
+            .with_context(|| format!("loading coord FASTA sequences {}", args.ref_seq_fasta))?;
+
+    let mut alignments =
+        Alignments::open(bam_path).with_context(|| format!("opening BAM/CRAM {bam_path}"))?;
+
+    let genes = bam_extract::build_genes(&alignments, &coord_records)
+        .context("resolving coord FASTA chroms to BAM header chrIds")?;
+
+    // Output naming (`{prefix}.fq` vs. `{prefix}_1.fq`/`_2.fq`) depends on
+    // frag_stdev (single-end vs. paired), matching BamExtractor.cpp:573-610:
+    // `GetGeneralInfo` is called BEFORE the output files are opened there.
+    // `extract_from_bam` computes this same statistic again internally (it
+    // owns the full data-dependent setup sequence, including the
+    // `hitLenRequired`/`InferKmerLength` steps that also depend on it) --
+    // calling `general_info` a second time here is a cheap, harmless extra
+    // BAM pass purely to decide a filename up front, not a semantic
+    // divergence (both calls sample the same file from the same rewound
+    // position and must agree).
+    let single_end =
+        alignments.general_info(true).context("sampling BAM for output naming")?.frag_stdev == 0;
+    alignments.rewind().context("rewinding after output-naming sample")?;
+
+    let mut sink = FastqFileSink::create(&args.prefix, !single_end)
+        .with_context(|| format!("creating output FASTQ file(s) for prefix {}", args.prefix))?;
+
+    let metrics = bam_extract::extract_from_bam(
+        &mut alignments,
+        &mut filter,
+        &genes,
+        args.abnormal_unmapped,
+        args.mate_id_suffix_len,
+        &mut sink,
+    )
+    .context("extracting candidate reads from BAM")?;
+    sink.flush()?;
+
+    if metrics.single_end {
+        eprintln!(
+            "extracted {} candidate reads (single-end, kmer_length={}, hit_len_required={})",
+            metrics.pass1_emitted, metrics.kmer_length, metrics.hit_len_required,
+        );
+    } else {
+        eprintln!(
+            "extracted {} + {} = {} candidate pairs (paired, kmer_length={}, \
+             hit_len_required={}, candidates_recorded={})",
+            metrics.pass1_emitted,
+            metrics.pass2_emitted,
+            metrics.pass1_emitted + metrics.pass2_emitted,
+            metrics.kmer_length,
+            metrics.hit_len_required,
+            metrics.candidates_recorded,
+        );
+    }
+
     Ok(())
 }
 

@@ -11,6 +11,13 @@
 #include "KmerCount.hpp"  // header-only; depends on KmerCode.hpp above
 #include "KmerIndex.hpp"  // header-only; depends on KmerCode.hpp + SimpleVector.hpp
 #include "SeqSet.hpp"     // header-only; depends on KmerIndex.hpp + ReadFiles.hpp (zlib) + AlignAlgo.hpp
+#include "alignments.hpp" // header-only; compiled WITH -DHTSLIB (build.rs passes -DHTSLIB plus an
+                           // -I alias resolving alignments.hpp's hardcoded
+                           // "htslib-1.15.1/htslib/sam.h" to hts-sys's real htslib headers), matching
+                           // how build.rs compiles the bam-extractor oracle binary. This is the same
+                           // htslib rust-htslib links, so this shim's static lib and any Rust test
+                           // binary linking it share exactly one htslib -- no samtools-0.1.19, no
+                           // duplicate-symbol collision.
 #include "shim.h"
 
 // nucToNum/numToNuc are extern in the headers, defined only in the T1K .cpp files
@@ -287,6 +294,198 @@ int fg_t1k_seqset_is_good_candidate(void* p, const char* read) {
             seqSet->HasHitInSet(const_cast<char*>(read), rcBuf)) {
             return 1;
         }
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Opaque-handle FFI for Alignments (vendor/t1k/alignments.hpp), scoped to
+// the BamExtractor.cpp slice -- see shim.h for the documented scope. Every
+// entry point is wrapped in try/catch per this shim's exception-safety rule
+// (no C++ exception may unwind across an `extern "C"` boundary), even though
+// Alignments' constructor itself is lightweight (no heap allocation that can
+// throw, unlike KmerCount/KmerIndex above).
+void* fg_t1k_alignments_new(void) {
+    try {
+        return new Alignments();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void fg_t1k_alignments_free(void* p) { delete static_cast<Alignments*>(p); }
+
+int fg_t1k_alignments_open(void* p, const char* path) {
+    try {
+        // Alignments::Open(char*) takes a non-const char* but only ever
+        // strcpy()s it into its own internal fileName buffer; const_cast is
+        // safe here. NOTE: the vendored Open() calls exit(1) (not a C++
+        // throw) on a hard open failure, which this try/catch CANNOT
+        // intercept -- callers must only pass paths known to exist and
+        // parse as BAM/SAM (see shim.h).
+        static_cast<Alignments*>(p)->Open(const_cast<char*>(path));
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_rewind(void* p) {
+    try {
+        static_cast<Alignments*>(p)->Rewind();
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_next(void* p) {
+    try {
+        return static_cast<Alignments*>(p)->Next();
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_get_read_seq(void* p, char* buffer, size_t buffer_size) {
+    try {
+        Alignments* a = static_cast<Alignments*>(p);
+        // GetReadSeq writes `len` bases plus a NUL terminator into `buffer`;
+        // reject a record that would not fit rather than overflow the caller's
+        // fixed buffer.
+        int len = a->GetReadLength();
+        if (len < 0 || static_cast<size_t>(len) >= buffer_size) {
+            return -1;
+        }
+        a->GetReadSeq(buffer);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_get_qual(void* p, char* buffer, size_t buffer_size) {
+    try {
+        Alignments* a = static_cast<Alignments*>(p);
+        // GetQual writes `len` quality bytes plus a NUL -- same bound as
+        // fg_t1k_alignments_get_read_seq above.
+        int len = a->GetReadLength();
+        if (len < 0 || static_cast<size_t>(len) >= buffer_size) {
+            return -1;
+        }
+        a->GetQual(buffer);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_get_read_id(void* p, char* buffer, size_t buffer_size) {
+    try {
+        const char* id = static_cast<Alignments*>(p)->GetReadId();
+        // Bounded copy: reject an id that would not fit (with its NUL) rather
+        // than an unbounded strcpy into the caller's fixed buffer.
+        size_t len = strlen(id);
+        if (len >= buffer_size) {
+            return -1;
+        }
+        memcpy(buffer, id, len + 1);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_is_first_mate(void* p) {
+    try {
+        return static_cast<Alignments*>(p)->IsFirstMate() ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_is_reverse(void* p) {
+    try {
+        return static_cast<Alignments*>(p)->IsReverse() ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_is_mate_reverse(void* p) {
+    try {
+        return static_cast<Alignments*>(p)->IsMateReverse() ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_is_aligned(void* p) {
+    try {
+        return static_cast<Alignments*>(p)->IsAligned() ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_is_template_aligned(void* p) {
+    try {
+        return static_cast<Alignments*>(p)->IsTemplateAligned() ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_is_primary(void* p) {
+    try {
+        return static_cast<Alignments*>(p)->IsPrimary() ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_get_chrom_id(void* p) {
+    try {
+        return static_cast<Alignments*>(p)->GetChromId();
+    } catch (...) {
+        return INT32_MIN;
+    }
+}
+
+int fg_t1k_alignments_seg_count(void* p) {
+    try {
+        return static_cast<Alignments*>(p)->segCnt;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_seg(void* p, int i, int64_t* out_a, int64_t* out_b) {
+    try {
+        Alignments* a = static_cast<Alignments*>(p);
+        // `operator[]` on an out-of-range index is undefined behavior, NOT a
+        // thrown exception, so the surrounding try/catch cannot protect it.
+        // Reject an out-of-range `i` (bad caller or future binding bug) with
+        // the same -1 sentinel rather than reading out of bounds.
+        if (i < 0 || i >= a->segCnt) {
+            return -1;
+        }
+        *out_a = a->segments[i].a;
+        *out_b = a->segments[i].b;
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int fg_t1k_alignments_general_info(void* p, int stop_early, int* out_frag_stdev,
+                                    int* out_read_len) {
+    try {
+        Alignments* a = static_cast<Alignments*>(p);
+        a->GetGeneralInfo(stop_early != 0);
+        *out_frag_stdev = a->fragStdev;
+        *out_read_len = a->readLen;
         return 0;
     } catch (...) {
         return -1;

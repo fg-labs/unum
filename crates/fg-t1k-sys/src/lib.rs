@@ -3,6 +3,15 @@
 //! fg-t1k-sys: all C++ contact. FFI shims + vendored T1K build. Dev/test only.
 //! `unsafe` is permitted here (FFI); nowhere else in the workspace.
 
+// `hts-sys` is a *direct* dependency (not merely transitive via rust-htslib)
+// solely so Cargo forwards its `links = "hts"` `DEP_HTS_*` env vars (include
+// dir, lib dir, ...) to this crate's `build.rs`, which uses them to compile
+// the vendored T1K oracle against the same htslib rust-htslib itself links
+// (see build.rs). No Rust code calls into it directly; `extern crate` keeps
+// the dependency from looking dead to a casual reader.
+#[allow(unused_extern_crates)]
+extern crate hts_sys;
+
 // oracle module and FFI decls are feature-gated (they depend on build-script env vars).
 #[cfg(feature = "t1k-sys")]
 pub mod oracle;
@@ -94,6 +103,50 @@ mod ffi {
         pub fn fg_t1k_seqset_is_low_complexity(p: *mut c_void, seq: *const c_char) -> i32;
         pub fn fg_t1k_seqset_has_hit_in_set(p: *mut c_void, read: *const c_char) -> i32;
         pub fn fg_t1k_seqset_is_good_candidate(p: *mut c_void, read: *const c_char) -> i32;
+
+        /// Constructs a real C++ `Alignments()`. Returns NULL if construction
+        /// threw (defense-in-depth only; the C++ constructor is lightweight
+        /// and not expected to throw in practice).
+        pub fn fg_t1k_alignments_new() -> *mut c_void;
+        pub fn fg_t1k_alignments_free(p: *mut c_void);
+        pub fn fg_t1k_alignments_open(p: *mut c_void, path: *const c_char) -> i32;
+        pub fn fg_t1k_alignments_rewind(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_next(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_get_read_seq(
+            p: *mut c_void,
+            buffer: *mut c_char,
+            buffer_size: usize,
+        ) -> i32;
+        pub fn fg_t1k_alignments_get_qual(
+            p: *mut c_void,
+            buffer: *mut c_char,
+            buffer_size: usize,
+        ) -> i32;
+        pub fn fg_t1k_alignments_get_read_id(
+            p: *mut c_void,
+            buffer: *mut c_char,
+            buffer_size: usize,
+        ) -> i32;
+        pub fn fg_t1k_alignments_is_first_mate(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_is_reverse(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_is_mate_reverse(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_is_aligned(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_is_template_aligned(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_is_primary(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_get_chrom_id(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_seg_count(p: *mut c_void) -> i32;
+        pub fn fg_t1k_alignments_seg(
+            p: *mut c_void,
+            i: i32,
+            out_a: *mut i64,
+            out_b: *mut i64,
+        ) -> i32;
+        pub fn fg_t1k_alignments_general_info(
+            p: *mut c_void,
+            stop_early: i32,
+            out_frag_stdev: *mut i32,
+            out_read_len: *mut i32,
+        ) -> i32;
     }
 }
 #[cfg(feature = "t1k-sys")]
@@ -579,4 +632,333 @@ impl Drop for CppSeqSet {
     fn drop(&mut self) {
         unsafe { ffi::fg_t1k_seqset_free(self.handle) }
     }
+}
+
+/// Scratch buffer size used for `GetReadSeq`/`GetQual`/`GetReadId` output --
+/// large enough for any realistic test read (matches the 100001-byte
+/// convention the shim itself uses for `HasHitInSet`'s internal RC scratch
+/// buffer, see `shim.cpp`).
+#[cfg(feature = "t1k-sys")]
+const ALIGNMENTS_BUFFER_SIZE: usize = 100_001;
+
+/// A single reference-coordinate alignment-block span, mirroring the C++
+/// `_pair64` fields (`a`/`b`) as read back via `fg_t1k_alignments_seg`.
+#[cfg(feature = "t1k-sys")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CppSegment {
+    pub a: i64,
+    pub b: i64,
+}
+
+/// The `fragStdev`/`readLen` pair `Alignments::GetGeneralInfo` computes,
+/// mirroring the two public fields `BamExtractor.cpp` reads directly off the
+/// struct.
+#[cfg(feature = "t1k-sys")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CppGeneralInfo {
+    pub frag_stdev: i32,
+    pub read_len: i32,
+}
+
+/// Safe Rust wrapper around the opaque C++ `Alignments*` handle
+/// (`vendor/t1k/alignments.hpp`), scoped to exactly the slice
+/// `BamExtractor.cpp` uses -- see `shim.h`'s `fg_t1k_alignments_*` doc
+/// comments for the per-method scope.
+///
+/// Owns the handle for its lifetime: [`CppAlignments::new`] allocates the
+/// C++ object via `fg_t1k_alignments_new` and `Drop` calls
+/// `fg_t1k_alignments_free` exactly once. Construction checks the returned
+/// handle for NULL, matching every other Cpp* wrapper in this module (the
+/// shim wraps the C++ constructor in a try/catch and returns NULL on any
+/// exception), even though `Alignments`' constructor is lightweight and not
+/// expected to throw in practice.
+///
+/// # `open` cannot recover from every C++-side failure
+///
+/// The vendored `Alignments::Open` calls `exit(1)` (not a C++ exception) on
+/// a hard file-open failure, which no `try/catch` at the shim boundary can
+/// intercept -- this would abort the whole test process, not just fail an
+/// assertion. Callers must therefore only ever point [`CppAlignments::open`]
+/// at a file already known to exist and parse as BAM/SAM.
+#[cfg(feature = "t1k-sys")]
+pub struct CppAlignments {
+    handle: *mut std::os::raw::c_void,
+}
+
+#[cfg(feature = "t1k-sys")]
+impl CppAlignments {
+    /// Constructs a new, unopened C++ `Alignments`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying `fg_t1k_alignments_new` call returns NULL.
+    #[must_use]
+    pub fn new() -> Self {
+        let handle = unsafe { ffi::fg_t1k_alignments_new() };
+        assert!(
+            !handle.is_null(),
+            "fg_t1k_alignments_new() returned NULL: C++ Alignments construction failed"
+        );
+        Self { handle }
+    }
+
+    /// Mirrors `Alignments::Open`. See the struct docs' "open cannot recover
+    /// from every C++-side failure" note: `path` must already be known to
+    /// exist and parse as BAM/SAM, since a hard open failure on the C++ side
+    /// is an unrecoverable `exit(1)`, not a catchable exception.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` is not valid UTF-8 representable as a NUL-terminated
+    /// C string, or if the underlying call reports failure via the shim's
+    /// catchable-exception path.
+    pub fn open(&mut self, path: &std::path::Path) {
+        let c_path = std::ffi::CString::new(path.to_str().expect("path must be UTF-8"))
+            .expect("path must not contain an interior NUL byte");
+        let rc = unsafe { ffi::fg_t1k_alignments_open(self.handle, c_path.as_ptr()) };
+        assert!(rc == 0, "fg_t1k_alignments_open({}) failed", path.display());
+    }
+
+    /// Mirrors `Alignments::Rewind`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    pub fn rewind(&mut self) {
+        let rc = unsafe { ffi::fg_t1k_alignments_rewind(self.handle) };
+        assert!(rc == 0, "fg_t1k_alignments_rewind failed");
+    }
+
+    /// Mirrors `Alignments::Next`. Returns `true` if a record was read,
+    /// `false` at EOF.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw (surfaced as a `-1` sentinel,
+    /// distinct from the `0` "clean EOF" return).
+    // Named `next` (not e.g. `advance`) deliberately, mirroring T1K's own
+    // `Alignments::Next()` name exactly; its `bool` signature does not match
+    // `Iterator::next`'s `Option<Self::Item>`, so there is no real risk of
+    // confusing the two.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> bool {
+        let rc = unsafe { ffi::fg_t1k_alignments_next(self.handle) };
+        assert!(rc >= 0, "fg_t1k_alignments_next threw a C++ exception");
+        rc != 0
+    }
+
+    /// Mirrors `Alignments::GetReadSeq`, returning the decoded sequence as
+    /// owned bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw, or if the C++ side wrote a
+    /// non-UTF8-safe / non-NUL-terminated buffer (would indicate a shim bug,
+    /// not a legitimate BAM content issue -- `GetReadSeq` only ever emits
+    /// `A`/`C`/`G`/`T`/`N`).
+    #[must_use]
+    pub fn get_read_seq(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; ALIGNMENTS_BUFFER_SIZE];
+        let rc = unsafe {
+            ffi::fg_t1k_alignments_get_read_seq(
+                self.handle,
+                buf.as_mut_ptr().cast::<std::os::raw::c_char>(),
+                buf.len(),
+            )
+        };
+        assert!(rc == 0, "fg_t1k_alignments_get_read_seq threw a C++ exception");
+        c_buf_to_vec(&buf)
+    }
+
+    /// Mirrors `Alignments::GetQual`, returning the phred+33-encoded quality
+    /// string as owned bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    #[must_use]
+    pub fn get_qual(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; ALIGNMENTS_BUFFER_SIZE];
+        let rc = unsafe {
+            ffi::fg_t1k_alignments_get_qual(
+                self.handle,
+                buf.as_mut_ptr().cast::<std::os::raw::c_char>(),
+                buf.len(),
+            )
+        };
+        assert!(rc == 0, "fg_t1k_alignments_get_qual threw a C++ exception");
+        c_buf_to_vec(&buf)
+    }
+
+    /// Mirrors `Alignments::GetReadId`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw, or the QNAME is not valid UTF-8
+    /// (T1K's own test/reference BAMs never contain non-UTF8 QNAMEs).
+    #[must_use]
+    pub fn get_read_id(&self) -> String {
+        let mut buf = vec![0u8; ALIGNMENTS_BUFFER_SIZE];
+        let rc = unsafe {
+            ffi::fg_t1k_alignments_get_read_id(
+                self.handle,
+                buf.as_mut_ptr().cast::<std::os::raw::c_char>(),
+                buf.len(),
+            )
+        };
+        assert!(rc == 0, "fg_t1k_alignments_get_read_id threw a C++ exception");
+        String::from_utf8(c_buf_to_vec(&buf)).expect("QNAME must be valid UTF-8")
+    }
+
+    /// Mirrors `Alignments::IsFirstMate`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    #[must_use]
+    pub fn is_first_mate(&self) -> bool {
+        bool_or_panic(unsafe { ffi::fg_t1k_alignments_is_first_mate(self.handle) }, "is_first_mate")
+    }
+
+    /// Mirrors `Alignments::IsReverse`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    #[must_use]
+    pub fn is_reverse(&self) -> bool {
+        bool_or_panic(unsafe { ffi::fg_t1k_alignments_is_reverse(self.handle) }, "is_reverse")
+    }
+
+    /// Mirrors `Alignments::IsMateReverse`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    #[must_use]
+    pub fn is_mate_reverse(&self) -> bool {
+        bool_or_panic(
+            unsafe { ffi::fg_t1k_alignments_is_mate_reverse(self.handle) },
+            "is_mate_reverse",
+        )
+    }
+
+    /// Mirrors `Alignments::IsAligned`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    #[must_use]
+    pub fn is_aligned(&self) -> bool {
+        bool_or_panic(unsafe { ffi::fg_t1k_alignments_is_aligned(self.handle) }, "is_aligned")
+    }
+
+    /// Mirrors `Alignments::IsTemplateAligned`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    #[must_use]
+    pub fn is_template_aligned(&self) -> bool {
+        bool_or_panic(
+            unsafe { ffi::fg_t1k_alignments_is_template_aligned(self.handle) },
+            "is_template_aligned",
+        )
+    }
+
+    /// Mirrors `Alignments::IsPrimary`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    #[must_use]
+    pub fn is_primary(&self) -> bool {
+        bool_or_panic(unsafe { ffi::fg_t1k_alignments_is_primary(self.handle) }, "is_primary")
+    }
+
+    /// Mirrors `Alignments::GetChromId`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw (surfaced as `INT32_MIN`, which a
+    /// real tid never legitimately is).
+    #[must_use]
+    pub fn get_chrom_id(&self) -> i32 {
+        let tid = unsafe { ffi::fg_t1k_alignments_get_chrom_id(self.handle) };
+        assert!(tid != i32::MIN, "fg_t1k_alignments_get_chrom_id threw a C++ exception");
+        tid
+    }
+
+    /// Mirrors `Alignments::segCnt` + `Alignments::segments[0..segCnt]`,
+    /// returned as an owned, order-preserving `Vec`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    #[must_use]
+    pub fn segments(&self) -> Vec<CppSegment> {
+        let count = unsafe { ffi::fg_t1k_alignments_seg_count(self.handle) };
+        assert!(count >= 0, "fg_t1k_alignments_seg_count threw a C++ exception");
+        let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+        for i in 0..count {
+            let mut a: i64 = 0;
+            let mut b: i64 = 0;
+            let rc = unsafe { ffi::fg_t1k_alignments_seg(self.handle, i, &mut a, &mut b) };
+            assert!(rc == 0, "fg_t1k_alignments_seg({i}) threw a C++ exception");
+            out.push(CppSegment { a, b });
+        }
+        out
+    }
+
+    /// Mirrors `Alignments::GetGeneralInfo(stopEarly)`, returning the
+    /// resulting `fragStdev`/`readLen` public fields.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying call threw.
+    pub fn general_info(&mut self, stop_early: bool) -> CppGeneralInfo {
+        let mut frag_stdev: i32 = 0;
+        let mut read_len: i32 = 0;
+        let rc = unsafe {
+            ffi::fg_t1k_alignments_general_info(
+                self.handle,
+                i32::from(stop_early),
+                &mut frag_stdev,
+                &mut read_len,
+            )
+        };
+        assert!(rc == 0, "fg_t1k_alignments_general_info threw a C++ exception");
+        CppGeneralInfo { frag_stdev, read_len }
+    }
+}
+
+#[cfg(feature = "t1k-sys")]
+impl Default for CppAlignments {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "t1k-sys")]
+impl Drop for CppAlignments {
+    fn drop(&mut self) {
+        unsafe { ffi::fg_t1k_alignments_free(self.handle) }
+    }
+}
+
+/// Truncates a C-style NUL-terminated buffer to its content bytes (up to but
+/// excluding the first NUL), matching how `GetReadSeq`/`GetQual`/
+/// `GetReadId`'s C-string output should be interpreted.
+#[cfg(feature = "t1k-sys")]
+fn c_buf_to_vec(buf: &[u8]) -> Vec<u8> {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf[..end].to_vec()
+}
+
+/// Converts a shim `1`/`0`/`-1` tri-state return into a `bool`, panicking on
+/// the `-1` (C++ exception) sentinel.
+#[cfg(feature = "t1k-sys")]
+fn bool_or_panic(rc: i32, method: &str) -> bool {
+    assert!(rc >= 0, "fg_t1k_alignments_{method} threw a C++ exception");
+    rc != 0
 }
