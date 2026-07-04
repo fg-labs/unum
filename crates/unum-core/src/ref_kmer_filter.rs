@@ -314,6 +314,13 @@ pub struct Scratch {
     rc_buf: Vec<u8>,
     /// Reused hit list, cleared and refilled by every `get_hits_from_read` call.
     hits: Vec<Hit>,
+    /// Reused [`overlap::OverlapHit`] staging buffer: `has_hit_in_set`'s gate 2
+    /// and `get_overlaps_from_read` both need to hand `overlap`'s functions a
+    /// `&[OverlapHit]` view of `hits` (the two hit structs are field-identical
+    /// but distinct types, keeping `overlap` free of a `ref_kmer_filter`
+    /// dependency). Cleared and refilled per call rather than re-`collect`ed
+    /// into a fresh `Vec` each read, killing a per-read allocation.
+    overlap_hits: Vec<OverlapHit>,
     /// Reused `(tag, seqIdx) -> count` bucket map for `has_hit_in_set`'s
     /// add02ca touched-buckets bucket sort (see that function's doc comment).
     buckets: HashMap<(i8, u32), u32>,
@@ -799,15 +806,22 @@ impl RefKmerFilter {
         // exactly, without needing to build all `2 * seqCount` buckets
         // up front.
         let (best_tag, best_idx) = best_bucket;
-        let winning_bucket_hits: Vec<OverlapHit> = scratch
-            .hits
-            .iter()
-            .filter(|hit| i8::from(hit.strand == 1) == best_tag && hit.idx == best_idx)
-            .map(|hit| hit.to_overlap_hit())
-            .collect();
+        // Reuse the scratch staging buffer (disjoint-field borrow: reads
+        // `hits`, refills `overlap_hits`) instead of `collect`ing a fresh `Vec`
+        // per read. Byte-identical: the stable filter over `scratch.hits`
+        // yields the same bucket members in the same encounter order.
+        scratch.overlap_hits.clear();
+        scratch.overlap_hits.extend(
+            scratch
+                .hits
+                .iter()
+                .filter(|hit| i8::from(hit.strand == 1) == best_tag && hit.idx == best_idx)
+                .map(|hit| hit.to_overlap_hit()),
+        );
+        let winning_bucket_hits = &scratch.overlap_hits;
 
         let overlaps = overlap::get_overlaps_from_hits(
-            &winning_bucket_hits,
+            winning_bucket_hits,
             self.hit_len_required,
             0,           // filter: HasHitInSet always passes filter=0 (SeqSet.hpp:1968).
             |_idx| true, // is_ref: every sequence loaded via from_reference_fasta is a reference (see module docs).
@@ -902,13 +916,18 @@ impl RefKmerFilter {
         self.get_hits_from_read(read, scratch);
         sort_hits(&mut scratch.hits, true, self.seq_count);
 
-        let winning_hits: Vec<OverlapHit> =
-            scratch.hits.iter().map(|hit| hit.to_overlap_hit()).collect();
+        // Stage the sorted hits as `OverlapHit`s in a reused scratch buffer
+        // (disjoint-field borrow: reads `hits`, refills `overlap_hits`), rather
+        // than `collect`ing a fresh `Vec` per read. Byte-identical: same values
+        // in the same order.
+        scratch.overlap_hits.clear();
+        scratch.overlap_hits.extend(scratch.hits.iter().map(|hit| hit.to_overlap_hit()));
+        let winning_hits = &scratch.overlap_hits;
 
         #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         let kmer_length_i32 = self.kmer_length as i32;
         let overlaps_with_coords = overlap::get_overlaps_from_hits_with_coords(
-            &winning_hits,
+            winning_hits,
             self.hit_len_required,
             0, // filter: GetOverlapsFromRead always passes filter=0 (SeqSet.hpp:1614).
             |idx| self.is_ref(idx),
