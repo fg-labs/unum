@@ -957,15 +957,14 @@ impl RefKmerFilter {
         let rc_read = scratch.rc_buf.clone();
 
         // Per-overlap AlignAlgo-based matchCnt/similarity refinement
-        // (SeqSet.hpp:1660-1882). `firstRef`/`bestNovelOverlap`/
-        // `readOverlapRepresentatives` are computed for fidelity with stock
-        // (see this function's own inline comments below) but -- as in
-        // stock -- never feed back into which overlaps are kept; only the
-        // final refSeqSimilarity/novelSeqSimilarity filter below does that.
-        let mut first_ref: i32 = -1;
-        let mut best_novel_overlap: i32 = -1;
-        let mut read_overlap_representatives: Vec<usize> = Vec::new();
-
+        // (SeqSet.hpp:1660-1882). Stock also maintains `firstRef`/
+        // `bestNovelOverlap`/`readOverlapRepresentatives` here, but -- as in
+        // stock -- they never feed back into which overlaps are kept (only the
+        // final refSeqSimilarity/novelSeqSimilarity filter below does that),
+        // so their bookkeeping (a `Vec` allocation plus an O(overlaps^2)
+        // containment scan) is omitted: it produced values this port's `let _
+        // = ...` sinks proved were never read. See this crate's history for
+        // the faithful-but-dead port that this removal replaces.
         for i in 0..overlaps.len() {
             let r: &[u8] = if overlaps[i].strand == 1 { read } else { &rc_read };
             let hit_coords = &overlaps_hit_coords[i];
@@ -977,12 +976,6 @@ impl RefKmerFilter {
             let mut similarity: f64 = 1.0;
 
             let is_ref = self.is_ref(overlaps[i].seq_idx);
-            if is_ref && first_ref == -1 {
-                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-                {
-                    first_ref = i as i32;
-                }
-            }
 
             match_cnt += 2 * kmer_length_i32;
 
@@ -1148,38 +1141,7 @@ impl RefKmerFilter {
                 overlaps[i].similarity = 0.0;
             }
             overlaps[i].match_cnt = match_cnt;
-
-            if !is_ref && overlaps[i].similarity > 0.0 {
-                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-                let i_i32 = i as i32;
-                if best_novel_overlap == -1
-                    || overlap::overlap_less_than(
-                        &overlaps[i],
-                        &overlaps[usize::try_from(best_novel_overlap).unwrap_or(0)],
-                    )
-                {
-                    best_novel_overlap = i_i32;
-                }
-            }
-
-            if overlaps[i].similarity > 0.0 {
-                let mut found = false;
-                for &k in &read_overlap_representatives {
-                    if overlaps[i].read_start >= overlaps[k].read_start
-                        && overlaps[i].read_end <= overlaps[k].read_end
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    read_overlap_representatives.push(i);
-                }
-            }
         }
-        let _ = first_ref; // computed for fidelity; never read again (matches stock).
-        let _ = best_novel_overlap; // computed for fidelity; never read again (matches stock).
-        let _ = read_overlap_representatives; // computed for fidelity; never read again (matches stock).
 
         // Final filter (SeqSet.hpp:1893-1908): keep only overlaps meeting
         // the isRef-vs-novel similarity threshold.
