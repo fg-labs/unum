@@ -2,4 +2,6 @@
 //! fg-t1k core: the pure-Rust port of T1K's pipeline. No C++ dependency.
 
 pub mod kmer;
+pub mod kmer_count;
+pub mod kmer_index;
 pub mod refbuild;
