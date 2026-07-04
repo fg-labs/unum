@@ -59,4 +59,12 @@ fn main() {
         .opt_level(3)
         .compile("t1k_shim");
     println!("cargo:rerun-if-changed={}", manifest_dir.join("shim").display());
+
+    // SeqSet.hpp (pulled in by shim.cpp for the SeqSet opaque handle) drags
+    // in ReadFiles.hpp (zlib-backed FASTA/FASTQ reading via kseq.h) and uses
+    // pthread_mutex_t/pthread_mutex_init/pthread_mutex_destroy directly, same
+    // as the "oracle binaries" compiled above -- link the same two system
+    // libs for the shim's final link step.
+    println!("cargo:rustc-link-lib=z");
+    println!("cargo:rustc-link-lib=pthread");
 }

@@ -9,6 +9,7 @@ use crate::engine::{Engine, EngineOverrides};
 use anyhow::Context;
 
 pub mod build;
+pub mod extract;
 
 /// Runs the full extract -> genotype -> analyze pipeline for `args`.
 ///
