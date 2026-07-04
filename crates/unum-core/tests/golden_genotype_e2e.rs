@@ -111,7 +111,7 @@ fn run_rust(out_prefix: &Path) {
         ret
     }
     let mut effective_len: Vec<i32> = consensus.iter().map(|s| compute_effective_len(s)).collect();
-    let mut allele_refs: Vec<AlleleRef> = consensus
+    let allele_refs: Vec<AlleleRef> = consensus
         .iter()
         .zip(&comments)
         .map(|(seq, comment)| AlleleRef::new(seq.clone(), comment.as_deref()))
@@ -171,12 +171,14 @@ fn run_rust(out_prefix: &Path) {
         *counted.entry(seq).or_insert(0) += 1;
     }
     let mut overlaps_by_seq: HashMap<&[u8], Option<Vec<ExtendedOverlap>>> = HashMap::new();
+    let mut dp_cache = unum_core::align_algo::DpCache::new();
     for &seq in &sorted_seqs {
         let w = counted[seq];
         let raw = filter
             .get_overlaps_from_read(seq, &mut unum_core::ref_kmer_filter::Scratch::default())
             .unwrap_or_default();
-        let extended = genotyper::assign_read(seq, &raw, &mut allele_refs, REF_SEQ_SIMILARITY, w);
+        let extended =
+            genotyper::assign_read(seq, &raw, &allele_refs, REF_SEQ_SIMILARITY, w, &mut dp_cache);
         overlaps_by_seq.insert(seq, extended);
     }
 

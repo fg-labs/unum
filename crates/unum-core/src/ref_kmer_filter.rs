@@ -1266,7 +1266,13 @@ impl RefKmerFilter {
         }
 
         let mut kmer_code = KmerCode::new(kl);
-        let mut prev_kmer_code = KmerCode::new(kl);
+        // `KmerCode::is_equal` compares ONLY the raw `.code` (kmer.rs:276-278),
+        // and `prev_kmer_code` is read exclusively via `is_equal` below, so the
+        // consecutive-duplicate-window dedup state can be tracked as a bare
+        // `u64` code (`KmerCode::new(kl).get_code()` == 0) instead of cloning a
+        // full 32-byte `KmerCode` per window. Byte-identical: only `.code` ever
+        // affected the dedup decision.
+        let mut prev_code: u64 = KmerCode::new(kl).get_code();
         let skip_limit = kl / 2;
         let mut skip_cnt = 0usize;
 
@@ -1278,13 +1284,13 @@ impl RefKmerFilter {
         }
         while i < len {
             kmer_code.append(read[i]);
-            if i == kl - 1 || !prev_kmer_code.is_equal(&kmer_code) {
+            if i == kl - 1 || prev_code != kmer_code.get_code() {
                 let found = self.seq_index.search(&kmer_code);
                 let size = found.len();
                 if size >= 100 && i != kl - 1 && i != len - 1 && skip_cnt < skip_limit {
                     skip_cnt += 1;
                     i += 1;
-                    continue; // matches C++: also skips the prev_kmer_code update below
+                    continue; // matches C++: also skips the prev_code update below
                 }
                 skip_cnt = 0;
                 // `i`/`kl` are window positions bounded by `len` (a real
@@ -1311,7 +1317,7 @@ impl RefKmerFilter {
                     });
                 }
             }
-            prev_kmer_code = kmer_code.clone();
+            prev_code = kmer_code.get_code();
             i += 1;
         }
 
@@ -1323,7 +1329,7 @@ impl RefKmerFilter {
 
         // Reverse strand (SeqSet.hpp:1158-1227). `kmer_code.Restart()`
         // equivalent: fresh code/invalid_pos at the same kmer_length.
-        // `prev_kmer_code` is deliberately NOT reset -- see this function's
+        // `prev_code` is deliberately NOT reset -- see this function's
         // doc comment.
         kmer_code = KmerCode::new(kl);
         skip_cnt = 0; // stock explicitly re-zeroes skipCnt here (SeqSet.hpp:1164)
@@ -1334,7 +1340,7 @@ impl RefKmerFilter {
         }
         while i < len {
             kmer_code.append(scratch.rc_buf[i]);
-            if i == kl - 1 || !prev_kmer_code.is_equal(&kmer_code) {
+            if i == kl - 1 || prev_code != kmer_code.get_code() {
                 let found = self.seq_index.search(&kmer_code);
                 let size = found.len();
                 if size >= 100 && i != kl - 1 && i != len - 1 && skip_cnt < skip_limit {
@@ -1362,7 +1368,7 @@ impl RefKmerFilter {
                     });
                 }
             }
-            prev_kmer_code = kmer_code.clone();
+            prev_code = kmer_code.get_code();
             i += 1;
         }
     }
