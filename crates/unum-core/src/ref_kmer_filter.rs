@@ -188,9 +188,14 @@ impl Hit {
 
 /// Ported from `_hit::operator<` (`SeqSet.hpp:74-86`): ascending by
 /// `strand`, then `indexHit.idx`, then `readOffset`, then `indexHit.offset`.
-/// This is the comparator `SortHits`'s `std::sort` fallback branch uses
-/// (`SeqSet.hpp:1589`); see [`sort_hits`]'s doc comment for the full
-/// bucket-sort-vs-`std::sort` dispatch this feeds into.
+/// This is the comparator `SortHits`'s `std::sort` fallback branch used
+/// (`SeqSet.hpp:1589`) before it was replaced by an equivalent radix sort on
+/// [`pack_hit_key`]; see [`sort_hits`]'s doc comment for the full
+/// bucket-sort-vs-radix dispatch this feeds into. It is retained as the
+/// canonical strict-total-order specification that [`pack_hit_key`]'s
+/// monotonicity is verified against (`pack_hit_key_matches_hit_less_than_order`);
+/// production sorting no longer calls it, hence `#[allow(dead_code)]`.
+#[allow(dead_code)]
 #[must_use]
 fn hit_less_than(a: &Hit, b: &Hit) -> bool {
     if a.strand != b.strand {
@@ -203,6 +208,45 @@ fn hit_less_than(a: &Hit, b: &Hit) -> bool {
         return a.read_offset < b.read_offset;
     }
     a.offset < b.offset
+}
+
+/// Packs a [`Hit`]'s four ordered fields (`strand`, `idx`, `read_offset`,
+/// `offset` -- exactly the fields [`hit_less_than`] compares, in that
+/// priority) into a single `u128` whose unsigned ordering is monotonic in
+/// [`hit_less_than`]: for any two hits `a`, `b`, `pack(a) < pack(b)` iff
+/// `hit_less_than(a, b)`, and `pack(a) == pack(b)` iff `a` and `b` tie in all
+/// four fields.
+///
+/// The packing is most-significant-field-first (`strand`, then `idx`, then
+/// `read_offset`, then `offset`), each field occupying a full-width lane so
+/// no reference size, read length, or offset value can overflow into a
+/// neighbouring field:
+///
+/// * `strand` (`i8`, only ever `-1` or `+1`): sign-flipped via `^ 0x80` so
+///   the two's-complement bit pattern orders `-1 < +1` as an unsigned byte
+///   (`0x7f < 0x81`), matching `hit_less_than`'s `a.strand < b.strand`.
+/// * `idx` (`u32`): used directly -- unsigned order already matches.
+/// * `read_offset` (`i32`): sign-flipped via `^ 0x8000_0000` so negative
+///   read offsets sort below non-negative ones as unsigned `u32`s.
+/// * `offset` (`u32`): used directly.
+///
+/// Because [`hit_less_than`] is a strict total order (two hits tie only when
+/// bit-identical in these four fields -- and each hit is a unique k-mer
+/// match, so real hit lists never actually tie), a stable radix sort keyed on
+/// this `u128` produces the SAME unique ordering as `sort_unstable_by(
+/// hit_less_than)` -- byte-identical to the C++ oracle. Verified by the
+/// `pack_hit_key_matches_hit_less_than_order` unit test.
+#[must_use]
+#[inline]
+fn pack_hit_key(h: &Hit) -> u128 {
+    #[allow(clippy::cast_sign_loss)]
+    let strand_flip = (h.strand as u8) ^ 0x80;
+    #[allow(clippy::cast_sign_loss)]
+    let read_offset_flip = (h.read_offset as u32) ^ 0x8000_0000;
+    (u128::from(strand_flip) << 96)
+        | (u128::from(h.idx) << 64)
+        | (u128::from(read_offset_flip) << 32)
+        | u128::from(h.offset)
 }
 
 /// Ported from `SeqSet::SortHits` (`SeqSet.hpp:1558-1590`): reorders `hits`
@@ -243,20 +287,17 @@ pub(crate) fn sort_hits(hits: &mut [Hit], already_read_order: bool, seq_count: u
         // `hit_less_than` is a strict total order over every field of `Hit`
         // that participates in equality (strand, idx, read_offset, offset --
         // `repeats` is not compared), so two hits only tie here if they are
-        // bit-identical in those four fields; `sort_unstable_by`'s lack of a
-        // stability guarantee is therefore unobservable, matching this
-        // codebase's established convention for other strict-total-order
-        // comparators (see `overlap.rs`'s `comp_sort_hit_coord_diff` doc
-        // comment for the same argument).
-        hits.sort_unstable_by(|a, b| {
-            if hit_less_than(a, b) {
-                std::cmp::Ordering::Less
-            } else if hit_less_than(b, a) {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+        // bit-identical in those four fields; the sorted order is therefore
+        // UNIQUELY determined and independent of the sort's stability. We
+        // exploit that to replace the O(n log n) comparison sort with an
+        // O(n) LSD radix sort keyed on `pack_hit_key`, whose unsigned u128
+        // order is monotonic in `hit_less_than` (see `pack_hit_key`'s doc and
+        // the `pack_hit_key_matches_hit_less_than_order` test) -- this yields
+        // the identical unique ordering, byte-identical to the C++ oracle,
+        // while being the dominant cost of `GetOverlapsFromRead`. `radsort`'s
+        // internal `unsafe` is the crate's own; `#![forbid(unsafe_code)]` on
+        // this crate is unaffected.
+        radsort::sort_by_key(hits, pack_hit_key);
     }
 }
 
@@ -1895,6 +1936,66 @@ mod tests {
         let b = a;
         assert!(!hit_less_than(&a, &b));
         assert!(!hit_less_than(&b, &a));
+    }
+
+    // ---- pack_hit_key (radix key monotonicity) -----------------------------
+
+    #[test]
+    fn pack_hit_key_matches_hit_less_than_order() {
+        // For a diverse set of hits spanning both strands, small/large idx,
+        // negative/zero/positive read_offset, and varying offset (including
+        // extreme u32/i32 boundary values), the unsigned u128 ordering of
+        // `pack_hit_key` must be monotonic in `hit_less_than`:
+        //   pack(a) < pack(b)  <=>  hit_less_than(a, b)
+        //   pack(a) == pack(b) <=>  neither less (bit-identical fields).
+        // This is the invariant that makes a radix sort on `pack_hit_key`
+        // byte-identical to `sort_unstable_by(hit_less_than)`.
+        let hits = vec![
+            h(0, 0, 0, -1),
+            h(0, 0, 0, 1),
+            h(0, 0, -5, 1),
+            h(0, 0, i32::MIN, 1),
+            h(0, 0, i32::MAX, 1),
+            h(0, u32::MAX, 0, 1),
+            h(u32::MAX, 0, 0, 1),
+            h(3, 7, 3, -1),
+            h(3, 7, 3, 1),
+            h(3, 8, 3, 1),
+            h(3, 7, 4, 1),
+            h(3, 7, 3, 1), // duplicate of an earlier hit -> must tie
+            h(1, u32::MAX, i32::MIN, 0),
+        ];
+        for a in &hits {
+            for b in &hits {
+                let ka = pack_hit_key(a);
+                let kb = pack_hit_key(b);
+                assert_eq!(
+                    ka < kb,
+                    hit_less_than(a, b),
+                    "pack ordering must match hit_less_than for {a:?} vs {b:?}",
+                );
+                assert_eq!(
+                    ka == kb,
+                    !hit_less_than(a, b) && !hit_less_than(b, a),
+                    "pack equality must match field-identity for {a:?} vs {b:?}",
+                );
+            }
+        }
+
+        // A full sort by pack_hit_key must equal a sort by hit_less_than.
+        let mut by_pack = hits.clone();
+        radsort::sort_by_key(&mut by_pack, pack_hit_key);
+        let mut by_cmp = hits;
+        by_cmp.sort_by(|a, b| {
+            if hit_less_than(a, b) {
+                std::cmp::Ordering::Less
+            } else if hit_less_than(b, a) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        assert_eq!(by_pack, by_cmp);
     }
 
     // ---- sort_hits (SeqSet::SortHits) --------------------------------------
