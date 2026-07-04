@@ -953,8 +953,17 @@ impl RefKmerFilter {
             overlaps_hit_coords.truncate(k);
         }
 
-        reverse_complement_into(read, &mut scratch.rc_buf);
-        let rc_read = scratch.rc_buf.clone();
+        // `get_hits_from_read` (called above at the top of this method) already
+        // filled `scratch.rc_buf` with `reverse_complement(read)` -- a full
+        // `clear()`+`resize(len)`+per-base overwrite, deterministic and
+        // idempotent -- and nothing between that call and here writes
+        // `scratch.rc_buf`, so it still holds the correct reverse complement.
+        // Take it out (a Vec move: no allocation, no recompute) so the
+        // refinement loop below can borrow it as `rc_read` while separately
+        // holding `&mut scratch.dp_cache`. It is moved back into
+        // `scratch.rc_buf` after the loop (see below) so its capacity is
+        // pooled across calls rather than reallocated per sequence.
+        let rc_read = std::mem::take(&mut scratch.rc_buf);
 
         // Per-overlap AlignAlgo-based matchCnt/similarity refinement
         // (SeqSet.hpp:1660-1882). Stock also maintains `firstRef`/
@@ -1142,6 +1151,13 @@ impl RefKmerFilter {
             }
             overlaps[i].match_cnt = match_cnt;
         }
+
+        // Return the reverse-complement buffer to the scratch so its allocated
+        // capacity survives for the next `get_hits_from_read` (which refills it
+        // in place). Without this move-back the `mem::take` above would leave
+        // `scratch.rc_buf` empty, forcing a fresh allocation per sequence and
+        // defeating the buffer pooling.
+        scratch.rc_buf = rc_read;
 
         // Final filter (SeqSet.hpp:1893-1908): keep only overlaps meeting
         // the isRef-vs-novel similarity threshold.
