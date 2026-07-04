@@ -158,6 +158,7 @@
 //!   `Genotyper::OutputRepresentativeAlleles` (`Genotyper.hpp:2180-2229`,
 //!   `_allele.tsv`).
 
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
 use crate::overlap;
@@ -1569,7 +1570,12 @@ fn read_assignment_to_fragment_assignment_impl(
             }
         }
         Some(overlaps2) => {
-            let mut seq_idx_to_overlap2: HashMap<u32, Vec<usize>> = HashMap::new();
+            // FxHashMap (not std SipHash): this map is rebuilt per read in the
+            // hot assignment loop and consumed only via point lookups
+            // (`.get(&o1.seq_idx)` below), so the hasher never affects output --
+            // byte-identical, just faster than SipHash on these small u32-keyed
+            // maps.
+            let mut seq_idx_to_overlap2: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
             for (i, o2) in overlaps2.iter().enumerate() {
                 seq_idx_to_overlap2.entry(o2.seq_idx).or_default().push(i);
             }
@@ -1594,7 +1600,10 @@ fn read_assignment_to_fragment_assignment_impl(
 
     // For each seq idx, keep the best fragment (SeqSet.hpp:2386-2455).
     let mut assign: Vec<Assembled> = Vec::new();
-    let mut seq_idx_to_assign_idx: HashMap<u32, usize> = HashMap::new();
+    // FxHashMap (not std SipHash): per-read map consumed only via point lookups
+    // (`.get(&seq_idx_u32)` below); `assign`'s order comes from the `fragments`
+    // Vec iteration, never this map -- byte-identical, faster than SipHash.
+    let mut seq_idx_to_assign_idx: FxHashMap<u32, usize> = FxHashMap::default();
     for &(a, b) in &fragments {
         let assembled = match (a, b) {
             (Some(a), b_opt) => {
