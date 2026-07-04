@@ -2316,20 +2316,53 @@ impl Genotyper {
         read_id: usize,
         assignment: &[FragmentOverlap],
         ref_seq_similarity: f64,
-        mut separator_lookup: impl FnMut(i32, i32, i32) -> bool,
+        separator_lookup: impl Fn(i32, i32, i32) -> bool,
     ) {
-        self.all_read_assignments[read_id].clear();
+        self.all_read_assignments[read_id] =
+            self.compute_read_assignment(assignment, ref_seq_similarity, separator_lookup);
+    }
 
+    /// Pure, `&self`-only counterpart to [`Genotyper::set_read_assignments`]:
+    /// computes the per-read `Vec<ReadAssignment>` for `assignment` and
+    /// *returns* it instead of writing it into `self.all_read_assignments`.
+    ///
+    /// This exists so the driver's fragment-assembly loop can be parallelized
+    /// across reads: each read's slot is a deterministic function of that
+    /// read's `assignment` plus immutable shared state (`self.max_assign_cnt`,
+    /// `self.allele_info[..].whitelist`, and the static
+    /// [`Genotyper::read_assignment_weight`]), with no cross-read dependence,
+    /// so computing the slots concurrently and moving them into
+    /// `all_read_assignments` (via [`Genotyper::set_all_read_assignments`])
+    /// yields byte-identical results to the serial `-t 1` loop. Taking `&self`
+    /// (not `&mut self`) is what makes it callable from multiple `rayon`
+    /// workers at once.
+    ///
+    /// Returns an empty `Vec` in the C++ bare-`return;` early-exit cases (see
+    /// [`Genotyper::set_read_assignments`]'s doc comment): `assignment.len() >
+    /// max_assign_cnt`, or any entry crossing a reference separator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any `assignment` entry has a negative `seq_idx` (which would
+    /// not index a valid allele) -- mirroring the same invariant the C++ relies
+    /// on when using `seqIdx` as a vector index.
+    #[must_use]
+    pub fn compute_read_assignment(
+        &self,
+        assignment: &[FragmentOverlap],
+        ref_seq_similarity: f64,
+        separator_lookup: impl Fn(i32, i32, i32) -> bool,
+    ) -> Vec<ReadAssignment> {
         let assignment_cnt = assignment.len();
         if self.max_assign_cnt > 0
             && i32::try_from(assignment_cnt).unwrap_or(i32::MAX) > self.max_assign_cnt
         {
-            return;
+            return Vec::new();
         }
 
         for a in assignment {
             if separator_lookup(a.seq_idx, a.seq_start, a.seq_end) {
-                return;
+                return Vec::new();
             }
         }
 
@@ -2344,6 +2377,7 @@ impl Genotyper {
             adjust_factor = 0.25;
         }
 
+        let mut out: Vec<ReadAssignment> = Vec::new();
         for a in assignment {
             let allele_idx = usize::try_from(a.seq_idx).expect("seq_idx must be non-negative");
             if !self.allele_info[allele_idx].whitelist {
@@ -2363,8 +2397,31 @@ impl Genotyper {
                 qual: a.qual as f32,
                 adjust_weight: (adjust_factor as f32) * weight,
             };
-            self.all_read_assignments[read_id].push(na);
+            out.push(na);
         }
+        out
+    }
+
+    /// Bulk-moves per-read assignment slots (as computed by
+    /// [`Genotyper::compute_read_assignment`]) into `self.all_read_assignments`,
+    /// replacing whatever [`Genotyper::init_read_assignments`] allocated.
+    ///
+    /// `slots` must have exactly one entry per read (i.e. `slots.len()` equal to
+    /// the `total_read_cnt` passed to `init_read_assignments`); this lets the
+    /// driver build every slot in parallel and then install them all at once.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slots.len()` does not match the current
+    /// `all_read_assignments` length (a driver bug: the slot vector must be
+    /// sized to the read count).
+    pub fn set_all_read_assignments(&mut self, slots: Vec<Vec<ReadAssignment>>) {
+        assert_eq!(
+            slots.len(),
+            self.all_read_assignments.len(),
+            "set_all_read_assignments slot count must match init_read_assignments read count",
+        );
+        self.all_read_assignments = slots;
     }
 
     /// Ported from `Genotyper::IsReadAssignmentTheSame`

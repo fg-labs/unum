@@ -10,14 +10,22 @@
 //!
 //! This port reproduces `Genotyper.cpp:main`'s per-read logic exactly (`Genotyper.cpp:463-480,
 //! 531-574`); it does not replicate stock's own `threadCnt > 1` batching mechanics, but achieves
-//! the same output-determinism property via a different means: `-t`/`--threads` parallelizes
-//! only the read-only `get_overlaps_from_read` phase of the read-assignment loop (see
-//! `unum_core::genotyper::assign_reads_parallel`'s doc comment), while every shared-state
-//! mutation (`assign_read`'s `allele_refs` coverage marking, and everything downstream --
-//! fragment assembly, `CoalesceReadAssignments`, the EM/quantification, allele selection) stays
-//! strictly sequential in a fixed, thread-count-independent order. So `-t N` output is
-//! byte-identical to `-t 1` (and to the oracle, itself always run at `-t 1` for the end-to-end
-//! differential) at any `N`. `--barcode`/`-a` (a precomputed abundance file, skipping
+//! the same output-determinism property via a different means. `-t`/`--threads` parallelizes two
+//! read-independent phases: (1) the read-only `get_overlaps_from_read` phase of the read-
+//! assignment loop (see `unum_core::genotyper::assign_reads_parallel`'s doc comment), and
+//! (2) the fragment-assembly loop, which is SLOT-INDEXED -- each read `i` writes only its own
+//! `all_read_assignments[i]` slot, computed by the pure
+//! `read_assignment_to_fragment_assignment` + `Genotyper::compute_read_assignment` from read
+//! `i`'s inputs plus immutable shared state (`max_assign_cnt`, per-allele `whitelist`, and the
+//! static `read_assignment_weight`), with NO cross-read order dependence -- so the parallel map
+//! produces byte-identical slots to the serial `-t 1` loop, which are then installed in one shot
+//! via `Genotyper::set_all_read_assignments`. Every genuinely order-dependent shared-state
+//! mutation still runs strictly sequentially in a fixed, thread-count-independent order:
+//! `assign_read`'s `allele_refs` coverage marking (interleaved within phase 1's parallel pass but
+//! order-invariant), and everything downstream -- `CoalesceReadAssignments`, the
+//! EM/quantification, allele selection. So `-t N` output is byte-identical to `-t 1` (and to the
+//! oracle, itself always run at `-t 1` for the end-to-end differential) at any `N`.
+//! `--barcode`/`-a` (a precomputed abundance file, skipping
 //! `QuantifyAlleleEquivalentClass` entirely)/`--alleleWhitelist`/`--outputReadAssignment` are not
 //! exposed by [`GenotypeArgs`] -- see that struct's doc comment.
 //!
@@ -45,7 +53,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::Path;
 use unum_core::fastq::FastqReader;
-use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper};
+use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper, ReadAssignment};
 use unum_core::ref_kmer_filter::RefKmerFilter;
 
 /// The k-mer length the genotyper's reference index/alignment is built at
@@ -387,42 +395,72 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
         genotyper::is_separator_in_range(&allele_refs[idx].separator, s, e)
     };
 
-    for i in 0..read_cnt {
-        let overlaps1 = overlaps_by_seq.get(reads1[i].seq.as_slice()).and_then(Option::as_ref);
-        let overlaps2 = if has_mate {
-            overlaps_by_seq.get(reads2[i].seq.as_slice()).and_then(Option::as_ref)
-        } else {
-            None
-        };
-        let has_n = reads1[i].has_n || (has_mate && reads2[i].has_n);
+    // Fragment assembly is parallelized across reads and byte-identical to
+    // `-t 1` because it is SLOT-INDEXED: each read `i`'s slot is computed by
+    // the pure `read_assignment_to_fragment_assignment` +
+    // `Genotyper::compute_read_assignment` from read `i`'s inputs plus
+    // immutable shared state (`&genotyper`, `overlaps_by_seq`, the read
+    // vectors, and the `Fn + Sync` lookup closures) -- there is NO cross-read
+    // order dependence, so `into_par_iter().collect()` produces the same
+    // `Vec<Vec<ReadAssignment>>` in the same slot order regardless of thread
+    // count. The slots are then moved into `all_read_assignments` in one shot
+    // (`set_all_read_assignments`). We run inside a scoped pool sized to `-t`
+    // so `-t 1` is strictly single-threaded (and still byte-identical).
+    let fragment_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("building rayon thread pool for parallel fragment assembly");
+    let slots: Vec<Vec<ReadAssignment>> = fragment_pool.install(|| {
+        (0..read_cnt)
+            .into_par_iter()
+            .map(|i| {
+                let overlaps1 =
+                    overlaps_by_seq.get(reads1[i].seq.as_slice()).and_then(Option::as_ref);
+                let overlaps2 = if has_mate {
+                    overlaps_by_seq.get(reads2[i].seq.as_slice()).and_then(Option::as_ref)
+                } else {
+                    None
+                };
+                let has_n = reads1[i].has_n || (has_mate && reads2[i].has_n);
 
-        let empty: Vec<ExtendedOverlap> = Vec::new();
-        let assignment = genotyper::read_assignment_to_fragment_assignment(
-            overlaps1.map_or(empty.as_slice(), Vec::as_slice),
-            if has_mate { Some(overlaps2.map_or(empty.as_slice(), Vec::as_slice)) } else { None },
-            has_n,
-            hit_len_required,
-            consensus_len_of,
-            separator_in_range,
-        );
-        genotyper.set_read_assignments(
-            i,
-            &assignment,
-            ref_seq_similarity,
-            separator_lookup_for_set_read_assignments,
-        );
-    }
+                let empty: Vec<ExtendedOverlap> = Vec::new();
+                let assignment = genotyper::read_assignment_to_fragment_assignment(
+                    overlaps1.map_or(empty.as_slice(), Vec::as_slice),
+                    if has_mate {
+                        Some(overlaps2.map_or(empty.as_slice(), Vec::as_slice))
+                    } else {
+                        None
+                    },
+                    has_n,
+                    hit_len_required,
+                    consensus_len_of,
+                    separator_in_range,
+                );
+                genotyper.compute_read_assignment(
+                    &assignment,
+                    ref_seq_similarity,
+                    separator_lookup_for_set_read_assignments,
+                )
+            })
+            .collect()
+    });
+    genotyper.set_all_read_assignments(slots);
 
     genotyper.coalesce_read_assignments(0, i32::try_from(read_cnt.saturating_sub(1)).unwrap_or(0));
 
     // --- FinalizeReadAssignments + quantification + selection (Genotyper.cpp:634-650) ---
     // Per-allele independent (each reads only its own `pos_weight`, which is
     // fully accumulated once `assign_reads_parallel` above has joined), so this
-    // is embarrassingly parallel and byte-identical to the serial map.
-    let missing_coverage: Vec<i32> = (0..allele_cnt)
-        .into_par_iter()
-        .map(|i| genotyper::get_seq_missing_base_coverage(&allele_refs[i], 0.01))
-        .collect();
+    // is embarrassingly parallel and byte-identical to the serial map. Run it
+    // inside `fragment_pool` (not Rayon's default global pool) so `-t` bounds
+    // this stage's worker count exactly as it does the fragment pass above --
+    // otherwise `-t 1` would silently parallelize this loop.
+    let missing_coverage: Vec<i32> = fragment_pool.install(|| {
+        (0..allele_cnt)
+            .into_par_iter()
+            .map(|i| genotyper::get_seq_missing_base_coverage(&allele_refs[i], 0.01))
+            .collect()
+    });
     genotyper.finalize_read_assignments(&missing_coverage);
 
     genotyper.quantify_allele_equivalent_class(&effective_len, &loaded.weight);
