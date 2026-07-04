@@ -185,3 +185,165 @@ was avoided per the "do not fabricate data" instruction for this task.
 - None blocking. The only note-worthy caveat is the rescue-order-tie coverage
   gap documented above — flagged for a follow-up fixture in Task 1.2, not a
   blocker for this task's deliverable.
+
+---
+
+# HLA subset and golden (Phase 1b, Task 1b.1)
+
+This section pins a small IPD-IMGT/HLA subset and its byte-identical Perl-oracle
+golden, extending the Phase-1 KIR pinning to HLA. Its distinguishing purpose is
+to **exercise the `srand(17)`/`rand()` UTR-padding path** in `ParseDatFile.pl`
+(`:575-602`), which on HLA fires only for the pseudogenes HLA-DRB2 and HLA-DRB7
+(RNA mode only). See the Phase-0 spike report (spike #8) for the full analysis.
+
+## Source data
+
+- **Database**: IPD-IMGT/HLA release **3.64.0** `hla.dat` (EMBL-flatfile format,
+  a series of records separated by `//\n`).
+- **Local source used**: `/Volumes/scratch-00001/t1k-hla-run/hlaidx/hla.dat`
+  (338 MB, 46,201 allele records; release confirmed by the
+  `IPD-IMGT/HLA Release Version 3.64.0` CC banner in each record). Not
+  re-downloaded — reused verbatim.
+
+## Subset: `hla_subset.dat` (168,729 bytes, 13 records)
+
+Extracted verbatim (byte-exact whole records, each terminated by its original
+`//\n`) by splitting the source `.dat` on the `//\n` record separator and
+selecting records whose `/allele="..."` FT qualifier matched a wanted name.
+Only real, verified-present records were used (looked up by exact allele name,
+never invented).
+
+| Allele | Gene | Mode role | Why chosen |
+|---|---|---|---|
+| `HLA-A*01:01:01:01`   | HLA-A    | typed | common class-I representative (2 alleles/gene exercises mode/consensus logic) |
+| `HLA-A*02:01:01:01`   | HLA-A    | typed | second common HLA-A allele |
+| `HLA-B*07:02:01:01`   | HLA-B    | typed | common class-I representative |
+| `HLA-B*08:01:01:01`   | HLA-B    | typed | second common HLA-B allele |
+| `HLA-C*07:01:01:01`   | HLA-C    | typed | common class-I representative |
+| `HLA-C*07:02:01:01`   | HLA-C    | typed | second common HLA-C allele |
+| `HLA-DRB1*01:01:01:01`| HLA-DRB1 | typed | common class-II representative |
+| `HLA-DRB1*03:01:01:01`| HLA-DRB1 | typed | second common HLA-DRB1 allele |
+| `HLA-DQB1*02:01:01:01`| HLA-DQB1 | typed | common class-II representative |
+| `HLA-DQB1*06:02:01:01`| HLA-DQB1 | typed | second common HLA-DQB1 allele |
+| `HLA-DRB2*01:01`      | HLA-DRB2 | **RNG pseudogene** | **Required.** Pseudogene whose only allele supplies **no** full 50 bp 3' flank, so the gene-level "no allele has a complete 50 bp 3'UTR" condition holds and the `srand(17)` 3'UTR random-padding path fires (RNA mode). Exercises Task 1b.2's drand48 port. |
+| `HLA-DRB7*01:01:01`   | HLA-DRB7 | **RNG pseudogene** | **Required.** Same as DRB2 — its 3'UTR is filled with 50 random bytes from the seeded PRNG in RNA mode. |
+| `HLA-DRB7*01:01:02`   | HLA-DRB7 | partial | second DRB7 allele, marked `partial` in the `.dat`; kept so DRB7 has >1 allele and to exercise `ParseDatFile.pl`'s `%partialAlleles` rescue path (analogous to KIR2DP1*00101 above). Like that KIR allele, it is **not** emitted to the FASTA (dropped by the length-mode rescue test). |
+
+Note: the typed genes (A/B/C/DRB1/DQB1) never reach the RNG path — confirmed
+below. Only the two pseudogenes do, and only in RNA mode.
+
+## Genome annotation GTF: `hla_genes.gtf` (969 bytes, 5 lines)
+
+- **Source**: GENCODE human, release **v50** (GRCh38), from
+  `https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/latest_release/gencode.v50.annotation.gtf.gz`
+- **Date fetched**: 2026-07-01 (same GENCODE v50 release used for the KIR GTF above).
+- Filtered to `chr6` + feature type `gene` + `gene_name` in
+  {HLA-A, HLA-B, HLA-C, HLA-DRB1, HLA-DQB1, HLA-DRB2, HLA-DRB7}. The download
+  was still in progress but had already fully covered chr6 and reached chr17,
+  so the chr6 MHC region is complete; the large `gtf.gz` lives only in scratch
+  and is not committed.
+- **DRB2/DRB7 are absent from GENCODE v50** (they are pseudogenes GENCODE does
+  not annotate), so only the 5 typed genes appear in the GTF. This is expected:
+  per `AddGeneCoord.pl`, any FASTA gene not present in the GTF keeps the default
+  not-found sentinel `chr19 -1 -1 +` (the script's `$defaultChr` is hardcoded to
+  `chr19`, a KIR-era default it applies verbatim to HLA too). Reproducing this
+  sentinel behavior for DRB2/DRB7 is part of the pinned oracle output.
+- Read `vendor/t1k/AddGeneCoord.pl` before subsetting: it consumes only rows
+  whose column 3 is exactly `gene`, reads the gene name from `gene_name "..."`
+  in col 9 and the chromosome from col 1 (prefixing `chr` if absent; GENCODE
+  already has it). It applies one hardcoded alias (`HFE:HLA-HFE`, irrelevant
+  here) and otherwise requires an exact `gene_name` match against the gene
+  parsed from the FASTA header (text before `*`). All 5 typed HLA gene names
+  matched directly with no aliasing.
+
+## Golden generation (`fixtures/refbuild/golden/`)
+
+Command:
+```bash
+perl vendor/t1k/t1k-build.pl -d fixtures/refbuild/hla_subset.dat \
+  -g fixtures/refbuild/hla_genes.gtf -o fixtures/refbuild/golden --prefix hla
+```
+
+| File | Bytes | Records | Notes |
+|---|---|---|---|
+| `hla_dna_seq.fa`   | 27,896 | 10 | DRB2/DRB7 pseudogenes not emitted in DNA mode |
+| `hla_rna_seq.fa`   | 13,191 | 12 | includes DRB2*01:01 and DRB7*01:01:01 with RNG-padded 3'UTR |
+| `hla_dna_coord.fa` | 27,502 | 10 | all 5 typed genes got real chr6 coords |
+| `hla_rna_coord.fa` | 12,787 | 12 | 5 typed genes → chr6 coords; DRB2/DRB7 → `chr19 -1 -1 +` sentinel |
+
+DRB7*01:01:02 (the `partial` allele) is dropped in both modes by the
+length-mode rescue test — the same mechanism that drops KIR2DP1*00101 above.
+
+## RNG-path confirmation (critical — the reason for this subset)
+
+Confirmed empirically on **this subset** using a COPY of `ParseDatFile.pl` in
+scratch (the vendored original was never edited; verified by `diff`):
+
+1. **Instrumented copy** (`warn` added at both RNG blocks) on the subset:
+   ```text
+   RNA mode warnings:  RNG5UTR gene=HLA-DRB2 bestlen=512
+                       RNG3UTR gene=HLA-DRB2 bestlen=0   <-- 50 truly-random bytes
+                       RNG5UTR gene=HLA-DRB7 bestlen=796
+                       RNG3UTR gene=HLA-DRB7 bestlen=0   <-- 50 truly-random bytes
+   DNA mode warnings:  (none)
+   ```
+   The instrumented output was byte-identical to the un-instrumented seed-17
+   output (warn-only, no behavior change). `bestlen=0` on the two 3'UTR entries
+   means no real flank exists, so all 50 padded bytes are pure PRNG output.
+
+2. **Seed-perturbation test** — ran the subset through a `srand(999)` scratch
+   copy and compared records order-independently against seed-17:
+   ```text
+   RNA mode: exactly 2 records differ -> HLA-DRB2*01:01, HLA-DRB7*01:01:01
+             (only their trailing 50 bp 3'UTR bytes)
+   DNA mode: 0 records differ
+   ```
+   This proves the seeded RNG stream reaches output for exactly these two
+   records, RNA mode only — the path Task 1b.2's drand48 port must reproduce.
+
+3. **Seed-17 3'UTR random tails for THIS subset** (present verbatim in the
+   committed `golden/hla_rna_seq.fa`; these ARE the drand48 output to match):
+   ```text
+   HLA-DRB2*01:01     3'UTR tail: CTGTCGATGCTTCCACGGAAGATACGTGCCAGACAGTTCCGATAAATTTA
+   HLA-DRB7*01:01:01  3'UTR tail: TCTGTAACAGACACGCTAGTCGGAAGCCGTGAACTCACTGTCCTGCGTAG
+   ```
+   These differ from the full-database spike-report tails **by design**: the
+   `rand()` consumption order follows `@alleleOrder` (file-parse order of all
+   parsed alleles), which differs between the 46k-record full `.dat` and this
+   13-record subset. Each input has its own deterministic seed-17 stream; the
+   golden pins the stream for THIS subset.
+
+## Determinism check and chosen invariant
+
+Ran the full golden generation (all 4 files, incl. `AddGeneCoord`) into two
+independent temp dirs plus 5 additional seq-only runs. All comparisons:
+
+```text
+hla_dna_seq  : RAW IDENTICAL   hla_rna_seq  : RAW IDENTICAL
+hla_dna_coord: RAW IDENTICAL   hla_rna_coord: RAW IDENTICAL
+(golden vs each temp run: RAW IDENTICAL for all 4 files)
+```
+
+**Chosen invariant for this HLA fixture: raw per-file byte-identity** (same as
+Phase-1 KIR). A Rust port must reproduce `hla_{dna,rna}_{seq,coord}.fa`
+byte-for-byte given `hla_subset.dat` + `hla_genes.gtf`.
+
+**Caveat (from spike #8), important for Task 1b.2's oracle harness on the FULL
+database:** `ParseDatFile.pl` output record ORDER is non-deterministic on large
+inputs due to Perl per-process hash-key randomization in the partial-allele
+rescue (`keys %partialAlleles`). On the full 46k-record `hla.dat`, raw file
+bytes differ run-to-run while content sorted by header is identical. This small
+13-record subset has only ONE partial allele (DRB7*01:01:02, never rescued), so
+no rescue-order ambiguity arises and raw byte-identity holds here — but a
+general HLA oracle should compare **records sorted by header**, not raw bytes.
+The RNG-padded 3'UTR bytes themselves are deterministic in CONTENT (drand48),
+independent of record order.
+
+## Deviations / concerns
+
+- None blocking. As with KIR, this subset's raw byte-identity does not exercise
+  the multi-way partial-allele rescue-order tie (only one partial allele, never
+  rescued) — the general full-database invariant is sort-by-header per spike #8.
+- The GENCODE v50 `gtf.gz` download was still streaming when the chr6 rows were
+  extracted; chr6 (through chr17) was fully present, so the 5 HLA gene rows are
+  complete and correct. The partial archive was not committed (scratch only).

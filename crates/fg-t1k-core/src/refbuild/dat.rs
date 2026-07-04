@@ -16,17 +16,16 @@
 //! implement `--mode genome`, since nothing in the current pipeline drives it.
 //! [`SeqKind`] therefore only has `Dna`/`Rna` variants.
 //!
-//! One further behavior is intentionally *not* replicated bit-for-bit: when a
-//! gene has **no** allele anywhere in the input with real 5'/3' flanking sequence
-//! (every allele of that gene needs synthetic UTR padding), `ParseDatFile.pl`
-//! falls back to `srand(17)`-seeded `rand()` calls to fabricate a random 50bp UTR.
-//! Perl's `rand()`/`srand()` stream is not a portably-specified algorithm, so
-//! reproducing it bit-for-bit in Rust cannot be verified without a fixture that
-//! actually exercises the fallback (the pinned `kir_subset.dat` fixture does not:
-//! every gene in it has at least one full-length record providing real UTR
-//! sequence — see `fixtures/refbuild/PINS.md`). Rather than fabricate an
-//! unverifiable RNG replica, [`emit_seq_fasta`] returns an error if this path
-//! would ever be needed; revisit if/when a fixture requiring it is added.
+//! When a gene has **no** allele anywhere in the input with real 5'/3' flanking
+//! sequence (every allele of that gene needs synthetic UTR padding),
+//! `ParseDatFile.pl` falls back to `srand(17)`-seeded `rand()` calls to
+//! fabricate a random 50bp UTR (`ParseDatFile.pl:575-602`). This is reproduced
+//! bit-for-bit by the sibling [`super::drand48`] module (a portable
+//! reimplementation of Perl's `drand48`-based `rand()`, *not* the host libc's
+//! `drand48(3)`) plus the draw-then-overlay logic in [`apply_utr_padding`].
+//! The `hla_subset.dat` fixture exercises this path for the HLA-DRB2/HLA-DRB7
+//! pseudogenes (RNA mode only) — see `fixtures/refbuild/PINS.md`'s "Phase 1b,
+//! Task 1b.1"/"1b.2" sections and `refbuild_build_hla.rs`'s golden test.
 //!
 //! # A note on `i64`/`usize` casts
 //!
@@ -48,6 +47,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+
+use super::drand48::Drand48;
 
 /// Nominal length, in bases, of the synthetic 5'/3' UTR padding appended to every
 /// allele's output sequence. Mirrors `ParseDatFile.pl`'s `$utrLength = 50`, which
@@ -360,6 +361,26 @@ fn perl_suffix(s: &str, n: i64) -> &str {
     &s[s.len() - n..]
 }
 
+/// `substr($seq, $offset, $length)` for `offset >= 0`, additionally
+/// supporting a *negative* `length` per perldoc -f substr ("If LENGTH is
+/// negative, leaves that many characters off the end of the string"), i.e.
+/// the substring runs from `offset` up to `length(seq) + length - 1`
+/// inclusive.
+///
+/// Needed only by `%geneBestPossible{5,3}UTRPadding` bookkeeping
+/// (`ParseDatFile.pl:256-259`), which computes `substr($seq, 0, $end)` where
+/// `$end = $exons[0] - 1` can be negative when an allele's first exon starts
+/// within one base of the record's very beginning. [`perl_substr`]'s
+/// documented precondition (`length >= 0`) does not hold at that call site,
+/// so it gets this dedicated, fully general helper instead.
+fn perl_substr_allow_negative_length(seq: &str, offset: i64, length: i64) -> &str {
+    let len = seq.len() as i64;
+    let start = offset.clamp(0, len);
+    let end = if length >= 0 { start + length } else { len + length };
+    let end = end.clamp(start, len);
+    &seq[start as usize..end as usize]
+}
+
 /// The byte at `pos` in `s`, or `None` if `pos` is out of bounds (including
 /// negative).
 fn byte_at(s: &str, pos: i64) -> Option<u8> {
@@ -419,9 +440,21 @@ struct BuildState {
     partial_set: HashSet<String>,
     /// First-seen 50bp of real sequence immediately before each gene's first
     /// exon (`%gene5UTRPadding`), and immediately after its last exon
-    /// (`%gene3UTRPadding`).
+    /// (`%gene3UTRPadding`). Populated only when an allele has a *full*
+    /// `UTR_LENGTH`-bp flank on that side; absent for a gene means every
+    /// allele of that gene needs the `srand(17)` fallback on that side (see
+    /// [`apply_utr_padding`]).
     gene_5utr: HashMap<String, String>,
     gene_3utr: HashMap<String, String>,
+    /// Longest partial (i.e. `< UTR_LENGTH`-bp) real flank seen for each gene,
+    /// on each side (`%geneBestPossible5UTRPadding` / `%geneBestPossible3UTRPadding`).
+    /// Collected from *every* processed record (partial-flagged or not),
+    /// mirroring the Perl's unconditional bookkeeping inside the per-record
+    /// `SQ` parsing block — this is the real sequence overlaid onto the
+    /// random fallback string in [`apply_utr_padding`] when a gene has no
+    /// full flank at all.
+    gene_best_5utr: HashMap<String, String>,
+    gene_best_3utr: HashMap<String, String>,
     /// Distribution of true (genomic, pre-merge) last-exon lengths per gene,
     /// collected from *every* processed record regardless of partial status
     /// (`%geneLastExonLengthDist`).
@@ -446,6 +479,7 @@ impl BuildState {
 /// updating `state` in place. Mirrors the body of `while (<FP>) { ... }`'s
 /// `/^SQ/` branch in `ParseDatFile.pl` (lines building `$outputSeq` through the
 /// final `push @alleleOrder, $allele` decision) for a single record.
+#[allow(clippy::too_many_lines)]
 fn build_one_allele(raw: &RawAllele, kind: SeqKind, state: &mut BuildState) {
     // `last if (scalar(@exons) == 0)`: `parse_dat` already drops such records.
     if raw.exons.is_empty() {
@@ -466,6 +500,21 @@ fn build_one_allele(raw: &RawAllele, kind: SeqKind, state: &mut BuildState) {
     let prefix_end = exons[0] - 1;
     if prefix_start < 0 {
         padding.0 = -prefix_start;
+        // `%geneBestPossible5UTRPadding` bookkeeping (`ParseDatFile.pl:256-259`):
+        // keep the longest-so-far partial flank for this gene, comparing
+        // against `prefix_end` (not the candidate's actual byte length —
+        // faithfully reproducing the Perl's own `substr($seq, 0, $end)`
+        // off-by-one, which yields `$end` bytes, one short of the full
+        // available range `[0, prefix_end]`).
+        let should_update = match state.gene_best_5utr.get(&gene) {
+            None => true,
+            Some(existing) => prefix_end > existing.len() as i64,
+        };
+        if should_update {
+            let candidate = perl_substr_allow_negative_length(&raw.sequence, 0, prefix_end)
+                .to_ascii_uppercase();
+            state.gene_best_5utr.insert(gene.clone(), candidate);
+        }
         prefix_start = 0;
     } else {
         state.gene_5utr.entry(gene.clone()).or_insert_with(|| {
@@ -524,6 +573,20 @@ fn build_one_allele(raw: &RawAllele, kind: SeqKind, state: &mut BuildState) {
         let mut after_end = after_start + UTR_LENGTH - 1;
         if after_end >= seq_len {
             padding.1 = after_end - seq_len + 1;
+            // `%geneBestPossible3UTRPadding` bookkeeping (`ParseDatFile.pl:362-365`):
+            // keep the longest-so-far partial flank (`length(seq) - start`
+            // bytes, i.e. everything from `after_start` to the end of the
+            // record's sequence) for this gene.
+            let candidate_len = seq_len - after_start;
+            let should_update = match state.gene_best_3utr.get(&gene) {
+                None => true,
+                Some(existing) => candidate_len > existing.len() as i64,
+            };
+            if should_update {
+                let candidate =
+                    perl_substr(&raw.sequence, after_start, candidate_len).to_ascii_uppercase();
+                state.gene_best_3utr.insert(gene.clone(), candidate);
+            }
             after_end = seq_len - 1;
         } else {
             state.gene_3utr.entry(gene.clone()).or_insert_with(|| {
@@ -624,16 +687,16 @@ fn build_dna_body(
 /// Top-level orchestrator: parses `alleles` (already produced by
 /// [`parse_dat`]) into one [`SeqKind`]'s seq-FASTA text, matching
 /// `ParseDatFile.pl`'s full pipeline: per-record build, gene shape statistics
-/// (dna mode), partial-allele rescue, UTR-padding application, the dna-only
-/// "exonization" length fix, the final `fixGeneLength` trim, and FASTA
-/// rendering.
+/// (dna mode), partial-allele rescue, UTR-padding application (including the
+/// `srand(17)`-seeded random fallback for genes with no real flank — see
+/// [`apply_utr_padding`]), the dna-only "exonization" length fix, the final
+/// `fixGeneLength` trim, and FASTA rendering.
 ///
 /// # Errors
 ///
-/// Returns an error if some allele needs synthetic UTR padding but no allele
-/// of its gene ever had real flanking sequence to source it from — see the
-/// module docs on why this port does not implement `ParseDatFile.pl`'s
-/// RNG-based fallback for that case.
+/// Currently infallible in practice (kept as `Result` for API stability and
+/// in case a future fallible step is added); no code path in this pipeline
+/// returns `Err` today.
 pub fn emit_seq_fasta(alleles: &[RawAllele], kind: SeqKind) -> Result<String> {
     let mut state = BuildState::default();
     for raw in alleles {
@@ -663,7 +726,7 @@ pub fn emit_seq_fasta(alleles: &[RawAllele], kind: SeqKind) -> Result<String> {
 
     rescue_partial_alleles(&mut state, kind, &gene_length_mode, &gene_exon_cnt_mode);
 
-    apply_utr_padding(&mut state)?;
+    apply_utr_padding(&mut state);
 
     if kind == SeqKind::Dna {
         fix_exonization(
@@ -929,45 +992,135 @@ fn splice_synthetic_introns(
 
 /// Prepends/appends each allele's owed 5'/3' UTR padding, borrowed from its
 /// gene's cached flanking sequence. Mirrors `ParseDatFile.pl`'s final UTR-
-/// application loop (the `srand(17)`-seeded random-fallback branches are not
-/// implemented — see module docs — so this errors instead of silently
-/// diverging from the Perl when a gene's cache is empty).
-///
-/// # Errors
-///
-/// See [`emit_seq_fasta`].
-fn apply_utr_padding(state: &mut BuildState) -> Result<()> {
+/// application loop (`ParseDatFile.pl:604-616`). Filling in any gene's
+/// missing cache entry with the `srand(17)`-seeded random fallback (for genes
+/// with no allele supplying a full real flank) happens first, in
+/// [`resolve_utr_padding_caches`].
+fn apply_utr_padding(state: &mut BuildState) {
+    resolve_utr_padding_caches(state);
+
     for allele in state.order.clone() {
         let gene = gene_of(&allele);
         let (pad_5p, pad_3p) = state.padding[&allele];
         let mut seq = state.seq[&allele].clone();
 
         if pad_5p > 0 {
-            let source = state
-                .gene_5utr
-                .get(&gene)
-                .with_context(|| missing_utr_padding_message(&allele, &gene, "5'", pad_5p))?;
+            let source = &state.gene_5utr[&gene];
             seq = format!("{}{seq}", perl_substr(source, 0, pad_5p));
         }
         if pad_3p > 0 {
-            let source = state
-                .gene_3utr
-                .get(&gene)
-                .with_context(|| missing_utr_padding_message(&allele, &gene, "3'", pad_3p))?;
+            let source = &state.gene_3utr[&gene];
             seq.push_str(perl_suffix(source, pad_3p));
         }
 
         state.seq.insert(allele, seq);
     }
-    Ok(())
 }
 
-fn missing_utr_padding_message(allele: &str, gene: &str, side: &str, bases: i64) -> String {
-    format!(
-        "allele {allele} (gene {gene}) needs {bases} bases of synthetic {side} UTR padding, but no \
-         allele of this gene had real flanking sequence to borrow from; this port does not implement \
-         ParseDatFile.pl's srand(17)-seeded random-UTR fallback for that case (see refbuild::dat module docs)"
-    )
+/// Fills in `gene_5utr`/`gene_3utr` for every gene that has no full real
+/// flank on a given side, via `ParseDatFile.pl`'s `srand(17)`-seeded
+/// random-UTR fallback (`ParseDatFile.pl:575-602`).
+///
+/// Mirrors the Perl's own single pass over the final, post-rescue
+/// `@alleleOrder`: for each allele, in order, check-and-fill the 5' cache for
+/// its gene, then check-and-fill the 3' cache. Filling is memoized per
+/// (gene, side) — once a gene's 50-byte padding string is set (whether from a
+/// real flank found during parsing, or synthesized here), later alleles of
+/// the same gene reuse it without drawing more randoms. `srand(17)` is seeded
+/// once, at the very start of this pass (matching the Perl calling `srand(17)`
+/// once per script invocation, unconditionally, before this loop), so the
+/// exact sequence of gene+side "first encounters" while walking `@alleleOrder`
+/// is what determines which 50-draw block a given random string comes from.
+///
+/// Each fallback draws a full `UTR_LENGTH`-base random string first — always,
+/// even when the overlay below discards all of it — because the PRNG stream
+/// must advance by exactly `UTR_LENGTH` draws for every gene+side that needs
+/// the fallback, whether or not that gene's real partial flank ends up
+/// visible in the final padding. Skipping the draw would desync the stream
+/// for every later gene+side.
+///
+/// **Generality caveat (rescue order vs. RNG draw order).** This pass walks
+/// `state.order`, which includes rescued alleles appended by
+/// [`rescue_partial_alleles`] in fixed `partial_order` (file-encounter) order —
+/// not Perl's `keys %partialAlleles` (hash-randomized) order. For the current
+/// pinned HLA subset this is provably irrelevant: only one gene ever needs the
+/// fallback and reaches it via a rescued allele, so Perl's own gene+side
+/// first-encounter order is deterministic regardless of hash randomization,
+/// and all 7 oracle runs (Perl vs. Perl, and Perl vs. this port) are
+/// byte-identical (see `fixtures/refbuild/PINS.md`). If a future HLA release
+/// had two or more rescued alleles of *distinct* genes that both need the RNG
+/// fallback, Perl's own tail assignment would become hash-nondeterministic
+/// (no single canonical golden run-to-run), while this port always picks one
+/// deterministic, reproducible gene+side draw order. In that scenario, the
+/// byte-identity oracle for the full database must compare records
+/// order-independently (sort by header) rather than raw bytes, per spike #8.
+fn resolve_utr_padding_caches(state: &mut BuildState) {
+    use std::collections::hash_map::Entry;
+
+    let mut rng = Drand48::new(17);
+    for allele in state.order.clone() {
+        let gene = gene_of(&allele);
+
+        if let Entry::Vacant(entry) = state.gene_5utr.entry(gene.clone()) {
+            let mut random_seq: String = (0..UTR_LENGTH).map(|_| rng.next_base() as char).collect();
+            if let Some(real) = state.gene_best_5utr.get(&gene) {
+                overlay_5prime(&mut random_seq, real);
+            }
+            entry.insert(random_seq);
+        }
+        if let Entry::Vacant(entry) = state.gene_3utr.entry(gene.clone()) {
+            let mut random_seq: String = (0..UTR_LENGTH).map(|_| rng.next_base() as char).collect();
+            if let Some(real) = state.gene_best_3utr.get(&gene) {
+                overlay_3prime(&mut random_seq, real);
+            }
+            entry.insert(random_seq);
+        }
+    }
+}
+
+/// Overlays `real` onto the *end* of `random`, per `ParseDatFile.pl`'s 4-arg
+/// `substr($randomSeq, -$len, $len, $realBest5)` (`ParseDatFile.pl:587-588`).
+///
+/// If `real` is at least as long as `random` (`UTR_LENGTH` bytes), Perl's
+/// negative `OFFSET` clamps to the start of the string and the replacement
+/// *grows* it — net effect: the whole random string is discarded and
+/// replaced wholesale by `real`. Otherwise, only the trailing `real.len()`
+/// bytes of `random` are overwritten; the leading `random.len() - real.len()`
+/// random bytes survive as the padding prefix. A `real` of length `0` (no
+/// partial flank exists at all) is a no-op, leaving `random` untouched.
+fn overlay_5prime(random: &mut String, real: &str) {
+    if real.is_empty() {
+        return;
+    }
+    if real.len() >= random.len() {
+        *random = real.to_string();
+    } else {
+        let keep = random.len() - real.len();
+        random.truncate(keep);
+        random.push_str(real);
+    }
+}
+
+/// Overlays `real` onto the *start* of `random`, per `ParseDatFile.pl`'s
+/// 4-arg `substr($randomSeq, 0, $len, $realBest3)` (`ParseDatFile.pl:598-599`).
+/// Symmetric to [`overlay_5prime`]: a `real` at least as long as `random`
+/// replaces it wholesale (the grow case); otherwise only the leading
+/// `real.len()` bytes are overwritten, leaving the trailing bytes random. A
+/// `real` of length `0` is a no-op (this is the case that fires for
+/// `HLA-DRB2*01:01`/`HLA-DRB7*01:01:01`'s 3' UTR: neither has any real 3'
+/// flanking sequence, so their entire 50-base 3' padding is pure PRNG output).
+fn overlay_3prime(random: &mut String, real: &str) {
+    if real.is_empty() {
+        return;
+    }
+    if real.len() >= random.len() {
+        *random = real.to_string();
+    } else {
+        let mut replaced = String::with_capacity(random.len());
+        replaced.push_str(real);
+        replaced.push_str(&random[real.len()..]);
+        *random = replaced;
+    }
 }
 
 /// Trims mis-annotated "exonized" intron sequence from an exon whose *output*
@@ -1368,5 +1521,53 @@ SQ   Sequence 100 BP;
         assert_eq!(state.exon_regions["GENE*b"][1], exon0_end);
         assert_eq!(state.exon_regions["GENE*b"][2], n_pos + 1 - 5);
         assert_eq!(state.exon_regions["GENE*b"][3], n_pos + 31 - 5);
+    }
+
+    // -----------------------------------------------------------------
+    // srand(17) UTR-padding fallback: targeted DRB2/DRB7 tail check
+    // -----------------------------------------------------------------
+
+    /// `HLA-DRB2*01:01` and `HLA-DRB7*01:01:01` (in `hla_subset.dat`) are the
+    /// only two alleles in the pinned fixture set whose gene has *no* real
+    /// 3'UTR flank at all, so their entire 50-base 3'UTR padding is pure
+    /// `srand(17)` PRNG output (see `fixtures/refbuild/PINS.md`'s "Phase 1b"
+    /// section and the `drand48` module docs). This test pins the exact
+    /// bytes independently of `refbuild_build_hla.rs`'s whole-file
+    /// byte-identity check, so a future regression here fails with a small,
+    /// readable diff instead of a giant four-file text diff.
+    #[test]
+    fn drb2_drb7_rng_padded_3utr_tails_match_pinned_golden() {
+        let fixtures_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/refbuild");
+        let alleles =
+            parse_dat(&fixtures_dir.join("hla_subset.dat")).expect("parse hla_subset.dat");
+        let rna = emit_seq_fasta(&alleles, SeqKind::Rna).expect("emit rna seq fasta");
+
+        let sequence_for = |header_name: &str| -> String {
+            let mut lines = rna.lines();
+            while let Some(line) = lines.next() {
+                if line.starts_with('>') && line[1..].split(' ').next() == Some(header_name) {
+                    return lines.next().expect("sequence line follows header").to_string();
+                }
+            }
+            panic!("no FASTA record found for {header_name} in emitted rna seq FASTA");
+        };
+
+        let drb2_tail = "CTGTCGATGCTTCCACGGAAGATACGTGCCAGACAGTTCCGATAAATTTA";
+        let drb7_tail = "TCTGTAACAGACACGCTAGTCGGAAGCCGTGAACTCACTGTCCTGCGTAG";
+
+        let drb2 = sequence_for("HLA-DRB2*01:01");
+        assert!(
+            drb2.ends_with(drb2_tail),
+            "HLA-DRB2*01:01 3'UTR tail mismatch: got {:?}, want suffix {drb2_tail:?}",
+            &drb2[drb2.len() - drb2_tail.len()..]
+        );
+
+        let drb7 = sequence_for("HLA-DRB7*01:01:01");
+        assert!(
+            drb7.ends_with(drb7_tail),
+            "HLA-DRB7*01:01:01 3'UTR tail mismatch: got {:?}, want suffix {drb7_tail:?}",
+            &drb7[drb7.len() - drb7_tail.len()..]
+        );
     }
 }
