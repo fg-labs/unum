@@ -52,6 +52,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::Path;
+use unum_core::allele_freq::AlleleFreqTable;
 use unum_core::fastq::FastqReader;
 use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper, ReadAssignment};
 use unum_core::ref_kmer_filter::RefKmerFilter;
@@ -473,6 +474,20 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
 
     genotyper.quantify_allele_equivalent_class(&effective_len, &loaded.weight);
     genotyper.remove_low_likelihood_allele_in_equivalent_class(|idx| effective_len[idx]);
+
+    // --- #29 opt-in Hardy-Weinberg population-frequency prior ---
+    // Configured immediately before selection: when `--allele-freq` is absent
+    // the table stays `None` and selection is byte-identical to the oracle. The
+    // weight is always propagated (it is inert when the table is `None` or the
+    // gene is inactive).
+    if let Some(freq_path) = args.allele_freq.as_deref() {
+        let table = AlleleFreqTable::from_tsv(Path::new(freq_path)).with_context(|| {
+            format!("loading allele-frequency table for the HWE prior from {freq_path}")
+        })?;
+        genotyper.set_allele_freq(table);
+    }
+    genotyper.set_allele_freq_weight(args.allele_freq_weight);
+
     genotyper.select_alleles_for_genes(|idx| loaded.weight[idx]);
 
     // --- Output (Genotyper.cpp:652-707) ---
