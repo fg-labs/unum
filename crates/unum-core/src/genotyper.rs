@@ -396,6 +396,15 @@ pub struct AlleleInfo {
     /// `_alleleInfo::abundance`.  Not touched by [`Genotyper::init_allele_info`]
     /// beyond its `0` initialization (Phase 5b's EM sets this).
     pub abundance: f64,
+    /// Discriminative genotype quality (`q_gap`, issue #30) -- a unum
+    /// extension, NOT part of T1K's `_alleleInfo`. Set alongside
+    /// `genotype_quality` in
+    /// [`Genotyper::select_alleles_for_genes_quality_scores`] from the called
+    /// vs. top-non-selected abundances (see [`discriminative_quality_phred`]);
+    /// only consumed by the opt-in `{prefix}_metrics.tsv` panel, never by the
+    /// byte-frozen `_genotype.tsv`/`_allele.tsv`. Defaults to `-1` (mirroring
+    /// `genotype_quality`).
+    pub discriminative_quality: i32,
     /// `_alleleInfo::equivalentClass` -- the class id for alleles sharing the
     /// same set of read alignments. Not populated by
     /// [`Genotyper::init_allele_info`] (Phase 5b's
@@ -426,6 +435,7 @@ impl Default for AlleleInfo {
             allele_rank: -1,
             genotype_quality: -1,
             abundance: 0.0,
+            discriminative_quality: -1,
             equivalent_class: 0,
             ec_abundance: 0.0,
             missing_coverage: 0,
@@ -1309,6 +1319,110 @@ pub fn assign_reads_parallel(
     })
 }
 
+/// Builds the ascending-sorted per-exon-position base-coverage vector for
+/// `allele_ref`: for each position inside an exon interval, the observed count
+/// of that position's consensus base (`pos_weight[i].get(code)`), sorted
+/// ascending. Factored out of [`get_seq_missing_base_coverage`] so its
+/// coverage-vector construction is shared, verbatim, with the QC coverage
+/// statistics ([`allele_coverage_stats`]); [`get_seq_missing_base_coverage`]'s
+/// own numeric result is unchanged (it consumes exactly this vector).
+fn exon_base_coverage_sorted(allele_ref: &AlleleRef) -> Vec<i32> {
+    let mut exon_base_coverage: Vec<i32> = Vec::new();
+    for (i, &base) in allele_ref.consensus.iter().enumerate() {
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let i_i32 = i as i32;
+        if allele_ref.is_exon(i_i32) {
+            let code = nuc_to_num(base).expect("consensus base is A/C/G/T");
+            exon_base_coverage.push(allele_ref.pos_weight[i].get(code));
+        }
+    }
+    exon_base_coverage.sort_unstable();
+    exon_base_coverage
+}
+
+/// Per-allele coverage-distribution statistics for the opt-in QC metrics panel
+/// (`{prefix}_metrics.tsv`, a unum extension -- issue #19). Derived from the
+/// SAME ascending-sorted exon-position coverage vector
+/// ([`exon_base_coverage_sorted`]) that [`get_seq_missing_base_coverage`]
+/// consumes, so these numbers are consistent with `missing_cov`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoverageStats {
+    /// Minimum exon-position coverage (first element of the sorted vector).
+    pub cov_min: i32,
+    /// 10th-percentile coverage: element at index `floor(len * 0.10)` of the
+    /// ascending-sorted vector (the largest value not exceeded by 10% of
+    /// positions).
+    pub cov_p10: i32,
+    /// Median exon-position coverage: element at index `len / 2` (upper median
+    /// for even lengths) -- the SAME index convention
+    /// [`get_seq_missing_base_coverage`] uses for its cutoff.
+    pub cov_median: i32,
+    /// Fraction of exon positions with coverage `> 0`, in `[0, 1]`.
+    pub frac_covered: f64,
+}
+
+/// Computes [`CoverageStats`] for `allele_ref` from its exon-position coverage
+/// vector. Percentile convention: the `p`-th percentile is the element at
+/// index `floor(len * p)` of the ascending-sorted vector (median uses
+/// `len / 2`, matching [`get_seq_missing_base_coverage`]). Returns all-zero
+/// stats for an allele with zero exon positions (not expected for real
+/// alleles, which always have at least one exon interval).
+#[must_use]
+pub fn allele_coverage_stats(allele_ref: &AlleleRef) -> CoverageStats {
+    let cov = exon_base_coverage_sorted(allele_ref);
+    let k = cov.len();
+    if k == 0 {
+        return CoverageStats { cov_min: 0, cov_p10: 0, cov_median: 0, frac_covered: 0.0 };
+    }
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let p10_idx = ((k as f64) * 0.10).floor() as usize;
+    let covered = cov.iter().filter(|&&c| c > 0).count();
+    #[allow(clippy::cast_precision_loss)]
+    let frac_covered = covered as f64 / k as f64;
+    CoverageStats {
+        cov_min: cov[0],
+        cov_p10: cov[p10_idx.min(k - 1)],
+        cov_median: cov[k / 2],
+        frac_covered,
+    }
+}
+
+/// Computes the #30 discriminative genotype quality (`q_gap`) as an integer
+/// phred: how well the called allele's abundance separates from the top
+/// non-selected ("second-best") candidate's abundance. Mirrors the null-model
+/// `genotype_quality` integer style (truncated, clamped to `[0, 60]`).
+///
+/// `a_called` is the called allele's abundance; `a_second` is the *summed*
+/// abundance of the gene's rank-2 alleles -- the top runner-up group beyond the
+/// two called rank-0/rank-1 alleles -- which the caller passes as
+/// `allele_rank_abund[2]` (or `0.0` when the gene has no rank-2). When
+/// `a_second <= 0` there is no competing candidate, so the call is maximally
+/// discriminative (`60`). Otherwise `-10 * log10(a_second / (a_called +
+/// a_second))`, clamped to `[0, 60]`.
+#[must_use]
+pub fn discriminative_quality_phred(a_called: f64, a_second: f64) -> i32 {
+    if a_second <= 0.0 {
+        return 60;
+    }
+    let mut score = -10.0 * (a_second / (a_called + a_second)).log10();
+    // Two independent `if`s rather than `f64::clamp`, matching the null-model
+    // quality's clamp style (`select_alleles_for_genes_quality_scores`) so a
+    // degenerate `NaN` never panics/misbehaves.
+    #[allow(clippy::manual_clamp)]
+    {
+        if score > 60.0 {
+            score = 60.0;
+        }
+        if score < 0.0 {
+            score = 0.0;
+        }
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        score as i32
+    }
+}
+
 /// Ported from `SeqSet::GetSeqMissingBaseCoverage` (`SeqSet.hpp:2717-2755`):
 /// counts how many of `allele_ref`'s exon positions (sorted ascending by
 /// observed base coverage) fall below `ratio` times the MEDIAN exon-position
@@ -1324,16 +1438,7 @@ pub fn assign_reads_parallel(
 /// interval (see [`AlleleRef::new`]'s whole-sequence fallback).
 #[must_use]
 pub fn get_seq_missing_base_coverage(allele_ref: &AlleleRef, ratio: f64) -> i32 {
-    let mut exon_base_coverage: Vec<i32> = Vec::new();
-    for (i, &base) in allele_ref.consensus.iter().enumerate() {
-        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-        let i_i32 = i as i32;
-        if allele_ref.is_exon(i_i32) {
-            let code = nuc_to_num(base).expect("consensus base is A/C/G/T");
-            exon_base_coverage.push(allele_ref.pos_weight[i].get(code));
-        }
-    }
-    exon_base_coverage.sort_unstable();
+    let exon_base_coverage = exon_base_coverage_sorted(allele_ref);
     let k = exon_base_coverage.len();
     assert!(k > 0, "get_seq_missing_base_coverage: allele has zero exon positions");
 
@@ -4047,6 +4152,23 @@ impl Genotyper {
                     }
                 }
             }
+
+            // Discriminative quality (`q_gap`, issue #30) for the opt-in
+            // `{prefix}_metrics.tsv` panel. This does NOT touch
+            // `genotype_quality` and so leaves the byte-frozen
+            // `_genotype.tsv`/`_allele.tsv` unchanged. `a_second` is the top
+            // non-selected candidate's summed abundance -- rank 2 (rank 0/1 are
+            // the called alleles), or `0.0` if the gene has no third rank.
+            let a_second = if rank_cnt > 2 { allele_rank_abund[2] } else { 0.0 };
+            for &(allele_idx, rank) in &self.selected_alleles[i].clone() {
+                if rank > 1 {
+                    continue;
+                }
+                let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                let a_called = self.allele_info[allele_idx_usize].abundance;
+                self.allele_info[allele_idx_usize].discriminative_quality =
+                    discriminative_quality_phred(a_called, a_second);
+            }
         }
     }
 
@@ -5811,5 +5933,93 @@ mod tests {
             secondary.contains('|'),
             "distinct secondary groups must be `|`-joined, got: {secondary:?}"
         );
+    }
+
+    // --- QC coverage statistics (issue #19) ---
+
+    /// Builds an [`AlleleRef`] over `seq` (whole sequence is one exon) and sets
+    /// each position's consensus-base coverage from `coverage` (same length as
+    /// `seq`), so `allele_coverage_stats` sees exactly `coverage` as its
+    /// exon-position vector.
+    fn allele_ref_with_coverage(seq: &[u8], coverage: &[i32]) -> AlleleRef {
+        assert_eq!(seq.len(), coverage.len());
+        let allele = AlleleRef::new(seq.to_vec(), None);
+        for (i, (&base, &w)) in seq.iter().zip(coverage).enumerate() {
+            let code = nuc_to_num(base).expect("test base is A/C/G/T");
+            allele.pos_weight[i].add(code, w);
+        }
+        allele
+    }
+
+    #[test]
+    fn allele_coverage_stats_basic_percentiles_and_frac() {
+        // 10 positions, coverage 0..=9 (already ascending). len*0.10 == 1.0,
+        // floor -> index 1 (value 1); median index 10/2 == 5 (value 5); min is
+        // value 0; 9 of 10 positions are > 0 -> frac 0.9.
+        let seq = b"ACGTACGTAC";
+        let cov = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let stats = allele_coverage_stats(&allele_ref_with_coverage(seq, &cov));
+        assert_eq!(stats.cov_min, 0);
+        assert_eq!(stats.cov_p10, 1);
+        assert_eq!(stats.cov_median, 5);
+        assert!((stats.frac_covered - 0.9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn allele_coverage_stats_sorts_unsorted_input_and_full_coverage() {
+        // Unsorted input must be sorted internally; all positions covered.
+        let seq = b"ACGTAC";
+        let cov = [30, 10, 20, 50, 40, 60]; // sorted: 10,20,30,40,50,60
+        let stats = allele_coverage_stats(&allele_ref_with_coverage(seq, &cov));
+        assert_eq!(stats.cov_min, 10);
+        // len*0.10 == 0.6 -> floor 0 -> smallest element.
+        assert_eq!(stats.cov_p10, 10);
+        // median index 6/2 == 3 -> value 40 (upper median).
+        assert_eq!(stats.cov_median, 40);
+        assert!((stats.frac_covered - 1.0).abs() < 1e-12);
+        // The reused vector construction keeps missing-coverage unchanged:
+        // with all coverage >= 1, no exon base is "missing".
+        assert_eq!(get_seq_missing_base_coverage(&allele_ref_with_coverage(seq, &cov), 0.01), 0);
+    }
+
+    #[test]
+    fn allele_coverage_stats_all_zero_coverage() {
+        let seq = b"ACGT";
+        let cov = [0, 0, 0, 0];
+        let stats = allele_coverage_stats(&allele_ref_with_coverage(seq, &cov));
+        assert_eq!(stats.cov_min, 0);
+        assert_eq!(stats.cov_p10, 0);
+        assert_eq!(stats.cov_median, 0);
+        assert!(stats.frac_covered.abs() < 1e-12);
+    }
+
+    // --- discriminative genotype quality / q_gap (issue #30) ---
+
+    #[test]
+    fn discriminative_quality_no_runnerup_is_max_phred() {
+        // a_second <= 0 -> maximally discriminative (60), regardless of a_called.
+        assert_eq!(discriminative_quality_phred(50.0, 0.0), 60);
+        assert_eq!(discriminative_quality_phred(0.0, 0.0), 60);
+        assert_eq!(discriminative_quality_phred(1.0, -1.0), 60);
+    }
+
+    #[test]
+    fn discriminative_quality_normal_case() {
+        // a_called == a_second: ratio 0.5 -> -10*log10(0.5) == 3.0103 -> trunc 3.
+        assert_eq!(discriminative_quality_phred(10.0, 10.0), 3);
+        // a_called == 3 * a_second: ratio 0.25 -> -10*log10(0.25) == 6.0206 -> 6.
+        assert_eq!(discriminative_quality_phred(30.0, 10.0), 6);
+    }
+
+    #[test]
+    fn discriminative_quality_clamps_to_60() {
+        // a_second tiny vs a_called: raw ~100 phred, clamped to 60.
+        assert_eq!(discriminative_quality_phred(1e10, 1.0), 60);
+    }
+
+    #[test]
+    fn discriminative_quality_lower_bound_when_called_negligible() {
+        // a_called ~0, a_second > 0: ratio ~1 -> raw ~0 -> 0 (never negative).
+        assert_eq!(discriminative_quality_phred(0.0, 25.0), 0);
     }
 }

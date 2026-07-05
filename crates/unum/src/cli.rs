@@ -117,6 +117,10 @@ pub struct ExtractArgs {
 /// `usage[]`) for the paired/single-end candidate-FASTQ-plus-reference-sequence-FASTA path this
 /// port targets (barcode/`-a`/`--alleleWhitelist`/`--outputReadAssignment` input are not exposed
 /// here -- see `crate::stages::genotype`'s module docs).
+///
+/// With `--emit-metrics`, an additional `{prefix}_metrics.tsv` per-call QC + discriminative-quality
+/// panel is written (a unum extension, NOT part of T1K); it does not alter `{prefix}_genotype.tsv`
+/// or `{prefix}_allele.tsv`.
 #[derive(Args, Debug)]
 pub struct GenotypeArgs {
     /// Path to the reference sequence FASTA file (e.g. `kir_rna_seq.fa`).
@@ -166,6 +170,13 @@ pub struct GenotypeArgs {
     /// The effect from other gene's expression.
     #[arg(long = "crossGeneRate", default_value_t = 0.04)]
     pub cross_gene_rate: f64,
+
+    /// Also write a `{prefix}_metrics.tsv` per-call QC + discriminative-quality panel (a unum
+    /// extension, NOT part of T1K): one row per called allele with coverage-distribution stats,
+    /// allele balance, null-model and best-vs-second-best genotype qualities. Default off; does not
+    /// alter `{prefix}_genotype.tsv` or `{prefix}_allele.tsv`.
+    #[arg(long = "emit-metrics", default_value_t = false)]
+    pub emit_metrics: bool,
 }
 
 /// Arguments for the `analyze` subcommand. Mirrors `analyzer`'s flag names (`Analyzer.cpp`'s
