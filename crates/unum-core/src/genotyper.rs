@@ -161,6 +161,7 @@
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
+use crate::allele_freq::AlleleFreqTable;
 use crate::overlap;
 use crate::ref_kmer_filter::{RefKmerFilter, Scratch};
 
@@ -1427,6 +1428,32 @@ pub fn discriminative_quality_phred(a_called: f64, a_second: f64) -> i32 {
     }
 }
 
+/// The Hardy-Weinberg log-prior `ln P_HWE` for a genotype whose two allele
+/// series have effective population frequencies `f_j` and `f_k` (#29).
+///
+/// For a heterozygote (`homozygous == false`) this is
+/// `ln 2 + ln f_j + ln f_k`; for a homozygote (`homozygous == true`) it is
+/// `2 · ln f_j` (Wigginton 2005: `P(hom A) = f_A²`, `P(het A,B) = 2 f_A f_B`).
+/// The classic HWE crossover `ln 2 + ln f_A + ln f_B > 2 ln f_A` whenever
+/// `f_B > f_A / 2` is intentional -- a het of two common alleles can rightly
+/// outscore a common homozygote; the bounded prior weight `w` (not this fn)
+/// keeps it from overriding strong read evidence.
+///
+/// Free fn (mirrors [`discriminative_quality_phred`]). A series whose locus is
+/// absent from the frequency table can never reach here -- the gene is
+/// inactive and the caller short-circuits upstream -- so both frequencies are
+/// the strictly-positive Jeffreys-smoothed values and the logs are finite.
+///
+/// # FLOATS
+///
+/// Only appears in the opt-in [`Genotyper::covered_prior_bonus`] path; the
+/// default (`--allele-freq` absent) selection never calls it, preserving the
+/// byte-identity invariant.
+#[must_use]
+pub fn hwe_log_prior(f_j: f64, f_k: f64, homozygous: bool) -> f64 {
+    if homozygous { 2.0 * f_j.ln() } else { std::f64::consts::LN_2 + f_j.ln() + f_k.ln() }
+}
+
 /// Ported from `SeqSet::GetSeqMissingBaseCoverage` (`SeqSet.hpp:2717-2755`):
 /// counts how many of `allele_ref`'s exon positions (sorted ascending by
 /// observed base coverage) fall below `ratio` times the MEDIAN exon-position
@@ -2084,6 +2111,17 @@ pub struct Genotyper {
     /// [`Genotyper::get_gene_allele_types`]/[`Genotyper::get_allele_description`]/
     /// [`Genotyper::output_representative_alleles`].
     pub selected_alleles: Vec<Vec<(i32, i32)>>,
+
+    // --- #29 opt-in Hardy-Weinberg population-frequency prior ---
+    /// The population allele-frequency table for the opt-in HWE selection
+    /// prior. `None` (the default) => the prior is off and selection is
+    /// byte-identical to the oracle. Set via [`Genotyper::set_allele_freq`].
+    pub allele_freq: Option<AlleleFreqTable>,
+    /// The prior weight `w` scaling `hwe_log_prior` into the same
+    /// weighted-read units as the coverage objective. Default `2.0`
+    /// (`--allele-freq-weight`). At `w = 0` the prior span is 0 and the prior
+    /// is inactive everywhere. Set via [`Genotyper::set_allele_freq_weight`].
+    pub allele_freq_weight: f64,
 }
 
 impl Default for Genotyper {
@@ -2133,6 +2171,8 @@ impl Genotyper {
             cross_gene_rate: 0.04,
             read_length: 0,
             selected_alleles: Vec::new(),
+            allele_freq: None,
+            allele_freq_weight: 2.0,
         }
     }
 
@@ -2165,6 +2205,100 @@ impl Genotyper {
     pub fn set_allele_name_structure(&mut self, n: i32, d: u8) {
         self.allele_digit_units = n;
         self.allele_delimiter = d;
+    }
+
+    /// Sets the #29 population allele-frequency table, enabling the opt-in HWE
+    /// selection prior. With no table set (the default) the prior is off and
+    /// selection is byte-identical to the oracle.
+    pub fn set_allele_freq(&mut self, table: AlleleFreqTable) {
+        self.allele_freq = Some(table);
+    }
+
+    /// Sets the #29 prior weight `w` (`--allele-freq-weight`, default `2.0`).
+    /// At `w = 0` the prior span is 0 and the prior is inactive everywhere.
+    pub fn set_allele_freq_weight(&mut self, w: f64) {
+        self.allele_freq_weight = w;
+    }
+
+    /// True iff the #29 population-frequency prior can act on a gene whose
+    /// candidate allele *series* are `candidate_series`: the table must be
+    /// present, the gene's locus must be present in the table (every candidate
+    /// must resolve to a frequency), and there must be at least two *distinct*
+    /// effective frequencies among the candidates (so `Δ ln P_HWE ≠ 0`).
+    ///
+    /// When this returns `false` the selector runs exactly the default logic
+    /// for that gene: the Path-A `k == j` hom candidate is not enumerated and
+    /// the Path-B reconciliation is not invoked, so the candidate *set* is
+    /// unchanged (the candidate-set invariant). Governs BOTH selection paths.
+    #[must_use]
+    pub fn prior_active_for_gene(&self, candidate_series: &[&str]) -> bool {
+        let Some(table) = self.allele_freq.as_ref() else {
+            return false;
+        };
+        if self.allele_freq_weight == 0.0 {
+            return false;
+        }
+
+        // Every candidate must resolve to a frequency; a `None` means the
+        // locus is absent from the table => the gene is inactive.
+        let mut first: Option<f64> = None;
+        let mut has_distinct = false;
+        for &series in candidate_series {
+            let Some(f) = table.frequency(series) else {
+                return false;
+            };
+            match first {
+                None => first = Some(f),
+                // Exact `!=` is intentional (not an approximate compare): the
+                // byte-identity guarantee requires that two candidates mapping
+                // to bit-identical effective `f` (e.g. both absent => same
+                // floor) count as constant => no distinguishing prior signal.
+                #[allow(clippy::float_cmp)]
+                Some(f0) => {
+                    if f != f0 {
+                        has_distinct = true;
+                    }
+                }
+            }
+        }
+        has_distinct
+    }
+
+    /// The #29 prior bonus added to a candidate genotype's coverage objective:
+    /// `w · hwe_log_prior(f_j, f_k, homozygous)`.
+    ///
+    /// Returns the LITERAL `0.0` (bit-for-bit `0.0f64`, not a computed
+    /// near-zero) whenever the prior is inactive -- the flag is off, the gene's
+    /// locus is absent, or the two series map to the identical effective
+    /// frequency (`Δ ln P_HWE = 0`). Because `x + 0.0 == x` for every finite
+    /// non-NaN `x`, adding this to the coverage objective is bit-identical to
+    /// the default path in the inactive case (the objective invariant).
+    ///
+    /// The inactive/constant check is this fn's FIRST action, so no log/mul is
+    /// ever evaluated on the inactive path.
+    #[must_use]
+    pub fn covered_prior_bonus(&self, series_j: &str, series_k: &str, homozygous: bool) -> f64 {
+        let Some(table) = self.allele_freq.as_ref() else {
+            return 0.0;
+        };
+        if self.allele_freq_weight == 0.0 {
+            return 0.0;
+        }
+        let (Some(f_j), Some(f_k)) = (table.frequency(series_j), table.frequency(series_k)) else {
+            // Locus absent from the table => inactive.
+            return 0.0;
+        };
+        // A het whose two series map to the identical effective frequency
+        // carries no distinguishing prior signal for the constant-skip
+        // guarantee; return the literal 0.0 rather than a computed near-zero so
+        // the exact-tie comparison in the selector is bit-for-bit unchanged.
+        // Exact `==` is intentional (not an approximate compare) for exactly
+        // this byte-identity reason.
+        #[allow(clippy::float_cmp)]
+        if !homozygous && f_j == f_k {
+            return 0.0;
+        }
+        self.allele_freq_weight * hwe_log_prior(f_j, f_k, homozygous)
     }
 
     /// Calls [`parse_allele_name`] with this `Genotyper`'s configured
@@ -6098,5 +6232,124 @@ mod tests {
     fn discriminative_quality_lower_bound_when_called_negligible() {
         // a_called ~0, a_second > 0: ratio ~1 -> raw ~0 -> 0 (never negative).
         assert_eq!(discriminative_quality_phred(0.0, 25.0), 0);
+    }
+
+    // --- #29 HWE population-frequency prior helpers ---
+
+    /// Writes an AFND-style TSV to a uniquely-named temp file and parses it
+    /// into an `AlleleFreqTable`. Cleans up the file before returning.
+    fn freq_table_from_rows(rows: &str) -> AlleleFreqTable {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("unum_genotyper_freq_test_{}_{n}.tsv", std::process::id()));
+        {
+            let mut file = std::fs::File::create(&path).expect("create temp tsv");
+            file.write_all(rows.as_bytes()).expect("write temp tsv");
+        }
+        let table = AlleleFreqTable::from_tsv(&path).expect("parse temp tsv");
+        std::fs::remove_file(&path).ok();
+        table
+    }
+
+    #[test]
+    fn hwe_log_prior_het_and_hom_exact_forms() {
+        // het (j != k): ln2 + ln f_j + ln f_k.
+        let het = hwe_log_prior(0.2, 0.1, false);
+        let expected_het = std::f64::consts::LN_2 + 0.2_f64.ln() + 0.1_f64.ln();
+        assert!((het - expected_het).abs() < 1e-15, "het={het} expected={expected_het}");
+
+        // hom (j == k): 2 ln f_j (the f_k arg is ignored).
+        let hom = hwe_log_prior(0.2, 0.9, true);
+        let expected_hom = 2.0 * 0.2_f64.ln();
+        assert!((hom - expected_hom).abs() < 1e-15, "hom={hom} expected={expected_hom}");
+    }
+
+    #[test]
+    fn hwe_log_prior_het_beats_hom_when_fb_exceeds_half_fa() {
+        // The classic crossover: het of two commons > hom of one common when
+        // f_B > f_A / 2. With f_A = 0.3, f_B = 0.25 (> 0.15):
+        // het = ln2 + ln0.3 + ln0.25; hom = 2 ln0.3.
+        let f_a = 0.3;
+        let f_b = 0.25;
+        assert!(f_b > f_a / 2.0, "test premise: f_B must exceed f_A/2");
+        let het = hwe_log_prior(f_a, f_b, false);
+        let hom = hwe_log_prior(f_a, f_a, true);
+        assert!(het > hom, "het={het} should beat hom={hom} when f_B > f_A/2");
+
+        // And when f_B < f_A / 2 the hom wins (no spurious het).
+        let f_b_rare = 0.05;
+        assert!(f_b_rare < f_a / 2.0);
+        let het_rare = hwe_log_prior(f_a, f_b_rare, false);
+        assert!(het_rare < hom, "het_rare={het_rare} should lose to hom={hom} when f_B < f_A/2");
+    }
+
+    #[test]
+    fn covered_prior_bonus_literal_zero_when_no_table() {
+        // No table => the flag is off => literal 0.0 (bit-for-bit).
+        let g = Genotyper::new();
+        let bonus = g.covered_prior_bonus("A*01:01", "A*02:01", false);
+        assert_eq!(bonus.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn covered_prior_bonus_literal_zero_when_locus_absent() {
+        // Table present but the queried locus is absent => literal 0.0.
+        let mut g = Genotyper::new();
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.5\t30\nA*02:01\t0.5\t20\n"));
+        let bonus = g.covered_prior_bonus("DRB1*03:01", "DRB1*01:01", false);
+        assert_eq!(bonus.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn covered_prior_bonus_literal_zero_when_series_map_to_equal_freq() {
+        // Two alleles absent from a present locus map to the identical floor
+        // frequency, so a het carries no distinguishing prior => literal 0.0.
+        let mut g = Genotyper::new();
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.5\t30\nA*02:01\t0.5\t20\n"));
+        let bonus = g.covered_prior_bonus("A*80:01", "A*81:01", false);
+        assert_eq!(bonus.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn covered_prior_bonus_nonzero_when_active_het() {
+        // Distinct present frequencies => a nonzero weighted HWE bonus equal to
+        // w * (ln2 + ln f_j + ln f_k).
+        let mut g = Genotyper::new();
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.6\t60\nA*02:01\t0.4\t40\n"));
+        // Σ = 100, |L| = 2, denom = 100 + 1.0 = 101.
+        let f_j: f64 = (60.0 + 0.5) / 101.0;
+        let f_k: f64 = (40.0 + 0.5) / 101.0;
+        let expected = 2.0 * (std::f64::consts::LN_2 + f_j.ln() + f_k.ln());
+        let bonus = g.covered_prior_bonus("A*01:01", "A*02:01", false);
+        assert!((bonus - expected).abs() < 1e-12, "bonus={bonus} expected={expected}");
+    }
+
+    #[test]
+    fn prior_active_for_gene_false_on_empty_and_absent_and_equal() {
+        // No table => inactive.
+        let mut g = Genotyper::new();
+        assert!(!g.prior_active_for_gene(&["A*01:01", "A*02:01"]));
+
+        // Table present, but locus absent for a candidate => inactive.
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.6\t60\nA*02:01\t0.4\t40\n"));
+        assert!(!g.prior_active_for_gene(&["A*01:01", "DRB1*03:01"]));
+
+        // All candidates map to the same effective frequency (both absent =>
+        // same floor) => no distinct f => inactive.
+        assert!(!g.prior_active_for_gene(&["A*80:01", "A*81:01"]));
+
+        // w = 0 forces inactive even with distinct present frequencies.
+        g.set_allele_freq_weight(0.0);
+        assert!(!g.prior_active_for_gene(&["A*01:01", "A*02:01"]));
+    }
+
+    #[test]
+    fn prior_active_for_gene_true_when_two_distinct_present_frequencies() {
+        let mut g = Genotyper::new();
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.6\t60\nA*02:01\t0.4\t40\n"));
+        assert!(g.prior_active_for_gene(&["A*01:01", "A*02:01"]));
     }
 }
