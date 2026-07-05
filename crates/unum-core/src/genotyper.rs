@@ -1710,12 +1710,18 @@ fn read_assignment_to_fragment_assignment_impl(
             if filter {
                 break;
             }
+            // SeqSet.hpp:2601-2609: the "unused" guard (`seqIdxToOverlapIdx.find
+            // == end`) binds ONLY to the `matchCnt ==` branch, NOT the
+            // `matchCnt >` branch -- an overlap that strictly dominates on
+            // matchCnt triggers this filter even if it is already assigned.
+            // (This crate previously gated the whole `dominates` on `unused`,
+            // wrongly sparing already-assigned dominating overlaps and
+            // over-keeping fragments -- e.g. HLA-U U*01:03 over-assignment.)
             let dominates = o.match_cnt > rep_overlap1.match_cnt
                 || (o.match_cnt == rep_overlap1.match_cnt
-                    && o.similarity > rep_overlap1.similarity);
-            let unused = !seq_idx_to_assign_idx.contains_key(&o.seq_idx);
+                    && o.similarity > rep_overlap1.similarity
+                    && !seq_idx_to_assign_idx.contains_key(&o.seq_idx));
             if dominates
-                && unused
                 && (truncated_mate_pair_overlap(
                     o,
                     &rep_overlap1,
@@ -1735,12 +1741,14 @@ fn read_assignment_to_fragment_assignment_impl(
                     if filter {
                         break;
                     }
+                    // SeqSet.hpp:2627-2635: `unused` guard binds ONLY to the
+                    // `matchCnt ==` branch, not the `matchCnt >` branch (see the
+                    // "better read 1" block above for the full rationale).
                     let dominates = o.match_cnt > rep_overlap2.match_cnt
                         || (o.match_cnt == rep_overlap2.match_cnt
-                            && o.similarity > rep_overlap2.similarity);
-                    let unused = !seq_idx_to_assign_idx.contains_key(&o.seq_idx);
+                            && o.similarity > rep_overlap2.similarity
+                            && !seq_idx_to_assign_idx.contains_key(&o.seq_idx));
                     if dominates
-                        && unused
                         && (truncated_mate_pair_overlap(
                             o,
                             &rep_overlap2,
@@ -5491,6 +5499,46 @@ mod tests {
             |_, _, _| false,
         );
         assert!(assign.is_empty());
+    }
+
+    #[test]
+    fn read_assignment_to_fragment_assignment_dominating_matchcnt_filters_even_if_assigned() {
+        // Regression (HLA-U U*01:03 over-assignment): SeqSet.hpp:2601-2609's
+        // "better read 1" truncated-mate-pair filter applies the "unused"
+        // (not-already-assigned) guard ONLY to the `matchCnt ==` branch, NOT
+        // the `matchCnt >` branch -- an overlap that strictly dominates the
+        // representative on matchCnt triggers the filter even when it is
+        // already assigned. A prior port wrote `dominates && unused` (gating
+        // the `>` branch on `unused` too), so an already-assigned dominating
+        // overlap failed to fire the filter and the fragment was over-kept.
+        //
+        // allele 0: representative mate pair, fragment matchCnt = 42+42 = 84.
+        // allele 1: its mate-1 overlap (matchCnt 62) STRICTLY DOMINATES allele
+        //   0's mate-1 (42); allele 1 also forms its own (weaker, total 74)
+        //   fragment so its seq_idx IS in the assign map ("used"); and its
+        //   mate-1 projects beyond the small consensus_len (100) so it is
+        //   "truncated". The correct port fires the filter and clears assign.
+        let overlaps1 = vec![
+            extended(0, 0, 20, 0, 20, 1), // allele 0 mate1, mc=42 (representative)
+            extended(1, 0, 30, 0, 30, 1), // allele 1 mate1, mc=62 > 42, truncated
+        ];
+        let overlaps2 = vec![
+            extended(0, 0, 20, 100, 120, -1), // allele 0 mate2, mc=42
+            extended(1, 0, 5, 200, 205, -1),  // allele 1 mate2, mc=12 -> frag1 total 74 < 84
+        ];
+        let assign = read_assignment_to_fragment_assignment(
+            &overlaps1,
+            Some(&overlaps2),
+            false,
+            3,
+            |_| 100, // small consensus_len => allele 1's mate1 is truncated
+            |_, _, _| false,
+        );
+        assert!(
+            assign.is_empty(),
+            "an already-assigned overlap that strictly dominates the representative on \
+             matchCnt must trigger the truncated-mate-pair filter (SeqSet.hpp:2601)"
+        );
     }
 
     // --- select_alleles_for_genes / get_allele_description (small
