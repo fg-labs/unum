@@ -180,8 +180,16 @@ impl AlleleFreqTable {
 /// series split on `:` -- element 0 keeps the `LOCUS*NN` head, and each
 /// subsequent element is one numeric field. Used for locus grouping and for
 /// resolution-aware field matching.
+///
+/// A leading `HLA-` prefix is stripped first so that reference allele names
+/// (T1K's HLA reference uses the `HLA-A*01:01:01:01` convention) match AFND /
+/// CIWD frequency tables, which name the same alleles WITHOUT the prefix
+/// (`A*01:01`). Both the DB load and the query go through here, so the
+/// normalization is symmetric. KIR names (`KIR2DL1*...`, no `HLA-` prefix) are
+/// unaffected and simply do not match an HLA-only frequency table.
 fn parse_series(series: &str) -> (String, Vec<String>) {
     let trimmed = series.trim();
+    let trimmed = trimmed.strip_prefix("HLA-").unwrap_or(trimmed);
     let locus = match trimmed.find('*') {
         Some(idx) => trimmed[..idx].to_string(),
         None => trimmed.to_string(),
@@ -316,6 +324,33 @@ mod tests {
         // matched = 25 + 15 = 40; Σ = 50, |L| = 3, denom = 50 + 1.5 = 51.5.
         let expected = (40.0 + 0.5) / 51.5;
         assert!((f_rollup - expected).abs() < 1e-12, "rollup f={f_rollup} expected={expected}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// (g) The `HLA-` prefix on reference allele names is stripped so they match
+    /// AFND/CIWD tables that name the same alleles without the prefix. This is
+    /// the real-data bug the HPRC smoke test caught: T1K's HLA reference uses
+    /// `HLA-A*24:02:01` while AFND uses `A*24:02`, so without normalization the
+    /// prior was silently inactive on every classical locus.
+    #[test]
+    fn allele_freq_strips_hla_prefix_to_match_unprefixed_table() {
+        let tsv = "A*24:02\t0.09\t1200\n\
+                   A*01:01\t0.13\t1800\n";
+        let path = write_temp_tsv(tsv);
+        let table = AlleleFreqTable::from_tsv(&path).expect("parse");
+        // A prefixed, multi-field reference name must resolve to the unprefixed
+        // 2-field AFND row (prefix stripped + resolution-aware pushdown).
+        let f_prefixed = table.frequency("HLA-A*24:02:01").expect("HLA- prefixed query resolves");
+        let f_plain = table.frequency("A*24:02").expect("plain query resolves");
+        #[allow(clippy::float_cmp)]
+        let same = f_prefixed == f_plain;
+        assert!(
+            same,
+            "HLA- prefixed and plain queries must give the same f: {f_prefixed} vs {f_plain}"
+        );
+        assert!(f_prefixed > 0.0, "resolved frequency must be positive, got {f_prefixed}");
+        // And a prefixed locus absent from the table is still None (not a crash).
+        assert!(table.frequency("HLA-DOB*01:01").is_none(), "absent locus (DOB) must be None");
         std::fs::remove_file(&path).ok();
     }
 
