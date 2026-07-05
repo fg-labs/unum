@@ -22,10 +22,55 @@ pub enum Commands {
     Genotype(GenotypeArgs),
 
     /// Post-analyze a genotype call, restricting the reference to the CALLED alleles and
-    /// emitting a novel-variant `_allele.vcf` (the Rust port of `analyzer`). NOT YET wired into
-    /// the `run`/`--engine` strangler router -- see `crate::stages::analyze`'s module docs for
-    /// that follow-up.
+    /// emitting a novel-variant `_allele.vcf` (the Rust port of `analyzer`). Also runs as the
+    /// final stage of the fused `run` pipeline.
     Analyze(AnalyzeArgs),
+
+    /// Run the full extract -> genotype -> analyze pipeline in a single fused process (the Rust
+    /// port of `run-t1k`), keeping candidate reads in memory between extract and genotype.
+    Run(RunArgs),
+}
+
+/// Arguments for the `run` subcommand, mirroring `run-t1k`'s flag names for the paired-end
+/// FASTQ + reference-sequence-FASTA input path.
+#[derive(Args, Debug)]
+pub struct RunArgs {
+    /// Path to the first-mate FASTQ file (paired FASTQ input; requires `-2`).
+    #[arg(short = '1', value_name = "STRING")]
+    pub mate1: Option<String>,
+
+    /// Path to the second-mate FASTQ file (paired FASTQ input; requires `-1`).
+    #[arg(short = '2', value_name = "STRING")]
+    pub mate2: Option<String>,
+
+    /// Path to a single-end read file (mutually exclusive with `-1`/`-2` and `-b`).
+    #[arg(short = 'u', value_name = "STRING")]
+    pub single: Option<String>,
+
+    /// Path to a BAM/CRAM file (mutually exclusive with `-1`/`-2`/`-u`). NOTE: BAM input is not
+    /// yet wired into the native Rust fused path -- see `crate::stages::run`'s doc comment.
+    #[arg(short = 'b', value_name = "STRING")]
+    pub bam: Option<String>,
+
+    /// Path to the reference sequence FASTA file.
+    #[arg(short = 'f', value_name = "STRING")]
+    pub ref_seq_fasta: String,
+
+    /// Path to the gene coordinate file (only required for BAM input; unused on this path).
+    #[arg(short = 'c', value_name = "STRING")]
+    pub ref_coord_fasta: Option<String>,
+
+    /// Prefix of output files.
+    #[arg(short = 'o', value_name = "STRING")]
+    pub prefix: String,
+
+    /// The directory for output files.
+    #[arg(long = "od", value_name = "STRING")]
+    pub output_dir: Option<String>,
+
+    /// Number of threads.
+    #[arg(short = 't', default_value_t = 1)]
+    pub threads: u32,
 }
 
 /// Arguments for the `build` subcommand, mirroring `t1k-build.pl`'s `-d`/`-g`/`--prefix` flags

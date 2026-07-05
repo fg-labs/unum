@@ -39,7 +39,7 @@ use unum_core::ref_kmer_filter::RefKmerFilter;
 /// k-mer length the reference is first loaded at, before any data-dependent
 /// `InferKmerLength`/`UpdateKmerLength` adjustment. Shared by both modes
 /// (both vendored `main`s use the same literal `9`).
-const INITIAL_KMER_LENGTH: usize = 9;
+pub(crate) const INITIAL_KMER_LENGTH: usize = 9;
 
 /// Resolves the CLI `-t` value into a worker-thread count for the core
 /// extractors: widens `args.threads` into `usize` (saturating to `usize::MAX`

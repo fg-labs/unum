@@ -174,6 +174,77 @@ pub trait CandidateSink {
     fn emit_pair(&mut self, r1: &ReadRecord, r2: Option<&ReadRecord>) -> Result<()>;
 }
 
+/// A [`CandidateSink`] that accumulates emitted pairs in memory instead of
+/// writing FASTQ files, for the fused single-process `run` pipeline (issue
+/// #28): the reads it collects are fed straight into the genotyper without an
+/// intermediate `{prefix}_candidate_*.fq` round-trip.
+///
+/// # Byte-identity to [`crate::extract::CandidateSink`]'s file-writing sink
+///
+/// This MUST reproduce the file sink's behavior exactly so the in-memory
+/// hand-off is byte-identical to the file-based path. The critical invariant
+/// (mirroring `FastqExtractor.cpp:471-473`, where `OutputSeq` is called with
+/// `reads.id` -- mate 1's id -- for BOTH mate files) is that for a pair, the
+/// record pushed into [`Self::reads2`] carries **mate 1's id**, not mate 2's
+/// own id (mate 2's kseq-parsed id is discarded, exactly as the file sink
+/// discards it). Feeding `r2.id` here would diverge `_aligned_2.fa` downstream.
+///
+/// For single-end input (`r2 == None`), only [`Self::reads1`] is populated.
+/// Records are collected in strict `emit_pair` call order (== input order,
+/// since [`extract_candidates_with_threads`] emits in input order at any thread
+/// count), so `reads1[i]`/`reads2[i]` stay positionally paired.
+#[derive(Debug, Default)]
+pub struct InMemoryCandidateSink {
+    reads1: Vec<ReadRecord>,
+    reads2: Vec<ReadRecord>,
+}
+
+impl InMemoryCandidateSink {
+    /// Creates an empty sink.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Consumes the sink, returning the collected `(reads1, reads2)` mate
+    /// vectors. For single-end input `reads2` is empty; for paired input the
+    /// two vectors have equal length and are positionally paired, with every
+    /// `reads2` record carrying its pair's mate-1 id (see the struct docs).
+    #[must_use]
+    pub fn into_reads(self) -> (Vec<ReadRecord>, Vec<ReadRecord>) {
+        (self.reads1, self.reads2)
+    }
+
+    /// The mate-1 records collected so far.
+    #[must_use]
+    pub fn reads1(&self) -> &[ReadRecord] {
+        &self.reads1
+    }
+
+    /// The mate-2 records collected so far (empty for single-end input).
+    #[must_use]
+    pub fn reads2(&self) -> &[ReadRecord] {
+        &self.reads2
+    }
+}
+
+impl CandidateSink for InMemoryCandidateSink {
+    fn emit_pair(&mut self, r1: &ReadRecord, r2: Option<&ReadRecord>) -> Result<()> {
+        self.reads1.push(r1.clone());
+        if let Some(r2) = r2 {
+            // r1.id (NOT r2.id) is carried for the mate-2 record -- see the
+            // struct's "Byte-identity" doc comment. Mate 2's own id is discarded
+            // exactly as `FastqExtractor.cpp:471-473` / the file sink does.
+            self.reads2.push(ReadRecord {
+                id: r1.id.clone(),
+                seq: r2.seq.clone(),
+                qual: r2.qual.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Whether the read source is paired or single-end -- determines the base
 /// `hitLenRequired` (`FastqExtractor.cpp:390-392`) and the short-circuit
 /// per-pair decision logic (`FastqExtractor.cpp:463-468`).
@@ -616,6 +687,75 @@ mod tests {
             self.pairs.push((r1.clone(), r2.cloned()));
             Ok(())
         }
+    }
+
+    #[test]
+    fn in_memory_sink_uses_mate1_id_for_both_reads() {
+        let mut sink = InMemoryCandidateSink::new();
+        let r1 = ReadRecord {
+            id: "mate1_id".to_string(),
+            seq: b"ACGT".to_vec(),
+            qual: Some(b"IIII".to_vec()),
+        };
+        let r2 = ReadRecord {
+            id: "totally_different_mate2_id".to_string(),
+            seq: b"TTTT".to_vec(),
+            qual: Some(b"JJJJ".to_vec()),
+        };
+        sink.emit_pair(&r1, Some(&r2)).unwrap();
+
+        let (reads1, reads2) = sink.into_reads();
+        assert_eq!(reads1.len(), 1);
+        assert_eq!(reads2.len(), 1);
+        assert_eq!(reads1[0].id, "mate1_id");
+        assert_eq!(reads1[0].seq, b"ACGT");
+        assert_eq!(reads1[0].qual.as_deref(), Some(b"IIII".as_slice()));
+        // The critical invariant: mate-2's record carries mate-1's id, and
+        // mate-2's own seq/qual verbatim.
+        assert_eq!(reads2[0].id, "mate1_id", "mate-2 record must carry mate-1's id");
+        assert_eq!(reads2[0].seq, b"TTTT");
+        assert_eq!(reads2[0].qual.as_deref(), Some(b"JJJJ".as_slice()));
+    }
+
+    #[test]
+    fn in_memory_sink_single_end_populates_only_reads1() {
+        let mut sink = InMemoryCandidateSink::new();
+        let r1 = ReadRecord {
+            id: "s0".to_string(),
+            seq: b"ACGT".to_vec(),
+            qual: Some(b"IIII".to_vec()),
+        };
+        sink.emit_pair(&r1, None).unwrap();
+
+        assert_eq!(sink.reads1().len(), 1);
+        assert!(sink.reads2().is_empty(), "single-end input must leave reads2 empty");
+        let (reads1, reads2) = sink.into_reads();
+        assert_eq!(reads1[0].id, "s0");
+        assert!(reads2.is_empty());
+    }
+
+    #[test]
+    fn in_memory_sink_preserves_emit_order() {
+        let mut sink = InMemoryCandidateSink::new();
+        for i in 0..5 {
+            let r1 = ReadRecord {
+                id: format!("r{i}"),
+                seq: b"AAAA".to_vec(),
+                qual: Some(b"IIII".to_vec()),
+            };
+            let r2 = ReadRecord {
+                id: format!("mate2_{i}"),
+                seq: b"CCCC".to_vec(),
+                qual: Some(b"JJJJ".to_vec()),
+            };
+            sink.emit_pair(&r1, Some(&r2)).unwrap();
+        }
+        let (reads1, reads2) = sink.into_reads();
+        let ids1: Vec<&str> = reads1.iter().map(|r| r.id.as_str()).collect();
+        let ids2: Vec<&str> = reads2.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids1, ["r0", "r1", "r2", "r3", "r4"]);
+        // Every mate-2 record carries the corresponding mate-1 id, in order.
+        assert_eq!(ids2, ["r0", "r1", "r2", "r3", "r4"]);
     }
 
     // A repetitive-but-balanced 200bp reference, long enough that exact
