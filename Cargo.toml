@@ -4,7 +4,7 @@ members = ["crates/unum", "crates/unum-core"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.87.0"
 license = "MIT"
 repository = "https://github.com/fg-labs/unum"
 homepage = "https://github.com/fg-labs/unum"

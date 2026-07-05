@@ -1,4 +1,10 @@
 [alias]
 ci-test = "nextest run --cargo-profile ci-test --locked --no-tests=pass"
 ci-fmt = "fmt -- --check"
-ci-lint = "clippy --all-targets -- -D warnings -W clippy::pedantic -A clippy::doc_markdown"
+# `-W clippy::pedantic` is opt-in strictness. The trailing `-A clippy::*` list suppresses
+# pedantic lints whose 1.95-era rewrites we deliberately do not apply: `doc_markdown` (prose),
+# and a set that fires only on faithful, byte-identity-validated ports of the C++ T1K source
+# (surfaced by the 1.85 -> 1.95 toolchain bump in #31). We keep the ported code literal rather
+# than churn it for style -- most acutely `manual_midpoint`, whose rounding differs from the
+# ported `(l + r) / 2`. Revisit as a dedicated style pass if the byte-identity goldens are retired.
+ci-lint = "clippy --all-targets -- -D warnings -W clippy::pedantic -A clippy::doc_markdown -A clippy::manual_midpoint -A clippy::format_push_string -A clippy::implicit_clone -A clippy::manual_repeat_n -A clippy::borrow_as_ptr -A clippy::manual_is_multiple_of -A clippy::unnecessary_debug_formatting"
