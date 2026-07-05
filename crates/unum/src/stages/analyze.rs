@@ -5,14 +5,24 @@
 //! delegating to a `Genotyper`/`VariantCaller` method -- right here, matching
 //! `crate::stages::genotype`'s same split of responsibility.
 //!
-//! # Scope: single-threaded, paired/single-end aligned-read FASTA, no barcode
+//! # Scope: `-t N`-parallel, paired/single-end aligned-read FASTA, no barcode
 //!
-//! This port only reproduces `Analyzer.cpp:main`'s `threadCnt <= 1` code path
-//! (`Analyzer.cpp:467-484,528-565,623-634`) -- the multi-threaded path is a batching/parallelism
-//! detail over the exact same per-read logic, not a different algorithm, so single-threaded
-//! output is what an end-to-end differential against the real oracle (also run at `-t 1`) must
-//! match. `--barcode`/`--relaxIntronAlign`/`--alleleDigitUnits`/`--alleleDelimiter` are not
-//! exposed by [`AnalyzeArgs`] -- see that struct's doc comment.
+//! This port reproduces `Analyzer.cpp:main`'s per-read logic exactly
+//! (`Analyzer.cpp:467-484,528-565,623-634`); like [`crate::stages::genotype`], it does not
+//! replicate stock's own `threadCnt > 1` batching mechanics but achieves the same output-
+//! determinism property by parallelizing three read-independent per-read loops in a way that is
+//! byte-identical to `-t 1` (and to the oracle, itself always run at `-t 1` for the end-to-end
+//! differential) at any thread count: (0) the dedup `assign_read` loop (via
+//! [`unum_core::genotyper::assign_reads_parallel`] with `weight = 0`, so its coverage marking is
+//! a no-op -- there is no sequential coverage-marking hazard on the analyzer path); (A) the
+//! slot-indexed fragment-assembly loop (each read `i` computes its own
+//! `(fragment_overlaps_i, slot_i)` via the pure `&self` `compute_read_assignment`, installed in
+//! one shot via `set_all_read_assignments`); and (B) `AddFragmentAlignmentInfo`, whose only
+//! mutation is each read's own `fragment_assignments[i]`. Every genuinely order-dependent step
+//! (`CoalesceReadAssignments`, EM/quantification, `ComputeVariant`) still runs strictly
+//! sequentially in a fixed, thread-count-independent order.
+//! `--barcode`/`--relaxIntronAlign`/`--alleleDigitUnits`/`--alleleDelimiter` are not exposed by
+//! [`AnalyzeArgs`] -- see that struct's doc comment.
 //!
 //! # Reference loading mirrors `Genotyper::InitRefSet(char*, selectedAlleles)` (`Genotyper.hpp:732-757`)
 //!
@@ -44,7 +54,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
 use unum_core::fastq::FastqReader;
-use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper};
+use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper, ReadAssignment};
 use unum_core::ref_kmer_filter::RefKmerFilter;
 use unum_core::variant_caller::{self, FragmentOverlap, Overlap, VariantCaller};
 
@@ -344,6 +354,13 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
         reads1.iter().chain(reads2.iter()).map(|r| r.seq.len()).max().unwrap_or(0);
     genotyper.set_read_length(i32::try_from(max_read_length).unwrap_or(0));
 
+    // `-t`/`--threads`: honored byte-identically across the three per-read
+    // loops below (Loop 0's `assign_reads_parallel`, Loop A's slot-indexed
+    // fragment assembly, and Loop B's `AddFragmentAlignmentInfo`) -- see each
+    // loop's comment and this module's doc comment for the per-loop byte-
+    // identity argument. Mirror `crate::stages::genotype::run`'s clamp.
+    let threads = usize::try_from(args.threads).unwrap_or(usize::MAX).max(1);
+
     // --- Read-end alignment, reusing identical sequences (Analyzer.cpp:455-511) ---
     // Not `mut`: `assign_read` takes `&[AlleleRef]` (coverage marking, when it
     // runs, goes through interior-mutable `AtomicPosWeight`); the analyzer path
@@ -355,25 +372,28 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
     sorted_seqs.sort_unstable();
     sorted_seqs.dedup();
 
+    // Loop 0 -- dedup `assign_read` (Analyzer.cpp:476). Delegates to the SAME
+    // `assign_reads_parallel` helper `stages::genotype` uses, but with the
+    // weight closure returning 0 (matching the analyzer's `assign_read(..., 0)`,
+    // NOT an occurrence count): unlike the genotyper, the analyzer does NOT
+    // accumulate per-base `pos_weight` coverage here (its `missing_coverage` is
+    // never read on the analyzer path -- `em_update`/`set_allele_abundance` use
+    // only ec length, and the missing-coverage consumers are the genotype-
+    // selection steps analyzer never runs). With `weight == 0` the interior-
+    // mutable `AtomicPosWeight` coverage marking is a no-op, so `allele_refs`'
+    // end state -- and thus every downstream result -- is byte-identical at any
+    // thread count and to the serial `-t 1` loop (see `assign_reads_parallel`'s
+    // doc comment for the order-invariance argument).
+    let extended_by_seq = genotyper::assign_reads_parallel(
+        &filter,
+        &sorted_seqs,
+        &allele_refs,
+        args.similarity,
+        |_seq| 0,
+        threads,
+    );
     let mut overlaps_by_seq: HashMap<&[u8], Option<Vec<ExtendedOverlap>>> = HashMap::new();
-    let mut scratch = unum_core::ref_kmer_filter::Scratch::default();
-    let mut dp_cache = unum_core::align_algo::DpCache::new();
-    for &seq in &sorted_seqs {
-        let raw_overlaps = filter.get_overlaps_from_read(seq, &mut scratch).unwrap_or_default();
-        // Analyzer.cpp:476 calls AssignRead(..., weight=0): unlike the genotyper,
-        // the analyzer does NOT accumulate per-base pos_weight coverage here (its
-        // `missing_coverage` is never read on the analyzer path -- em_update /
-        // set_allele_abundance use only ec length, and the missing-coverage
-        // consumers are the genotype-selection steps analyzer never runs). Pass 0
-        // to match the oracle exactly rather than the genotyper's occurrence count.
-        let extended = genotyper::assign_read(
-            seq,
-            &raw_overlaps,
-            &allele_refs,
-            args.similarity,
-            0,
-            &mut dp_cache,
-        );
+    for (&seq, extended) in sorted_seqs.iter().zip(extended_by_seq) {
         overlaps_by_seq.insert(seq, extended);
     }
 
@@ -407,52 +427,81 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
         genotyper::is_separator_in_range(&allele_refs[idx].separator, s, e)
     };
 
+    // Loop A -- fragment assembly + read-assignment slot computation
+    // (Analyzer.cpp:528-565). Parallelized across reads and byte-identical to
+    // `-t 1` because it is SLOT-INDEXED (the exact pattern
+    // `stages::genotype::run` uses): each read `i` produces a pure
+    // `(fragment_overlaps_i, slot_i)` tuple from read `i`'s inputs plus
+    // immutable shared state -- `overlaps_by_seq`, the read vectors, `&genotyper`
+    // (read only via the `&self` `compute_read_assignment`), and the `Fn + Sync`
+    // lookup closures (`consensus_len_of`/`separator_in_range`/
+    // `separator_lookup_for_set_read_assignments`, each borrowing `allele_refs`
+    // immutably) -- with NO cross-read order dependence. `.unzip()` on the
+    // order-preserving `into_par_iter()` yields `fragment_assignments` and
+    // `slots` in slot order regardless of thread count; the slots are then
+    // installed in one shot via `set_all_read_assignments`.
+    //
     // `fragment_assignments[i]` mirrors `Analyzer.cpp`'s own
     // `fragmentAssignments[i]` -- kept (not discarded like `genotype.rs`
     // does) since `AddFragmentAlignmentInfo`/`ComputeVariant` need it after
-    // the read loop (`Analyzer.cpp:464,556,684`).
-    let mut fragment_assignments: Vec<Vec<FragmentOverlap>> = Vec::with_capacity(read_cnt);
-    for i in 0..read_cnt {
-        let overlaps1 = overlaps_by_seq.get(reads1[i].seq.as_slice()).and_then(Option::as_ref);
-        let overlaps2 = if has_mate {
-            overlaps_by_seq.get(reads2[i].seq.as_slice()).and_then(Option::as_ref)
-        } else {
-            None
-        };
-        let has_n = reads1[i].has_n || (has_mate && reads2[i].has_n);
+    // the read loop (`Analyzer.cpp:464,556,684`). Runs inside a pool sized to
+    // `-t` so `-t 1` is strictly single-threaded (and still byte-identical).
+    let fragment_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("building rayon thread pool for parallel fragment assembly");
+    let (mut fragment_assignments, slots): (Vec<Vec<FragmentOverlap>>, Vec<Vec<ReadAssignment>>) =
+        fragment_pool.install(|| {
+            (0..read_cnt)
+                .into_par_iter()
+                .map(|i| {
+                    let overlaps1 =
+                        overlaps_by_seq.get(reads1[i].seq.as_slice()).and_then(Option::as_ref);
+                    let overlaps2 = if has_mate {
+                        overlaps_by_seq.get(reads2[i].seq.as_slice()).and_then(Option::as_ref)
+                    } else {
+                        None
+                    };
+                    let has_n = reads1[i].has_n || (has_mate && reads2[i].has_n);
 
-        let empty: Vec<ExtendedOverlap> = Vec::new();
-        let assembled = genotyper::read_assignment_to_fragment_assignment_with_overlaps(
-            overlaps1.map_or(empty.as_slice(), Vec::as_slice),
-            if has_mate { Some(overlaps2.map_or(empty.as_slice(), Vec::as_slice)) } else { None },
-            has_n,
-            hit_len_required,
-            consensus_len_of,
-            separator_in_range,
-        );
+                    let empty: Vec<ExtendedOverlap> = Vec::new();
+                    let assembled = genotyper::read_assignment_to_fragment_assignment_with_overlaps(
+                        overlaps1.map_or(empty.as_slice(), Vec::as_slice),
+                        if has_mate {
+                            Some(overlaps2.map_or(empty.as_slice(), Vec::as_slice))
+                        } else {
+                            None
+                        },
+                        has_n,
+                        hit_len_required,
+                        consensus_len_of,
+                        separator_in_range,
+                    );
 
-        let fragment_overlaps: Vec<FragmentOverlap> = assembled
-            .iter()
-            .map(|(fo, o1, o2)| FragmentOverlap {
-                seq_idx: fo.seq_idx,
-                has_mate_pair: fo.has_mate_pair,
-                o1_from_r2: fo.o1_from_r2,
-                overlap1: to_overlap(o1),
-                overlap2: o2.map_or_else(Overlap::none, |o2| to_overlap(&o2)),
-            })
-            .collect();
+                    let fragment_overlaps: Vec<FragmentOverlap> = assembled
+                        .iter()
+                        .map(|(fo, o1, o2)| FragmentOverlap {
+                            seq_idx: fo.seq_idx,
+                            has_mate_pair: fo.has_mate_pair,
+                            o1_from_r2: fo.o1_from_r2,
+                            overlap1: to_overlap(o1),
+                            overlap2: o2.map_or_else(Overlap::none, |o2| to_overlap(&o2)),
+                        })
+                        .collect();
 
-        let plain_assignment: Vec<genotyper::FragmentOverlap> =
-            assembled.iter().map(|(fo, _, _)| *fo).collect();
-        genotyper.set_read_assignments(
-            i,
-            &plain_assignment,
-            ref_seq_similarity,
-            separator_lookup_for_set_read_assignments,
-        );
+                    let plain_assignment: Vec<genotyper::FragmentOverlap> =
+                        assembled.iter().map(|(fo, _, _)| *fo).collect();
+                    let slot = genotyper.compute_read_assignment(
+                        &plain_assignment,
+                        ref_seq_similarity,
+                        separator_lookup_for_set_read_assignments,
+                    );
 
-        fragment_assignments.push(fragment_overlaps);
-    }
+                    (fragment_overlaps, slot)
+                })
+                .unzip()
+        });
+    genotyper.set_all_read_assignments(slots);
     // Skip coalescing entirely when there are no reads: `coalesce_read_assignments`
     // would otherwise be handed `end = 0` and evaluate `total_read_cnt - 1` on an
     // empty assignment set.
@@ -483,19 +532,32 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
         if has_mate { reads2.iter().map(|r| r.seq.clone()).collect() } else { Vec::new() };
     let allele_consensus: Vec<Vec<u8>> = allele_refs.iter().map(|a| a.consensus.clone()).collect();
 
-    // AddFragmentAlignmentInfo (Analyzer.cpp:623-634): populate `align` on
-    // every fragment overlap BEFORE ComputeVariant runs -- required, not
-    // optional (see `variant_caller::add_fragment_alignment_info`'s doc
-    // comment).
-    for i in 0..read_cnt {
-        let r2 = if has_mate { Some(read2_seqs[i].as_slice()) } else { None };
-        variant_caller::add_fragment_alignment_info(
-            &read1_seqs[i],
-            r2,
-            &mut fragment_assignments[i],
-            &allele_consensus,
-        );
-    }
+    // Loop B -- AddFragmentAlignmentInfo (Analyzer.cpp:623-634): populate
+    // `align` on every fragment overlap BEFORE ComputeVariant runs -- required,
+    // not optional (see `variant_caller::add_fragment_alignment_info`'s doc
+    // comment). Parallelized across reads: each call mutates ONLY its own
+    // `fragment_assignments[i]` (zero shared mutable state --
+    // `variant_caller.rs:469`), reading only the shared immutable
+    // `read1_seqs`/`read2_seqs`/`allele_consensus` borrows, so
+    // `par_iter_mut().enumerate()` is byte-identical to the serial `-t 1` loop
+    // at any thread count. This is the only per-read loop with real DP cost
+    // (`global_alignment` per overlap), so it is where any speedup comes from.
+    // Runs inside a `-t`-sized pool so `-t 1` stays strictly single-threaded.
+    let align_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("building rayon thread pool for parallel fragment alignment");
+    align_pool.install(|| {
+        fragment_assignments.par_iter_mut().enumerate().for_each(|(i, frag)| {
+            let r2 = if has_mate { Some(read2_seqs[i].as_slice()) } else { None };
+            variant_caller::add_fragment_alignment_info(
+                &read1_seqs[i],
+                r2,
+                frag,
+                &allele_consensus,
+            );
+        });
+    });
 
     variant_caller.compute_variant(
         &read1_seqs,
