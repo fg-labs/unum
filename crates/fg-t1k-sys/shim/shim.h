@@ -230,6 +230,115 @@ int fg_t1k_alignalgo_global_alignment_pos_weight(const int* t_weights, int lent,
 // on success, -1 if the underlying call threw.
 int fg_t1k_seqset_get_align_stats(const signed char* align, int align_len, int update,
                                    int* out_match_cnt, int* out_mismatch_cnt, int* out_indel_cnt);
+
+// Free-function FFI for Genotyper's Task-5a deterministic slice (vendor/t1k/
+// Genotyper.hpp), scoped to exactly ParseAlleleName and ReadAssignmentWeight
+// -- see crates/fg-t1k-core/src/genotyper.rs module docs for the full port
+// scope. Both are private C++ methods reached via a `#define private
+// public` trick in shim.cpp (see that file for the full rationale); each
+// call constructs a fresh, throwaway `Genotyper(11)` (matching the
+// `Genotyper genotyper(11)` construction in Genotyper.cpp:207's real
+// `main`), so these are free functions rather than opaque-handle FFI like
+// fg_t1k_seqset_* above -- no persistent state needs to survive between
+// calls.
+//
+// Mirrors `Genotyper::ParseAlleleName(char* allele, char* gene, char*
+// majorAllele, int fieldsType)` (Genotyper.hpp:63-131) after calling
+// `SetAlleleNameStructure(alleleDigitUnits, alleleDelimiter)`
+// (Genotyper.hpp:548-552) to configure the same two fields the real
+// `Genotyper.cpp:336` sets from CLI flags before ever calling
+// ParseAlleleName. `allele` must be a NUL-terminated C string; `out_gene`/
+// `out_major` are caller-allocated buffers, each must be at least
+// `strlen(allele) + 1` bytes (ParseAlleleName never writes a byte beyond
+// `strlen(allele)` into either -- it only NUL-truncates a copy of `allele`
+// at an earlier offset). `alleleDelimiter` is `char` (NOT `unsigned char`)
+// to exactly match the C++ `char alleleDelimiter` field's signedness on the
+// build platform; pass `'\0'` for "not set" (`SetAlleleNameStructure`'s own
+// "no override" sentinel). Returns 0 on success, -1 if the underlying call
+// threw.
+int fg_t1k_genotyper_parse_allele_name(const char* allele, int fieldsType, int alleleDigitUnits,
+                                        char alleleDelimiter, char* out_gene, char* out_major);
+// Mirrors `Genotyper::ReadAssignmentWeight(const _fragmentOverlap& o)`
+// (Genotyper.hpp:205-230) after calling
+// `genotyper.refSet.SetRefSeqSimilarity(refSeqSimilarity)`
+// (SeqSet.hpp:835-838) so `o.similarity`'s comparison thresholds (which
+// derive from `refSet.GetRefSeqSimilarity()`, Genotyper.hpp:212) use the
+// caller's chosen value rather than `SeqSet`'s constructor default (`0.8`,
+// SeqSet.hpp:768). Every other `_fragmentOverlap` field is zero-initialized
+// (`ReadAssignmentWeight` reads only `.similarity`/`.hasN`, per this port's
+// scope -- see genotyper.rs's `FragmentOverlap` doc comment for why the
+// other fields are irrelevant here). Returns the real C++ weight (always in
+// `[0, 1]`), or `-1.0` (an otherwise-impossible return value for this
+// function) if the underlying call threw.
+double fg_t1k_genotyper_read_assignment_weight(double similarity, int hasN,
+                                                double refSeqSimilarity);
+
+// Opaque-handle FFI for Genotyper's Task-5b quantification slice
+// (CoalesceReadAssignments, BuildAlleleEquivalentClass via
+// FinalizeReadAssignments, QuantifyAlleleEquivalentClass) -- see shim.cpp for
+// the full rationale (a persistent handle, unlike the Task-5a free functions
+// above, since a scripted differential test builds up state across many
+// calls). The handle is an opaque `void*` (really a `Genotyper*`); callers
+// must free it exactly once via fg_t1k_genotyper2_free.
+// `fg_t1k_genotyper2_new` returns NULL if construction throws -- callers
+// MUST check for a NULL handle before using it.
+void* fg_t1k_genotyper2_new(int kmerLength);
+void fg_t1k_genotyper2_free(void* p);
+// Mirrors `genotyper.refSet.InputRefSeq(id, seq, weight,
+// /*initExonInfo=*/true)`. `id`/`seq` must be NUL-terminated C strings.
+// Returns the 0-based seqIdx (== alleleIdx) on success, -1 if the underlying
+// call threw.
+int fg_t1k_genotyper2_add_ref_seq(void* p, const char* id, const char* seq, int weight);
+// Mirrors `Genotyper::InitAlleleInfo()`. Call after all ref seqs are loaded.
+// Returns 0 on success, -1 if the underlying call threw.
+int fg_t1k_genotyper2_init_allele_info(void* p);
+// Mirrors `Genotyper::SetAlleleNameStructure(alleleDigitUnits,
+// alleleDelimiter)`. Returns 0 on success, -1 if the underlying call threw.
+int fg_t1k_genotyper2_set_allele_name_structure(void* p, int alleleDigitUnits,
+                                                 char alleleDelimiter);
+// Mirrors `Genotyper::InitReadAssignments(totalReadCnt, maxAssignCnt)`.
+// Returns 0 on success, -1 if the underlying call threw.
+int fg_t1k_genotyper2_init_read_assignments(void* p, int totalReadCnt, int maxAssignCnt);
+// Mirrors `Genotyper::SetReadAssignments(readId, assignment)`, building the
+// `std::vector<_fragmentOverlap>` from `n`-length flat parallel arrays (one
+// entry per `_fragmentOverlap`); `refSeqSimilarity` is applied via
+// `SetRefSeqSimilarity` before the call. Returns 0 on success, -1 if the
+// underlying call threw.
+int fg_t1k_genotyper2_set_read_assignments(void* p, int readId, const int* seqIdx,
+                                            const int* seqStart, const int* seqEnd,
+                                            const int* matchCnt, const int* relaxedMatchCnt,
+                                            const double* similarity, const int* hasMatePair,
+                                            const int* o1FromR2, const double* qual,
+                                            const int* hasN, int n, double refSeqSimilarity);
+// Mirrors `Genotyper::CoalesceReadAssignments(begin, end)`. Returns the C++
+// method's own return value, or INT32_MIN if the underlying call threw.
+int fg_t1k_genotyper2_coalesce_read_assignments(void* p, int begin, int end);
+// Mirrors `Genotyper::FinalizeReadAssignments()` (also runs the real
+// `GetSeqMissingBaseCoverage`/`BuildAlleleEquivalentClass`). Returns the C++
+// method's own return value, or INT32_MIN if the underlying call threw.
+int fg_t1k_genotyper2_finalize_read_assignments(void* p);
+// Mirrors `Genotyper::QuantifyAlleleEquivalentClass()` -- the SQUAREM
+// abundance EM, run to completion. Returns the number of EM iterations run,
+// or INT32_MIN if the underlying call threw.
+int fg_t1k_genotyper2_quantify(void* p);
+
+// Read-back accessors (all real Genotyper state, no shim-side recomputation).
+// The index-taking accessors bounds-check their index and return the sentinel
+// noted below (rather than reading out of range, which would be UB): the
+// `int`-returning ones return -1, the `double`-returning ones return -1.0.
+// `ecIdx` is bounds `0..fg_t1k_genotyper2_ec_count(p)`, `memberIdx` is bounds
+// `0..fg_t1k_genotyper2_ec_member_count(p, ecIdx)`, and `alleleIdx` is bounds
+// the Genotyper's allele count (`refSet.Size()` for the `seq_*` entries).
+int fg_t1k_genotyper2_read_cnt(void* p);
+int fg_t1k_genotyper2_ec_count(void* p);
+int fg_t1k_genotyper2_ec_member_count(void* p, int ecIdx);
+int fg_t1k_genotyper2_ec_member(void* p, int ecIdx, int memberIdx);
+int fg_t1k_genotyper2_allele_equivalent_class(void* p, int alleleIdx);
+double fg_t1k_genotyper2_allele_abundance(void* p, int alleleIdx);
+double fg_t1k_genotyper2_allele_ec_abundance(void* p, int alleleIdx);
+int fg_t1k_genotyper2_allele_missing_coverage(void* p, int alleleIdx);
+int fg_t1k_genotyper2_seq_effective_len(void* p, int alleleIdx);
+int fg_t1k_genotyper2_seq_weight(void* p, int alleleIdx);
 #ifdef __cplusplus
 }
 #endif

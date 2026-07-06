@@ -422,6 +422,27 @@ impl RefKmerFilter {
         self.ref_seq_similarity = ref_seq_similarity;
     }
 
+    /// Ported from `SeqSet::GetRefSeqSimilarity` (`SeqSet.hpp:840-843`).
+    /// Used by [`crate::genotyper::Genotyper::read_assignment_weight`]'s
+    /// `segment = (1 - refSet.GetRefSeqSimilarity()) / 4.0` computation
+    /// (`Genotyper.hpp:212`).
+    #[must_use]
+    pub fn ref_seq_similarity(&self) -> f64 {
+        self.ref_seq_similarity
+    }
+
+    /// The raw reference sequence bytes at 0-based load-order index `idx`
+    /// (`SeqSet::GetSeqConsensus`, `SeqSet.hpp:815-818`). Used by
+    /// [`crate::genotyper::Genotyper::init_allele_info`], which needs each
+    /// allele's own sequence to compute gene-level k-mer similarity and
+    /// effective length -- mirroring `Genotyper::InitAlleleInfo`
+    /// (`Genotyper.hpp:559-682`), which reads `refSet.GetSeqConsensus(...)`
+    /// for exactly the same purpose.
+    #[must_use]
+    pub fn seq_consensus(&self, idx: usize) -> &[u8] {
+        &self.seqs[idx]
+    }
+
     /// Ported EXACTLY from `SeqSet::InferKmerLength` (`SeqSet.hpp:2830-2845`):
     /// sums every loaded reference sequence's length into `totalLength`, then
     /// repeatedly divides `totalLength` by 4 (integer division) counting each

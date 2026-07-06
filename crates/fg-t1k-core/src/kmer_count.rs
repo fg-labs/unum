@@ -155,6 +155,37 @@ impl KmerCount {
 
         f64::from(shared_count) / f64::from(count_a + count_b - shared_count)
     }
+
+    /// Ported from `KmerCount::GetCountSimilarity` (`KmerCount.hpp:194-212`).
+    ///
+    /// Asymmetric "how similar is `self` to `other`": `countA` sums every
+    /// k-mer occurrence count in `self`; `sharedCount` sums, for every
+    /// k-mer in `self` that is ALSO present in `other`, `self`'s own count
+    /// for that k-mer (NOT `min(self, other)`, unlike
+    /// [`KmerCount::jaccard_similarity`]). The result is `sharedCount /
+    /// countA`. Used by `Genotyper::InitAlleleInfo`'s gene-similarity matrix
+    /// (`Genotyper.hpp:635`, `geneSimilarity[i][j] =
+    /// kmerProfiles[i].GetCountSimilarity(kmerProfiles[j])`).
+    ///
+    /// The commented-out `pow`/`log` variants in the vendored C++
+    /// (`KmerCount.hpp:210-211`) are dead code -- only the plain ratio is
+    /// ever compiled -- so this port omits them entirely; the ratio itself
+    /// uses `i32` accumulators (matching C++ `int countA, sharedCount`),
+    /// matching [`KmerCount::jaccard_similarity`]'s same reasoning.
+    #[must_use]
+    pub fn count_similarity(&self, other: &KmerCount) -> f64 {
+        let mut count_a: i32 = 0;
+        let mut shared_count: i32 = 0;
+
+        for (kcode, &c) in &self.counts {
+            count_a += c;
+            if other.counts.contains_key(kcode) {
+                shared_count += c;
+            }
+        }
+
+        f64::from(shared_count) / f64::from(count_a)
+    }
 }
 
 #[cfg(test)]
@@ -266,5 +297,45 @@ mod tests {
         let mut b = KmerCount::new(4);
         b.add_count(b"CCCC");
         assert_eq!(a.jaccard_similarity(&b), 0.0);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn count_similarity_of_identical_sets_is_one() {
+        let mut a = KmerCount::new(4);
+        a.add_count(b"ACGTAC");
+        let mut b = KmerCount::new(4);
+        b.add_count(b"ACGTAC");
+        assert_eq!(a.count_similarity(&b), 1.0);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn count_similarity_is_asymmetric() {
+        // a: ACGT x2, CGTA x1 (countA = 3).
+        let mut a = KmerCount::new(4);
+        a.add_count(b"ACGT");
+        a.add_count(b"ACGT");
+        a.add_count(b"CGTA");
+        // b: ACGT x1, GGGG x1 (countB = 2).
+        let mut b = KmerCount::new(4);
+        b.add_count(b"ACGT");
+        b.add_count(b"GGGG");
+        // a->b: shared = a's own count for ACGT (2) since it's present in b.
+        // similarity(a, b) = 2 / 3.
+        assert_eq!(a.count_similarity(&b), 2.0 / 3.0);
+        // b->a: shared = b's own count for ACGT (1) since it's present in a.
+        // similarity(b, a) = 1 / 2 -- demonstrates asymmetry vs jaccard.
+        assert_eq!(b.count_similarity(&a), 1.0 / 2.0);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn count_similarity_disjoint_sets_is_zero() {
+        let mut a = KmerCount::new(4);
+        a.add_count(b"AAAA");
+        let mut b = KmerCount::new(4);
+        b.add_count(b"CCCC");
+        assert_eq!(a.count_similarity(&b), 0.0);
     }
 }
