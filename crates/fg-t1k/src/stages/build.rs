@@ -1,11 +1,10 @@
 //! Reference-build orchestration: dispatches the `build` subcommand to
-//! `fg_t1k_core::refbuild::build_reference`, T1K's Rust reference-build port
-//! (`vendor/t1k/t1k-build.pl`).
+//! `fg_t1k_core::refbuild::build_reference`, the Rust port of T1K's
+//! `t1k-build.pl` reference-build tool.
 //!
-//! Unlike the `run` pipeline's per-stage `--engine cpp|rust` toggle, there is no C++ oracle
-//! binary for reference-build to strangle: `t1k-build.pl` itself is a thin Perl orchestrator
-//! around `ParseDatFile.pl`/`AddGeneCoord.pl`, already fully captured (byte-for-byte) by the
-//! golden-file fixtures under `fixtures/refbuild/`. This stage is therefore always pure Rust.
+//! `t1k-build.pl` is a thin Perl orchestrator around `ParseDatFile.pl`/`AddGeneCoord.pl`, whose
+//! output is captured (byte-for-byte) by the golden-file fixtures under `fixtures/refbuild/`
+//! (see `crates/fg-t1k/tests/build_e2e.rs`). This stage is pure Rust.
 use crate::cli::BuildArgs;
 
 /// Builds the four T1K reference files for `args`, matching `t1k-build.pl`'s

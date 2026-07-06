@@ -20,15 +20,6 @@
 //! Both modes share [`FastqFileSink`] (`{prefix}_1.fq`/`_2.fq` for paired,
 //! `{prefix}.fq` for single-end -- `FastqExtractor.cpp:425-439` /
 //! `BamExtractor.cpp:599-610`, identical naming convention).
-//!
-//! # Follow-up: wiring into the `--engine` strangler router
-//!
-//! `stages::run`'s `extract` stage currently only dispatches to the C++
-//! oracle (`Engine::Cpp` in `stages::run`'s `match overrides.engine_for(...)`)
-//! and returns an error for `Engine::Rust`. Wiring `extract_candidates`/
-//! `extract_from_bam` in as that `Engine::Rust` implementation is a
-//! deliberate follow-up, not done in this task -- this module currently only
-//! exposes a standalone `fg-t1k extract` subcommand.
 use crate::cli::ExtractArgs;
 use anyhow::{Context, Result, bail, ensure};
 use fg_t1k_core::alignments::Alignments;
