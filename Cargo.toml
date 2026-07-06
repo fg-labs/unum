@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fg-t1k", "crates/fg-t1k-core"]
+members = ["crates/unum", "crates/unum-core"]
 
 [workspace.package]
 edition = "2024"
