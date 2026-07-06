@@ -1,0 +1,106 @@
+name: Manage Release PRs and Publish Crates
+
+# Runs release-plz on every push to main, in two jobs (the fg-labs convention):
+#   - release-pr: opens/updates a "release" PR that bumps versions + changelog
+#     from the conventional commits since the last release;
+#   - publish: when a release PR has merged (a new version exists that is not yet
+#     on crates.io), publishes the workspace crates (unum-core, unum) and creates
+#     the GitHub release + tag.
+#
+# Auth needs NO repo secrets:
+#   - the release PR / GitHub release use a short-lived token minted from the
+#     fg-labs bot GitHub App (org-wide secrets FG_LABS_BOT_APP_ID /
+#     FG_LABS_BOT_PRIVATE_KEY, visibility=all), so the PR it opens can trigger CI;
+#   - crates.io auth uses Trusted Publishing (OIDC, `id-token: write`) via
+#     rust-lang/crates-io-auth-action -- no CARGO_REGISTRY_TOKEN.
+# One-time maintainer step: register fg-labs/unum + this workflow as a Trusted
+# Publisher for the `unum` and `unum-core` crates on crates.io.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    name: Create or update the release PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint a token from the fg-labs bot App
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.FG_LABS_BOT_APP_ID }}
+          private-key: ${{ secrets.FG_LABS_BOT_PRIVATE_KEY }}
+          # Scope the minted App token to only what `release-plz release-pr`
+          # needs: push the release branch (contents) and open/update the
+          # release PR (pull-requests).
+          permissions: |
+            contents: write
+            pull-requests: write
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Cache Cargo build artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: release-plz
+      - name: Create or update release PR
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  publish:
+    name: Publish crates + GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - name: Mint a token from the fg-labs bot App
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.FG_LABS_BOT_APP_ID }}
+          private-key: ${{ secrets.FG_LABS_BOT_PRIVATE_KEY }}
+          # Scope the minted App token to only what `release-plz release`
+          # needs: create git tags + the GitHub release (contents). It does
+          # not open pull requests, so no pull-requests scope.
+          permissions: |
+            contents: write
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Cache Cargo build artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: release-plz
+      - name: Authenticate to crates.io via Trusted Publishing
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish crates + create the GitHub release
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}

@@ -6,6 +6,9 @@ members = ["crates/unum", "crates/unum-core"]
 edition = "2024"
 rust-version = "1.85.0"
 license = "MIT"
+repository = "https://github.com/fg-labs/unum"
+homepage = "https://github.com/fg-labs/unum"
+keywords = ["hla", "kir", "genotyping", "bioinformatics", "genomics"]
 
 [profile.release]
 lto = true
