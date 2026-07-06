@@ -1,0 +1,14 @@
+[package]
+name = "unum"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+unum-core = { path = "../unum-core" }
+
+[dev-dependencies]
+tempfile = "3"

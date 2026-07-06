@@ -1,7 +1,7 @@
 # Reference-build golden fixtures: provenance and pins (Phase 1, Task 1.1)
 
 This directory pins small, hand-picked KIR inputs and the byte-identical golden
-output of the Perl oracle (`vendor/t1k/t1k-build.pl`) that a future Rust port of
+output of the Perl oracle (upstream T1K's `t1k-build.pl`) that a future Rust port of
 `t1k-build` must reproduce exactly. No Rust code is involved in this task —
 this is data pinning plus running the existing vendored Perl scripts.
 
@@ -62,7 +62,7 @@ in the source `.dat`, not invented).
   `"KIR2DL4"`, `"KIR3DL1"`, `"KIR2DP1"` exactly. Nothing beyond this
   806-byte, 4-line file was written into the repo; the full GTF was deleted
   from scratch space after extraction.
-- Read `vendor/t1k/AddGeneCoord.pl` before subsetting: it only consumes GTF
+- Read upstream T1K's `AddGeneCoord.pl` before subsetting: it only consumes GTF
   rows where column 3 (`feature`) is exactly `gene`, reads gene name from the
   `gene_name "..."` attribute (col 9), and reads chromosome from column 1
   (prefixing `chr` only if missing — GENCODE already has the `chr` prefix, so
@@ -79,7 +79,7 @@ in the source `.dat`, not invented).
 
 Command:
 ```
-perl vendor/t1k/t1k-build.pl -d fixtures/refbuild/kir_subset.dat -g fixtures/refbuild/kir_genes.gtf \
+perl <t1k>/t1k-build.pl -d fixtures/refbuild/kir_subset.dat -g fixtures/refbuild/kir_genes.gtf \
   -o fixtures/refbuild/golden --prefix kir
 ```
 
@@ -200,10 +200,9 @@ to **exercise the `srand(17)`/`rand()` UTR-padding path** in `ParseDatFile.pl`
 
 - **Database**: IPD-IMGT/HLA release **3.64.0** `hla.dat` (EMBL-flatfile format,
   a series of records separated by `//\n`).
-- **Local source used**: `/Volumes/scratch-00001/t1k-hla-run/hlaidx/hla.dat`
+- **Source**: the IPD-IMGT/HLA release 3.64.0 `hla.dat` distribution
   (338 MB, 46,201 allele records; release confirmed by the
-  `IPD-IMGT/HLA Release Version 3.64.0` CC banner in each record). Not
-  re-downloaded — reused verbatim.
+  `IPD-IMGT/HLA Release Version 3.64.0` CC banner in each record).
 
 ## Subset: `hla_subset.dat` (168,729 bytes, 13 records)
 
@@ -248,7 +247,7 @@ below. Only the two pseudogenes do, and only in RNA mode.
   not-found sentinel `chr19 -1 -1 +` (the script's `$defaultChr` is hardcoded to
   `chr19`, a KIR-era default it applies verbatim to HLA too). Reproducing this
   sentinel behavior for DRB2/DRB7 is part of the pinned oracle output.
-- Read `vendor/t1k/AddGeneCoord.pl` before subsetting: it consumes only rows
+- Read upstream T1K's `AddGeneCoord.pl` before subsetting: it consumes only rows
   whose column 3 is exactly `gene`, reads the gene name from `gene_name "..."`
   in col 9 and the chromosome from col 1 (prefixing `chr` if absent; GENCODE
   already has it). It applies one hardcoded alias (`HFE:HLA-HFE`, irrelevant
@@ -260,7 +259,7 @@ below. Only the two pseudogenes do, and only in RNA mode.
 
 Command:
 ```bash
-perl vendor/t1k/t1k-build.pl -d fixtures/refbuild/hla_subset.dat \
+perl <t1k>/t1k-build.pl -d fixtures/refbuild/hla_subset.dat \
   -g fixtures/refbuild/hla_genes.gtf -o fixtures/refbuild/golden --prefix hla
 ```
 
