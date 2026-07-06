@@ -1,7 +1,7 @@
 //! Reference-k-mer read-candidate filter, ported from a slice of T1K's
-//! `SeqSet` class (`vendor/t1k/SeqSet.hpp`) plus the free functions
-//! `IsLowComplexity`/`IsGoodCandidate` (`vendor/t1k/FastqExtractor.cpp:89-118`,
-//! byte-identical to `vendor/t1k/BamExtractor.cpp:144-166,214`).
+//! `SeqSet` class (`SeqSet.hpp`) plus the free functions
+//! `IsLowComplexity`/`IsGoodCandidate` (`FastqExtractor.cpp:89-118`,
+//! byte-identical to `BamExtractor.cpp:144-166,214`).
 //!
 //! This is the *read-candidate-filtering* slice only -- the part of `SeqSet`
 //! that `FastqExtractor`/`BamExtractor` use to decide whether a read is

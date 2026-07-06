@@ -1,4 +1,4 @@
-//! Canonical k-mer encoding, ported from T1K's `KmerCode` (`vendor/t1k/KmerCode.hpp`).
+//! Canonical k-mer encoding, ported from T1K's `KmerCode` (`KmerCode.hpp`).
 //!
 //! Each base is packed into 2 bits (A=0, C=1, G=2, T=3). `KmerCode::Append` builds
 //! the code as a sliding window: `code = ((code << 2) & mask) | base_code`, so the
@@ -106,7 +106,7 @@ fn kmer_length_as_i64(n: usize) -> i64 {
 }
 
 /// A stateful, rolling 2-bit-packed k-mer encoder, ported from T1K's
-/// `KmerCode` (`vendor/t1k/KmerCode.hpp`).
+/// `KmerCode` (`KmerCode.hpp`).
 ///
 /// Unlike [`canonical_kmer`] (a one-shot function), `KmerCode` maintains a
 /// sliding window of the last `kmer_length` bases as callers stream bases in

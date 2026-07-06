@@ -1,5 +1,5 @@
 //! BAM/CRAM reader ported from the slice of T1K's `Alignments` class
-//! (`vendor/t1k/alignments.hpp`) that `BamExtractor.cpp` uses, over
+//! (`alignments.hpp`) that `BamExtractor.cpp` uses, over
 //! **rust-htslib** (`bam::Reader`) rather than the bundled samtools-0.1.19 /
 //! htslib-1.15.1 C library T1K links against directly. Since both are
 //! libhts-family readers operating on the same BAM/CRAM record layout, a
@@ -103,7 +103,7 @@ pub struct GeneralInfo {
 }
 
 /// A BAM/CRAM reader reproducing the slice of T1K's `Alignments` class that
-/// `BamExtractor.cpp` uses (`vendor/t1k/alignments.hpp`), over
+/// `BamExtractor.cpp` uses (`alignments.hpp`), over
 /// **rust-htslib** instead of T1K's bundled htslib/samtools. See the module
 /// docs for the two highest-risk semantic traps this port must (and does)
 /// reproduce exactly: `GetReadSeq`/`GetQual` orientation, and the

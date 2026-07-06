@@ -1,6 +1,6 @@
 //! Minimal FASTA/FASTQ reader with kseq-parity semantics, ported to cover
 //! exactly what [`crate::extract`] needs from T1K's `ReadFiles`/`kseq.h`
-//! (`vendor/t1k/ReadFiles.hpp`, `vendor/t1k/kseq.h`).
+//! (`ReadFiles.hpp`, `kseq.h`).
 //!
 //! # `id` is the header token up to the first whitespace; the rest is a
 //! dropped comment

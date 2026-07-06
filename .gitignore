@@ -1,16 +1,5 @@
 /target
-**/*.o
 
-# Vendored C++ build outputs (samtools bundle built by the t1k-sys feature)
-/vendor/t1k/samtools-0.1.19/**/*.a
-/vendor/t1k/samtools-0.1.19/**/*.o
-/vendor/t1k/samtools-0.1.19/samtools
-/vendor/t1k/samtools-0.1.19/bcftools/bcftools
-/vendor/t1k/samtools-0.1.19/bcftools/vcfutils.pl
-/vendor/t1k/samtools-0.1.19/misc/ace2sam
-/vendor/t1k/samtools-0.1.19/misc/bamcheck
-/vendor/t1k/samtools-0.1.19/misc/maq2sam-long
-/vendor/t1k/samtools-0.1.19/misc/maq2sam-short
-/vendor/t1k/samtools-0.1.19/misc/md5fa
-/vendor/t1k/samtools-0.1.19/misc/md5sum-lite
-/vendor/t1k/samtools-0.1.19/misc/wgsim
+# Editor / tooling scratch
+/.superpowers/
+*.orig

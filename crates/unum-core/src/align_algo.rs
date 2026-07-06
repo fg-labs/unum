@@ -1,5 +1,5 @@
 //! Banded, integer-scored global alignment with traceback, ported from T1K's
-//! `AlignAlgo` (`vendor/t1k/AlignAlgo.hpp`), plus the standalone
+//! `AlignAlgo` (`AlignAlgo.hpp`), plus the standalone
 //! `SeqSet::GetAlignStats` helper (`SeqSet.hpp:438-453`) that consumes an
 //! `align[]` op sequence.
 //!
@@ -7,7 +7,7 @@
 //!
 //! `AlignAlgo` (the C++ class) declares many more static methods than are
 //! ported here. Cross-referencing every `AlignAlgo::` call site
-//! (`grep -rn "AlignAlgo::" vendor/t1k/*.hpp vendor/t1k/*.cpp`) shows only
+//! (`grep -rn "AlignAlgo::" *.hpp *.cpp`) shows only
 //! three are ever reached from the genotyping path (`SeqSet.hpp`,
 //! `VariantCaller.hpp`):
 //!

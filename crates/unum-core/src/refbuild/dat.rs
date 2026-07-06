@@ -1,7 +1,7 @@
 //! Port of T1K's `ParseDatFile.pl`: parses EMBL-style IPD-IMGT/HLA or IPD-KIR
 //! `.dat` records and emits the `_dna_seq.fa` (full padded genomic sequence) and
 //! `_rna_seq.fa` (spliced, exon-only sequence) reference FASTAs that
-//! `vendor/t1k/t1k-build.pl` feeds to the rest of the T1K reference-build
+//! `t1k-build.pl` feeds to the rest of the T1K reference-build
 //! pipeline.
 //!
 //! # Scope

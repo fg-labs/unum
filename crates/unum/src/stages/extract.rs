@@ -1,7 +1,7 @@
 //! Thin CLI wrapper around `unum_core::extract` (the Rust port of
-//! `fastq-extractor`, `vendor/t1k/FastqExtractor.cpp`) and
+//! `fastq-extractor`, `FastqExtractor.cpp`) and
 //! `unum_core::bam_extract` (the Rust port of `bam-extractor`,
-//! `vendor/t1k/BamExtractor.cpp`). All extraction logic (data-dependent
+//! `BamExtractor.cpp`). All extraction logic (data-dependent
 //! setup, per-pair/per-pass filtering, `OutputSeq` formatting) lives in
 //! `unum-core`; this module only:
 //! 1. Dispatches on `-b`: BAM mode ([`run_bam`]) if given, else FASTQ mode

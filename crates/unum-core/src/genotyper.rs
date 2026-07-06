@@ -1,5 +1,5 @@
 //! Genotyper foundation, ported from T1K's `Genotyper`
-//! (`vendor/t1k/Genotyper.hpp`).
+//! (`Genotyper.hpp`).
 //!
 //! This is the Phase-5a slice ONLY: the deterministic pieces the EM
 //! (`EMupdate`/`Quantify`, Phase 5b) and allele selection (`SelectAllele`/
@@ -1518,7 +1518,7 @@ fn fragment_overlap_less_than(a: &Assembled, b: &Assembled) -> bool {
     extended_overlap_less_than(&a.overlap1, &b.overlap1)
 }
 
-/// The Phase-5a slice of T1K's `Genotyper` (`vendor/t1k/Genotyper.hpp`): the
+/// The Phase-5a slice of T1K's `Genotyper` (`Genotyper.hpp`): the
 /// allele/gene data model, its initialization, and read-assignment weight +
 /// storage. See the module docs for exactly what is (and is not) ported.
 #[derive(Debug, Clone)]

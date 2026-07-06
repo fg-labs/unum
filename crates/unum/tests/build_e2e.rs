@@ -1,11 +1,7 @@
 //! End-to-end test for the `unum build` subcommand: invokes the actual binary (not the
 //! library function directly) on the pinned KIR fixtures and asserts all four emitted
-//! reference files are byte-for-byte identical to the golden files produced by the vendored
-//! Perl oracle (`t1k-build.pl`; see `fixtures/refbuild/PINS.md`).
-//!
-//! Runs under default cargo features only — reference-build has no C++ oracle binary to
-//! strangle (see `crates/unum/src/stages/build.rs`), so this test does not require, and is
-//! not gated on, the `t1k-sys` feature.
+//! reference files are byte-for-byte identical to the golden files produced by upstream T1K's
+//! Perl `t1k-build.pl` (see `fixtures/refbuild/PINS.md`).
 use std::process::Command;
 
 /// Resolves a path under the workspace-level `fixtures/refbuild/` directory, relative to this

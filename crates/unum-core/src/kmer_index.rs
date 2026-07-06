@@ -1,5 +1,5 @@
 //! K-mer position index (k-mer code -> `(idx, offset)` list), ported from
-//! T1K's `KmerIndex` (`vendor/t1k/KmerIndex.hpp`).
+//! T1K's `KmerIndex` (`KmerIndex.hpp`).
 //!
 //! # Forward vs. canonical keying
 //!

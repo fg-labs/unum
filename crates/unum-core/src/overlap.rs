@@ -1,5 +1,5 @@
 //! LIS-based overlap/hit-chaining, ported from T1K's `SeqSet::GetOverlapsFromHits`
-//! (`vendor/t1k/SeqSet.hpp:1232-1556`) and its helpers
+//! (`SeqSet.hpp:1232-1556`) and its helpers
 //! `LongestIncreasingSubsequence`/`BinarySearch_LIS` (`SeqSet.hpp:352-436,327-348`),
 //! `GetTotalHitLengthOnRead`/`GetTotalHitLengthOnSeq` (`SeqSet.hpp:1032-1069`), and
 //! comparators `CompSortPairBInc`/`CompSortHitCoordDiff` (`SeqSet.hpp:233-239,266-274`).

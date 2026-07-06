@@ -1,5 +1,5 @@
 //! BAM/CRAM read-candidate extraction driver, ported from `BamExtractor.cpp`'s
-//! `main` (`vendor/t1k/BamExtractor.cpp:464-949`): drives a configured
+//! `main` (`BamExtractor.cpp:464-949`): drives a configured
 //! [`crate::ref_kmer_filter::RefKmerFilter`] plus a sorted list of gene
 //! (`chrId`, `start`, `end`) intervals over a coordinate-sorted BAM/CRAM
 //! ([`crate::alignments::Alignments`]) in a TWO-PASS scan, and emits

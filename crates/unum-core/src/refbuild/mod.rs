@@ -1,4 +1,4 @@
-//! Rust port of T1K's reference-build pipeline (`vendor/t1k/t1k-build.pl` and the
+//! Rust port of T1K's reference-build pipeline (`t1k-build.pl` and the
 //! scripts it drives), which turns an IPD-IMGT/HLA or IPD-KIR `.dat` database into
 //! the FASTA references T1K's genotyper indexes.
 
@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use dat::SeqKind;
 
 /// Builds the four T1K reference files T1K's genotyper indexes from an IPD-IMGT/HLA or
-/// IPD-KIR `.dat` database and a genome GTF, reproducing `vendor/t1k/t1k-build.pl` byte-for-byte
+/// IPD-KIR `.dat` database and a genome GTF, reproducing `t1k-build.pl` byte-for-byte
 /// (for the `-d`/`-g`/`--prefix` path it drives; see the scope note below).
 ///
 /// Writes, into `out_dir`:

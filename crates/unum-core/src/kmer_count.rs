@@ -1,5 +1,5 @@
 //! Canonical k-mer counting, ported from T1K's `KmerCount`
-//! (`vendor/t1k/KmerCount.hpp`).
+//! (`KmerCount.hpp`).
 //!
 //! The C++ class stores counts in `std::map<uint64_t, int> count[103]`,
 //! bucketed by `GetHash(k) = k % 103` (`KmerCount.hpp:24-27`). That bucketing
@@ -16,7 +16,7 @@ use crate::kmer::KmerCode;
 use std::collections::HashMap;
 
 /// Counts canonical k-mers across reads, ported from T1K's `KmerCount`
-/// (`vendor/t1k/KmerCount.hpp`).
+/// (`KmerCount.hpp`).
 ///
 /// Unlike the vendored C++ (which stores an owned `KmerCode` member reused
 /// across calls via `Restart()`), this port constructs a fresh, local

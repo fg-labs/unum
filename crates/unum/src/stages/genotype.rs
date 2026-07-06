@@ -1,5 +1,5 @@
 //! Thin CLI wrapper around `unum_core::genotyper` (the Rust port of `genotyper`,
-//! `vendor/t1k/Genotyper.cpp`/`Genotyper.hpp`/(the `ReadAssignmentToFragmentAssignment` slice
+//! `Genotyper.cpp`/`Genotyper.hpp`/(the `ReadAssignmentToFragmentAssignment` slice
 //! of) `SeqSet.hpp`). All genotyping logic (reference dedup/loading, the read-processing loop,
 //! `SelectAllelesForGenes`, output formatting) is either in `unum_core::genotyper` or -- for
 //! the reference-loading/read-processing DRIVER itself, which `Genotyper.cpp:main` owns directly

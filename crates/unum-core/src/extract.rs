@@ -1,5 +1,5 @@
 //! Read-candidate extraction driver, ported from `FastqExtractor.cpp`'s
-//! `main` (`vendor/t1k/FastqExtractor.cpp:259-628`): drives a configured
+//! `main` (`FastqExtractor.cpp:259-628`): drives a configured
 //! [`crate::ref_kmer_filter::RefKmerFilter`] over paired or single-end FASTQ
 //! input and emits candidate reads (pairs where at least one mate is a good
 //! candidate) to a [`CandidateSink`], in input order.
