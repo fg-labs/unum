@@ -17,6 +17,13 @@
 //! and `mate_count_mismatch_matches_oracle_error_behavior` -- both only
 //! asserted the C++ oracle's own error exit; the Rust side's Result-based
 //! error behavior is covered by `unum_core::extract`'s own unit tests.
+//!
+//! Also dropped: `mate2_longer_byte_golden`. It pinned stock's byte output when
+//! mate-2 has extra trailing records -- but `unum` deliberately DIVERGES from
+//! stock here (see `docs/DIVERGENCES.md`): a mate-2-longer file is now a hard
+//! error, not a silent drop, so there is no byte stream to golden. The new
+//! behavior is covered by `unum_core::extract`'s
+//! `mate_count_mismatch_mate2_longer_is_an_error` unit test.
 
 mod common;
 
@@ -124,39 +131,6 @@ fn single_end_example_fixture_byte_golden() {
     run_rust_single(&ref_fasta, &r1, &prefix);
     let out = std::fs::read(tmp.path().join("rust.fq")).unwrap();
     assert_byte_golden("fastq_extract/example_single.fq", &out);
-}
-
-#[test]
-fn mate2_longer_byte_golden() {
-    let reference = "ACGTACGTGGATTACAGATTACAGATTACAGATTACAGCCCTGACGTGTGACGTGTGACGTGTGACGTGTGGATCAGATCAGATCAGATCAGGATCCATGGATCCATGGATCCATGACTGACTGACTGACTGCATGCATGCATGCATGGTACGTACGTACGTACGGGCATTCATGGCATTCATGGCATTCATGACGTTAGCACGTTAGCACGTTAGCACGTTAGCTGACCATGTGACCATGTGACCATGTGACCATG";
-    let dir = tempfile::tempdir().unwrap();
-    let ref_fasta = dir.path().join("ref.fa");
-    {
-        let mut f = std::fs::File::create(&ref_fasta).unwrap();
-        writeln!(f, ">only\n{reference}").unwrap();
-    }
-    let hit1 = reference[0..100].to_string();
-    let hit2 = reference[120..220].to_string();
-    let r1_records: Vec<(String, String)> =
-        (0..3).map(|i| (format!("p{i}"), hit1.clone())).collect();
-    let mut r2_records: Vec<(String, String)> =
-        (0..3).map(|i| (format!("p{i}"), hit2.clone())).collect();
-    r2_records.push(("extra0".to_string(), hit1.clone()));
-    r2_records.push(("extra1".to_string(), hit2.clone()));
-    let r1 = dir.path().join("r1.fq");
-    let r2 = dir.path().join("r2.fq");
-    write_fastq(&r1, &r1_records);
-    write_fastq(&r2, &r2_records);
-    let prefix = dir.path().join("rust");
-    run_rust_paired(&ref_fasta, &r1, &r2, &prefix);
-    assert_byte_golden(
-        "fastq_extract/mate2_longer_1.fq",
-        &std::fs::read(dir.path().join("rust_1.fq")).unwrap(),
-    );
-    assert_byte_golden(
-        "fastq_extract/mate2_longer_2.fq",
-        &std::fs::read(dir.path().join("rust_2.fq")).unwrap(),
-    );
 }
 
 fn build_synthetic_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {

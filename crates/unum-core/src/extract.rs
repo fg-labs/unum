@@ -299,13 +299,19 @@ pub fn extract_candidates(
         }
     }
 
-    // FastqExtractor.cpp:449-479 (single-threaded reference path): the driver
-    // loops on mate-1 (`while (reads.Next())`) and only errors when mate-2 is
-    // *exhausted early* (the in-loop check above). Once mate-1 is exhausted the
-    // loop simply ends, so EXTRA trailing mate-2 records are silently ignored
-    // and the tool exits 0. We deliberately do NOT add a symmetric trailing
-    // check here: doing so would diverge from stock (which produces output and
-    // exits 0) on a mate-2-longer input, breaking byte-identity.
+    // DIVERGENCE from T1K (see docs/DIVERGENCES.md): stock loops on mate-1
+    // (`FastqExtractor.cpp:449-479`) and errors only when mate-2 is *exhausted
+    // early* (the in-loop check above). Once mate-1 is exhausted it stops,
+    // silently ignoring any extra trailing mate-2 records and exiting 0 -- so a
+    // truncated mate-1 file drops reads with no warning. `unum` adds the
+    // symmetric check: after mate-1 is exhausted, mate-2 must be exhausted too,
+    // otherwise the two files have unequal read counts and the input is
+    // malformed -- the same hard error as the mate-2-exhausted-early case.
+    if let ReadSource::Paired(_, r2) = source {
+        if r2.next_record().context("reading mate-2 read")?.is_some() {
+            bail!("The two mate-pair read files have different number of reads.");
+        }
+    }
 
     Ok(ExtractMetrics {
         total_reads,
@@ -573,12 +579,13 @@ mod tests {
     }
 
     #[test]
-    fn mate2_longer_silently_ignores_trailing_reads_like_stock() {
-        // FastqExtractor.cpp:449-479 loops on mate-1 and only errors when mate-2
-        // is exhausted early. When mate-2 has EXTRA trailing records, stock's
-        // `while (reads.Next())` simply ends with mate-1, ignores the extra
-        // mate-2 reads, and exits 0. We must match that (not error) to stay
-        // byte-identical with the oracle on mate-2-longer input.
+    fn mate_count_mismatch_mate2_longer_is_an_error() {
+        // DIVERGENCE from T1K (see docs/DIVERGENCES.md): stock loops on mate-1
+        // (`FastqExtractor.cpp:449-479`) and silently ignores extra trailing
+        // mate-2 records, exiting 0 -- so a truncated mate-1 file drops reads
+        // with no warning. `unum` treats a mate-2-longer file as the same hard
+        // error as mate-2-shorter: an unequal-read-count mate pair is malformed
+        // input either way.
         let tmp = tempfile::tempdir().unwrap();
         let ref_path = tmp.path().join("ref.fa");
         write_ref_fasta(&ref_path, &[("only", REF_SEQ)]);
@@ -600,13 +607,10 @@ mod tests {
         let mut filter = RefKmerFilter::from_reference_fasta(&ref_path, 9).unwrap();
         let mut source = open_source(&r1_path, Some(&r2_path)).unwrap();
         let mut sink = VecSink { pairs: Vec::new() };
-        let metrics =
-            extract_candidates(&mut source, &mut filter, DEFAULT_REF_SEQ_SIMILARITY, &mut sink)
-                .expect("mate-2-longer must not error (stock ignores extra mate-2 reads)");
-        // Only the 3 mate-1 records drive the loop; the 2 extra mate-2 reads are
-        // silently dropped, exactly as stock does.
-        assert_eq!(metrics.total_reads, 3);
-        assert_eq!(sink.pairs.len(), 3);
+        let result =
+            extract_candidates(&mut source, &mut filter, DEFAULT_REF_SEQ_SIMILARITY, &mut sink);
+        assert!(result.is_err(), "mate-2-longer must be a hard error, not a silent drop");
+        assert!(result.unwrap_err().to_string().contains("different number of reads"));
     }
 
     #[test]
