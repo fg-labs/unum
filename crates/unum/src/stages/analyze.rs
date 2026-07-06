@@ -51,8 +51,8 @@ use crate::cli::AnalyzeArgs;
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 use unum_core::fastq::FastqReader;
 use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper, ReadAssignment};
 use unum_core::ref_kmer_filter::RefKmerFilter;
@@ -74,7 +74,7 @@ const GENE_SIMILARITY_KMER_LENGTH: usize = 31;
 /// read-reassignment loop need per (selected) allele.
 struct LoadedRef {
     names: Vec<String>,
-    consensus: Vec<Vec<u8>>,
+    consensus: Vec<Arc<[u8]>>,
     weight: Vec<i32>,
     effective_len: Vec<i32>,
     allele_refs: Vec<AlleleRef>,
@@ -119,7 +119,7 @@ fn load_selected_reference(path: &Path, selected: &HashSet<String>) -> Result<Lo
 
     let mut seq_to_idx: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut names = Vec::new();
-    let mut consensus: Vec<Vec<u8>> = Vec::new();
+    let mut consensus: Vec<Arc<[u8]>> = Vec::new();
     let mut weight: Vec<i32> = Vec::new();
     let mut comments: Vec<Option<String>> = Vec::new();
 
@@ -132,7 +132,7 @@ fn load_selected_reference(path: &Path, selected: &HashSet<String>) -> Result<Lo
                  seq: Vec<u8>,
                  seq_to_idx: &mut HashMap<Vec<u8>, usize>,
                  names: &mut Vec<String>,
-                 consensus: &mut Vec<Vec<u8>>,
+                 consensus: &mut Vec<Arc<[u8]>>,
                  weight: &mut Vec<i32>,
                  comments: &mut Vec<Option<String>>| {
         let Some(id) = id else { return };
@@ -145,7 +145,7 @@ fn load_selected_reference(path: &Path, selected: &HashSet<String>) -> Result<Lo
             let idx = names.len();
             seq_to_idx.insert(seq.clone(), idx);
             names.push(id);
-            consensus.push(seq);
+            consensus.push(Arc::from(seq));
             weight.push(1);
             comments.push(comment);
         }
@@ -217,27 +217,12 @@ fn compute_effective_len(seq: &[u8]) -> i32 {
 /// allele-restricted reference from [`load_selected_reference`]) at
 /// [`GENOTYPER_KMER_LENGTH`]. See
 /// `crate::stages::genotype::build_ref_kmer_filter` (a near-identical helper)
-/// for why a scratch file is used.
-fn build_ref_kmer_filter(names: &[String], consensus: &[Vec<u8>]) -> Result<RefKmerFilter> {
-    // Use a securely-created temp file (random name + O_EXCL, via `tempfile`)
-    // rather than a predictable `temp_dir()/pid-counter` path: a predictable
-    // name in a shared temp dir can be pre-created or symlink-swapped by another
-    // local user. `NamedTempFile` is unlinked on drop, so it cleans up on every
-    // return path (including the error path below).
-    let mut scratch = tempfile::Builder::new()
-        .prefix("unum-analyze-ref-")
-        .suffix(".fa")
-        .tempfile()
-        .context("creating scratch reference FASTA")?;
-    for (name, seq) in names.iter().zip(consensus) {
-        writeln!(scratch, ">{name}")?;
-        scratch.write_all(seq)?;
-        writeln!(scratch)?;
-    }
-    scratch.flush().context("flushing scratch reference FASTA")?;
-
-    RefKmerFilter::from_reference_fasta(scratch.path(), GENOTYPER_KMER_LENGTH)
-        .with_context(|| format!("building k-mer index over {} selected alleles", names.len()))
+/// for how the `Arc<[u8]>` consensus buffers are shared with the k-mer index.
+fn build_ref_kmer_filter(names: &[String], consensus: &[Arc<[u8]>]) -> RefKmerFilter {
+    // Share the caller's `Arc<[u8]>` consensus buffers (see
+    // `crate::stages::genotype::build_ref_kmer_filter`): no scratch FASTA, no
+    // duplicate reference copy, byte-identical k-mer index.
+    RefKmerFilter::from_consensus(names.to_vec(), consensus.to_vec(), GENOTYPER_KMER_LENGTH)
 }
 
 /// One aligned read (mate) loaded from an `_aligned_*.fa` FASTA, mirroring
@@ -317,7 +302,7 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
     let loaded = load_selected_reference(Path::new(&args.ref_seq_fasta), &selected)?;
     let allele_cnt = loaded.names.len();
 
-    let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus)?;
+    let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus);
     filter.set_ref_seq_similarity(args.similarity);
 
     let mut genotyper = Genotyper::new();
@@ -530,7 +515,7 @@ pub fn run(args: &AnalyzeArgs) -> Result<()> {
     let read1_seqs: Vec<Vec<u8>> = reads1.iter().map(|r| r.seq.clone()).collect();
     let read2_seqs: Vec<Vec<u8>> =
         if has_mate { reads2.iter().map(|r| r.seq.clone()).collect() } else { Vec::new() };
-    let allele_consensus: Vec<Vec<u8>> = allele_refs.iter().map(|a| a.consensus.clone()).collect();
+    let allele_consensus: Vec<Vec<u8>> = allele_refs.iter().map(|a| a.consensus.to_vec()).collect();
 
     // Loop B -- AddFragmentAlignmentInfo (Analyzer.cpp:623-634): populate
     // `align` on every fragment overlap BEFORE ComputeVariant runs -- required,
@@ -628,7 +613,8 @@ mod tests {
         let loaded = load_selected_reference(tmp.path(), &selected).unwrap();
         assert_eq!(loaded.names, vec!["A*01:01".to_string()]);
         assert_eq!(loaded.weight, vec![1]);
-        assert_eq!(loaded.consensus, vec![b"ACGT".to_vec()]);
+        assert_eq!(loaded.consensus.len(), 1);
+        assert_eq!(loaded.consensus[0].as_ref(), b"ACGT");
     }
 
     #[test]

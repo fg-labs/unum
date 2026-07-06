@@ -41,17 +41,18 @@
 //! consecutive `N`s collapsed to 1) -- all BEFORE building the k-mer index, so the index is over
 //! exactly the deduplicated allele set `Genotyper::init_allele_info` also sees.
 //!
-//! [`RefKmerFilter::from_reference_fasta`] only accepts a filesystem path (not an in-memory
-//! sequence list), so [`load_reference`] writes the deduplicated sequences to a securely-created
-//! scratch file under [`std::env::temp_dir`] (via `tempfile`, unlinked on drop) rather than
-//! widening that Phase-3/3b/4 API -- this CLI crate is exactly the layer allowed to do ordinary
-//! filesystem I/O as an implementation detail.
+//! The genotyper's k-mer index is built via [`RefKmerFilter::from_consensus`], which SHARES the
+//! deduplicated `Arc<[u8]>` consensus buffers held by [`load_reference`]'s `allele_refs` (the same
+//! bytes the aligner reads) instead of materializing a second reference copy -- so each allele's
+//! sequence is stored exactly once across `LoadedRef.consensus`, `AlleleRef::consensus`, and
+//! `RefKmerFilter::seqs`.
 use crate::cli::GenotypeArgs;
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 use unum_core::allele_freq::AlleleFreqTable;
 use unum_core::fastq::{FastqReader, FastqRecord};
 use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper, ReadAssignment};
@@ -73,7 +74,11 @@ const GENE_SIMILARITY_KMER_LENGTH: usize = 31;
 /// read-processing loop need per allele.
 struct LoadedRef {
     names: Vec<String>,
-    consensus: Vec<Vec<u8>>,
+    /// One `Arc<[u8]>` per deduplicated allele, SHARED with `allele_refs[i]`'s
+    /// consensus and (via `build_ref_kmer_filter` -> `from_consensus`) with the
+    /// `RefKmerFilter.seqs` the aligner reads -- a single copy of each allele's
+    /// bytes across all three consumers.
+    consensus: Vec<Arc<[u8]>>,
     weight: Vec<i32>,
     effective_len: Vec<i32>,
     allele_refs: Vec<AlleleRef>,
@@ -99,7 +104,7 @@ fn load_reference(path: &Path) -> Result<LoadedRef> {
 
     let mut seq_to_idx: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut names = Vec::new();
-    let mut consensus: Vec<Vec<u8>> = Vec::new();
+    let mut consensus: Vec<Arc<[u8]>> = Vec::new();
     let mut weight: Vec<i32> = Vec::new();
     let mut comments: Vec<Option<String>> = Vec::new();
 
@@ -112,7 +117,7 @@ fn load_reference(path: &Path) -> Result<LoadedRef> {
                  seq: Vec<u8>,
                  seq_to_idx: &mut HashMap<Vec<u8>, usize>,
                  names: &mut Vec<String>,
-                 consensus: &mut Vec<Vec<u8>>,
+                 consensus: &mut Vec<Arc<[u8]>>,
                  weight: &mut Vec<i32>,
                  comments: &mut Vec<Option<String>>| {
         let Some(id) = id else { return };
@@ -125,7 +130,7 @@ fn load_reference(path: &Path) -> Result<LoadedRef> {
             let idx = names.len();
             seq_to_idx.insert(seq.clone(), idx);
             names.push(id);
-            consensus.push(seq);
+            consensus.push(Arc::from(seq));
             weight.push(1);
             comments.push(comment);
         }
@@ -329,7 +334,7 @@ pub fn run_with_candidate_reads(
 
     // --- Reference loading (Genotyper.hpp:706-727) ---
     let mut loaded = load_reference(Path::new(&args.ref_seq_fasta))?;
-    let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus)?;
+    let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus);
     filter.set_ref_seq_similarity(args.similarity);
 
     let mut genotyper = Genotyper::new();
@@ -549,30 +554,17 @@ pub fn run_with_candidate_reads(
 }
 
 /// Builds a [`RefKmerFilter`] over `names`/`consensus` (the deduplicated
-/// allele set from [`load_reference`]) at [`GENOTYPER_KMER_LENGTH`].
-/// [`RefKmerFilter::from_reference_fasta`] only accepts a path (see this
-/// module's doc comment for why), so this writes a scratch FASTA to
-/// [`std::env::temp_dir`] and removes it before returning.
-fn build_ref_kmer_filter(names: &[String], consensus: &[Vec<u8>]) -> Result<RefKmerFilter> {
-    // Use a securely-created temp file (random name + O_EXCL, via `tempfile`)
-    // rather than a predictable `temp_dir()/pid-counter` path: a predictable
-    // name in a shared temp dir can be pre-created or symlink-swapped by another
-    // local user. `NamedTempFile` is unlinked on drop, so it cleans up on every
-    // return path (including the error path below).
-    let mut scratch = tempfile::Builder::new()
-        .prefix("unum-genotype-ref-")
-        .suffix(".fa")
-        .tempfile()
-        .context("creating scratch reference FASTA")?;
-    for (name, seq) in names.iter().zip(consensus) {
-        writeln!(scratch, ">{name}")?;
-        scratch.write_all(seq)?;
-        writeln!(scratch)?;
-    }
-    scratch.flush().context("flushing scratch reference FASTA")?;
-
-    RefKmerFilter::from_reference_fasta(scratch.path(), GENOTYPER_KMER_LENGTH)
-        .with_context(|| format!("building k-mer index over {} deduplicated alleles", names.len()))
+/// allele set from [`load_reference`]) at [`GENOTYPER_KMER_LENGTH`], sharing
+/// the caller's `Arc<[u8]>` consensus buffers via
+/// [`RefKmerFilter::from_consensus`] (see this module's doc comment) rather
+/// than materializing a second reference copy.
+fn build_ref_kmer_filter(names: &[String], consensus: &[Arc<[u8]>]) -> RefKmerFilter {
+    // Share the caller's `Arc<[u8]>` consensus buffers directly (cloning only
+    // the `Arc` handles, not the bytes) instead of writing a scratch FASTA and
+    // re-reading it into a second reference copy. The resulting k-mer index is
+    // byte-identical to the prior `from_reference_fasta` round-trip -- same
+    // sequences, same 0-based load order.
+    RefKmerFilter::from_consensus(names.to_vec(), consensus.to_vec(), GENOTYPER_KMER_LENGTH)
 }
 
 /// Ported from `Genotyper.cpp:658-670`: writes `{prefix}_genotype.tsv`, one

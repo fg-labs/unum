@@ -87,7 +87,10 @@ fn run(alleles: &[AlleleDef], reads: &[ScriptedRead]) -> Genotyper {
     let missing_coverage: Vec<i32> = alleles
         .iter()
         .map(|a| {
-            get_seq_missing_base_coverage(&AlleleRef::new(a.seq.as_bytes().to_vec(), None), 0.01)
+            get_seq_missing_base_coverage(
+                &AlleleRef::new(std::sync::Arc::from(a.seq.as_bytes().to_vec()), None),
+                0.01,
+            )
         })
         .collect();
     g.finalize_read_assignments(&missing_coverage);

@@ -1733,7 +1733,7 @@ mod tests {
     use crate::genotyper::AlleleRef;
 
     fn allele_ref(consensus: &str) -> AlleleRef {
-        AlleleRef::new(consensus.as_bytes().to_vec(), None)
+        AlleleRef::new(std::sync::Arc::from(consensus.as_bytes().to_vec()), None)
     }
 
     fn overlap_no_align(

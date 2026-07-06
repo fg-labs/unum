@@ -869,8 +869,11 @@ fn reverse_complement(seq: &[u8]) -> Vec<u8> {
 /// deduplicated sequences in the same order.
 #[derive(Debug, Clone)]
 pub struct AlleleRef {
-    /// `_seqWrapper::consensus`.
-    pub consensus: Vec<u8>,
+    /// `_seqWrapper::consensus`. Stored as `Arc<[u8]>` so the loader can SHARE
+    /// this exact byte buffer with the `RefKmerFilter.seqs` copy the aligner
+    /// uses (built via `RefKmerFilter::from_consensus`), instead of holding a
+    /// second full copy of every allele's sequence.
+    pub consensus: std::sync::Arc<[u8]>,
     /// `_seqWrapper::exons` -- 0-based, inclusive `(start, end)` intervals,
     /// as parsed by [`parse_exon_comment`] from the reference FASTA header
     /// comment (or a single whole-sequence interval when no comment is
@@ -905,7 +908,7 @@ impl AlleleRef {
     /// (`SeqSet.hpp:906-989,638-720`) for the `initExonInfo = true` call
     /// site `InitRefSet` always uses (`Genotyper.hpp:722`).
     #[must_use]
-    pub fn new(consensus: Vec<u8>, comment: Option<&str>) -> Self {
+    pub fn new(consensus: std::sync::Arc<[u8]>, comment: Option<&str>) -> Self {
         let len = consensus.len();
         let exons = match comment {
             Some(c) => parse_exon_comment(c, len),
@@ -2455,7 +2458,7 @@ impl Genotyper {
     pub fn init_allele_info(
         &mut self,
         seq_names: &[String],
-        seq_consensus: &[Vec<u8>],
+        seq_consensus: &[impl AsRef<[u8]>],
         seq_weight: &[i32],
         seq_effective_len: &mut [i32],
         kmer_profile_k: usize,
@@ -2528,7 +2531,7 @@ impl Genotyper {
                 min_tag = Some(match min_tag {
                     None => j,
                     Some(cur) => {
-                        if seq_consensus[j] < seq_consensus[cur] {
+                        if seq_consensus[j].as_ref() < seq_consensus[cur].as_ref() {
                             j
                         } else {
                             cur
@@ -2538,7 +2541,7 @@ impl Genotyper {
             }
             let mut profile = KmerCount::new(kmer_profile_k);
             if let Some(tag) = min_tag {
-                profile.add_count(&seq_consensus[tag]);
+                profile.add_count(seq_consensus[tag].as_ref());
             }
             kmer_profiles.push(profile);
         }
@@ -6428,7 +6431,7 @@ mod tests {
 
     #[test]
     fn get_seq_missing_base_coverage_counts_low_coverage_exon_bases() {
-        let allele_ref = AlleleRef::new(b"ACGTACGTAC".to_vec(), None); // whole-seq exon [0,9]
+        let allele_ref = AlleleRef::new(std::sync::Arc::from(b"ACGTACGTAC".to_vec()), None); // whole-seq exon [0,9]
         // Give most positions high coverage, one position near-zero.
         for pw in &allele_ref.pos_weight {
             pw.add(0, 10); // every position "looks like" high-A coverage for this synthetic test
@@ -6450,7 +6453,7 @@ mod tests {
 
     #[test]
     fn allele_ref_is_exon_respects_parsed_intervals() {
-        let allele_ref = AlleleRef::new(vec![b'A'; 20], Some("0 5 9 12 19"));
+        let allele_ref = AlleleRef::new(std::sync::Arc::from(vec![b'A'; 20]), Some("0 5 9 12 19"));
         // exons: (5,9), (12,19) (leading 0 discarded).
         assert!(!allele_ref.is_exon(0));
         assert!(allele_ref.is_exon(5));
@@ -6569,7 +6572,7 @@ mod tests {
 
     #[test]
     fn assign_read_returns_none_for_empty_overlaps() {
-        let refs = vec![AlleleRef::new(b"ACGTACGT".to_vec(), None)];
+        let refs = vec![AlleleRef::new(std::sync::Arc::from(b"ACGTACGT".to_vec()), None)];
         let result =
             assign_read(b"ACGTACGT", &[], &refs, 0.8, 1, &mut crate::align_algo::DpCache::new());
         assert!(result.is_none());
@@ -6578,7 +6581,7 @@ mod tests {
     #[test]
     fn assign_read_marks_base_coverage_for_matched_positions() {
         let consensus = b"ACGTACGTACGT".to_vec();
-        let refs = vec![AlleleRef::new(consensus.clone(), None)];
+        let refs = vec![AlleleRef::new(std::sync::Arc::from(consensus.clone()), None)];
         let read = b"ACGTACGTACGT";
         let core = simple_overlap(0, 0, 11, 0, 11, 1);
 
@@ -6635,7 +6638,7 @@ mod tests {
         sorted_seqs.sort_unstable();
 
         // Manual sequential loop (mirrors the pre-P2 driver code).
-        let manual_refs = vec![AlleleRef::new(consensus.clone(), None)];
+        let manual_refs = vec![AlleleRef::new(std::sync::Arc::from(consensus.clone()), None)];
         let mut manual_dp_cache = crate::align_algo::DpCache::new();
         let manual: Vec<Option<Vec<ExtendedOverlap>>> = sorted_seqs
             .iter()
@@ -6648,7 +6651,7 @@ mod tests {
             .collect();
 
         // assign_reads_parallel at threads=1.
-        let parallel_refs = vec![AlleleRef::new(consensus, None)];
+        let parallel_refs = vec![AlleleRef::new(std::sync::Arc::from(consensus), None)];
         let via_helper =
             assign_reads_parallel(&filter, &sorted_seqs, &parallel_refs, 0.8, |_| 1, 1);
 
@@ -6681,10 +6684,10 @@ mod tests {
         sorted_seqs.sort_unstable();
         sorted_seqs.dedup();
 
-        let refs_t1 = vec![AlleleRef::new(consensus.clone(), None)];
+        let refs_t1 = vec![AlleleRef::new(std::sync::Arc::from(consensus.clone()), None)];
         let result_t1 = assign_reads_parallel(&filter, &sorted_seqs, &refs_t1, 0.8, |_| 1, 1);
 
-        let refs_t4 = vec![AlleleRef::new(consensus, None)];
+        let refs_t4 = vec![AlleleRef::new(std::sync::Arc::from(consensus), None)];
         let result_t4 = assign_reads_parallel(&filter, &sorted_seqs, &refs_t4, 0.8, |_| 1, 4);
 
         assert_eq!(result_t1, result_t4, "threads=1 vs threads=4 ExtendedOverlaps must match");
@@ -6998,7 +7001,7 @@ mod tests {
     /// exon-position vector.
     fn allele_ref_with_coverage(seq: &[u8], coverage: &[i32]) -> AlleleRef {
         assert_eq!(seq.len(), coverage.len());
-        let allele = AlleleRef::new(seq.to_vec(), None);
+        let allele = AlleleRef::new(std::sync::Arc::from(seq.to_vec()), None);
         for (i, (&base, &w)) in seq.iter().zip(coverage).enumerate() {
             let code = nuc_to_num(base).expect("test base is A/C/G/T");
             allele.pos_weight[i].add(code, w);
