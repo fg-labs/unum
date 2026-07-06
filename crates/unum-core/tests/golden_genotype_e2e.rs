@@ -16,11 +16,11 @@
 mod common;
 
 use common::assert_byte_golden;
-use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper};
-use unum_core::ref_kmer_filter::RefKmerFilter;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper};
+use unum_core::ref_kmer_filter::RefKmerFilter;
 
 fn fixture(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures").join(rel)
@@ -84,7 +84,8 @@ fn run_rust(out_prefix: &Path) {
             );
             let mut parts = rest.splitn(2, char::is_whitespace);
             cur_id = Some(parts.next().unwrap_or("").to_string());
-            cur_comment = parts.next().map(str::trim_start).filter(|s| !s.is_empty()).map(String::from);
+            cur_comment =
+                parts.next().map(str::trim_start).filter(|s| !s.is_empty()).map(String::from);
         } else {
             cur_seq.extend_from_slice(line.trim_end().as_bytes());
         }
@@ -131,7 +132,13 @@ fn run_rust(out_prefix: &Path) {
     filter.set_ref_seq_similarity(REF_SEQ_SIMILARITY);
 
     let mut g = Genotyper::new();
-    g.init_allele_info(&names, &consensus, &weight, &mut effective_len, GENE_SIMILARITY_KMER_LENGTH);
+    g.init_allele_info(
+        &names,
+        &consensus,
+        &weight,
+        &mut effective_len,
+        GENE_SIMILARITY_KMER_LENGTH,
+    );
 
     struct Read {
         seq: Vec<u8>,
@@ -150,7 +157,8 @@ fn run_rust(out_prefix: &Path) {
     let reads2 = read_all(&fixture("example/example_2.fq"));
     assert_eq!(reads1.len(), reads2.len(), "mate counts must match");
     let read_cnt = reads1.len();
-    let max_read_length = reads1.iter().chain(reads2.iter()).map(|r| r.seq.len()).max().unwrap_or(0);
+    let max_read_length =
+        reads1.iter().chain(reads2.iter()).map(|r| r.seq.len()).max().unwrap_or(0);
     g.set_read_length(i32::try_from(max_read_length).unwrap());
 
     let mut all_seqs: Vec<&[u8]> = reads1.iter().map(|r| r.seq.as_slice()).collect();
@@ -173,8 +181,9 @@ fn run_rust(out_prefix: &Path) {
     }
 
     g.init_read_assignments(i32::try_from(read_cnt).unwrap(), 2000);
-    let consensus_len_of =
-        |idx: u32| i32::try_from(allele_refs[usize::try_from(idx).unwrap()].consensus.len()).unwrap();
+    let consensus_len_of = |idx: u32| {
+        i32::try_from(allele_refs[usize::try_from(idx).unwrap()].consensus.len()).unwrap()
+    };
     let hit_len_required = filter.hit_len_required();
     let ref_seq_similarity = filter.ref_seq_similarity();
     let empty: Vec<ExtendedOverlap> = Vec::new();
@@ -208,7 +217,8 @@ fn run_rust(out_prefix: &Path) {
     let gene_cnt = usize::try_from(g.gene_cnt).unwrap();
     for i in 0..gene_cnt {
         let (allele1, allele2, secondary, called_cnt) = g.get_allele_description(i);
-        writeln!(out, "{}\t{called_cnt}\t{allele1}\t{allele2}\t{secondary}", g.gene_idx_to_name[i]).unwrap();
+        writeln!(out, "{}\t{called_cnt}\t{allele1}\t{allele2}\t{secondary}", g.gene_idx_to_name[i])
+            .unwrap();
     }
 
     let allele_path = format!("{}_allele.tsv", out_prefix.display());
@@ -225,8 +235,7 @@ fn kir_example_genotype_and_allele_tsv_byte_golden() {
     let genotype = std::fs::read(format!("{}_genotype.tsv", prefix.display())).unwrap();
     let golden = std::fs::read(fixture("example/oracle_genotype.golden.tsv")).unwrap();
     assert_eq!(
-        genotype,
-        golden,
+        genotype, golden,
         "_genotype.tsv must be byte-identical to fixtures/example/oracle_genotype.golden.tsv"
     );
 

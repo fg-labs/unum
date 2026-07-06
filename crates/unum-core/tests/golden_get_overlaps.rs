@@ -1,5 +1,5 @@
 //! Golden-file test for `unum_core::ref_kmer_filter::get_overlaps_from_read`,
-//! converted from the retired T1K-oracle FFI differential (`diff_get_overlaps_from_read.rs`) FFI
+//! converted from the retired T1K-oracle FFI differential (`diff_get_overlaps_from_read.rs`)
 //! differential (see `tests/common/mod.rs`). Drives the same adversarial read
 //! battery (exact substrings, mismatch sweeps, small indels, multi-gap /
 //! noncolinear concatenations, RC reads, boundary lengths, heavy mutation,
@@ -14,11 +14,12 @@
 //! is the highest-freeze-sensitivity field in the suite; a change to any of
 //! the overlap arithmetic will flip these bits and fail the golden.
 
+#![allow(clippy::too_many_lines)] // test drivers enumerate many cases inline
 mod common;
 
 use common::Golden;
-use unum_core::ref_kmer_filter::{RefKmerFilter, Scratch};
 use std::path::{Path, PathBuf};
+use unum_core::ref_kmer_filter::{RefKmerFilter, Scratch};
 
 const KMER_LENGTH: usize = 9;
 
@@ -177,17 +178,30 @@ fn get_overlaps_matches_golden() {
     let hla_pair = load_pair("hla_rna_seq.fa");
 
     // kir exact substrings + RC.
-    for &(rec_idx, start, len) in
-        &[(0, 0, 60), (0, 200, 100), (1, 500, 150), (2, 50, 80), (3, 900, 120), (5, 10, 200), (6, 300, 45)]
-    {
+    for &(rec_idx, start, len) in &[
+        (0, 0, 60),
+        (0, 200, 100),
+        (1, 500, 150),
+        (2, 50, 80),
+        (3, 900, 120),
+        (5, 10, 200),
+        (6, 300, 45),
+    ] {
         let (id, seq) = &pair.records[rec_idx];
         let read = &seq[start..start + len];
         record_overlaps(&mut golden, &format!("kir_substr_{id}@{start}+{len}"), &pair, read);
-        record_overlaps(&mut golden, &format!("kir_substr_RC_{id}@{start}+{len}"), &pair, &reverse_complement(read));
+        record_overlaps(
+            &mut golden,
+            &format!("kir_substr_RC_{id}@{start}+{len}"),
+            &pair,
+            &reverse_complement(read),
+        );
     }
 
     // hla exact substrings.
-    for &(rec_idx, start, len) in &[(0, 0, 70), (1, 300, 90), (4, 700, 110), (8, 150, 60), (11, 700, 130)] {
+    for &(rec_idx, start, len) in
+        &[(0, 0, 70), (1, 300, 90), (4, 700, 110), (8, 150, 60), (11, 700, 130)]
+    {
         let (id, seq) = &hla_pair.records[rec_idx];
         let read = &seq[start..start + len];
         record_overlaps(&mut golden, &format!("hla_substr_{id}@{start}+{len}"), &hla_pair, read);
@@ -198,14 +212,24 @@ fn get_overlaps_matches_golden() {
         let (id, seq) = &pair.records[2];
         let base = &seq[100..250];
         for k in 0..=40usize {
-            record_overlaps(&mut golden, &format!("kir_mm_{id}_k{k}"), &pair, &mutate_k_positions(base, k, 1000 + k as u64));
+            record_overlaps(
+                &mut golden,
+                &format!("kir_mm_{id}_k{k}"),
+                &pair,
+                &mutate_k_positions(base, k, 1000 + k as u64),
+            );
         }
     }
     {
         let (id, seq) = &hla_pair.records[4];
         let base = &seq[200..300];
         for k in 0..=30usize {
-            record_overlaps(&mut golden, &format!("hla_mm_{id}_k{k}"), &hla_pair, &mutate_k_positions(base, k, 2000 + k as u64));
+            record_overlaps(
+                &mut golden,
+                &format!("hla_mm_{id}_k{k}"),
+                &hla_pair,
+                &mutate_k_positions(base, k, 2000 + k as u64),
+            );
         }
     }
 
@@ -213,18 +237,42 @@ fn get_overlaps_matches_golden() {
     {
         let (id, seq) = &pair.records[3];
         let base = &seq[200..400];
-        for (del_pos, del_len) in [(50, 1), (50, 2), (50, 3), (100, 5), (150, 8), (30, 1), (170, 4)] {
-            record_overlaps(&mut golden, &format!("kir_del_{id}_p{del_pos}_l{del_len}"), &pair, &delete_span(base, del_pos, del_len));
+        for (del_pos, del_len) in [(50, 1), (50, 2), (50, 3), (100, 5), (150, 8), (30, 1), (170, 4)]
+        {
+            record_overlaps(
+                &mut golden,
+                &format!("kir_del_{id}_p{del_pos}_l{del_len}"),
+                &pair,
+                &delete_span(base, del_pos, del_len),
+            );
         }
-        for (ins_pos, ins_len, seed) in [(50, 1, 11), (50, 2, 12), (50, 3, 13), (100, 5, 14), (150, 8, 15), (30, 1, 16)] {
-            record_overlaps(&mut golden, &format!("kir_ins_{id}_p{ins_pos}_l{ins_len}"), &pair, &insert_span(base, ins_pos, ins_len, seed));
+        for (ins_pos, ins_len, seed) in
+            [(50, 1, 11), (50, 2, 12), (50, 3, 13), (100, 5, 14), (150, 8, 15), (30, 1, 16)]
+        {
+            record_overlaps(
+                &mut golden,
+                &format!("kir_ins_{id}_p{ins_pos}_l{ins_len}"),
+                &pair,
+                &insert_span(base, ins_pos, ins_len, seed),
+            );
         }
     }
     {
         let (id, seq) = &hla_pair.records[6];
         let base = &seq[150..330];
-        for (op, pos, l, seed) in [("del", 40, 2usize, 0u64), ("del", 90, 4, 0), ("ins", 40, 2, 21), ("ins", 90, 4, 22), ("del", 20, 1, 0), ("ins", 160, 3, 23)] {
-            let read = if op == "del" { delete_span(base, pos, l) } else { insert_span(base, pos, l, seed) };
+        for (op, pos, l, seed) in [
+            ("del", 40, 2usize, 0u64),
+            ("del", 90, 4, 0),
+            ("ins", 40, 2, 21),
+            ("ins", 90, 4, 22),
+            ("del", 20, 1, 0),
+            ("ins", 160, 3, 23),
+        ] {
+            let read = if op == "del" {
+                delete_span(base, pos, l)
+            } else {
+                insert_span(base, pos, l, seed)
+            };
             record_overlaps(&mut golden, &format!("hla_{op}_{id}_p{pos}_l{l}"), &hla_pair, &read);
         }
     }
@@ -232,8 +280,18 @@ fn get_overlaps_matches_golden() {
     {
         let (id, seq) = &pair.records[0];
         let base = &seq[300..520];
-        record_overlaps(&mut golden, &format!("kir_del_mutate_{id}"), &pair, &mutate_k_positions(&delete_span(base, 60, 3), 5, 555));
-        record_overlaps(&mut golden, &format!("kir_ins_mutate_{id}"), &pair, &mutate_k_positions(&insert_span(base, 120, 4, 777), 4, 888));
+        record_overlaps(
+            &mut golden,
+            &format!("kir_del_mutate_{id}"),
+            &pair,
+            &mutate_k_positions(&delete_span(base, 60, 3), 5, 555),
+        );
+        record_overlaps(
+            &mut golden,
+            &format!("kir_ins_mutate_{id}"),
+            &pair,
+            &mutate_k_positions(&insert_span(base, 120, 4, 777), 4, 888),
+        );
     }
 
     // widely-separated / multi-gap.
@@ -263,26 +321,56 @@ fn get_overlaps_matches_golden() {
         }
         let start = seq.len() / 4;
         let len = 70.min(seq.len() - start);
-        record_overlaps(&mut golden, &format!("record{idx}_{id}@{start}+{len}"), &pair, &seq[start..start + len]);
+        record_overlaps(
+            &mut golden,
+            &format!("record{idx}_{id}@{start}+{len}"),
+            &pair,
+            &seq[start..start + len],
+        );
     }
 
     // RC mutated / indel.
     {
         let (id, seq) = &pair.records[4];
         let base = &seq[80..200];
-        record_overlaps(&mut golden, &format!("{id}_rc_mutated"), &pair, &reverse_complement(&mutate_k_positions(base, 8, 555)));
-        record_overlaps(&mut golden, &format!("{id}_rc_del"), &pair, &reverse_complement(&delete_span(base, 40, 3)));
-        record_overlaps(&mut golden, &format!("{id}_rc_ins"), &pair, &reverse_complement(&insert_span(base, 40, 3, 999)));
+        record_overlaps(
+            &mut golden,
+            &format!("{id}_rc_mutated"),
+            &pair,
+            &reverse_complement(&mutate_k_positions(base, 8, 555)),
+        );
+        record_overlaps(
+            &mut golden,
+            &format!("{id}_rc_del"),
+            &pair,
+            &reverse_complement(&delete_span(base, 40, 3)),
+        );
+        record_overlaps(
+            &mut golden,
+            &format!("{id}_rc_ins"),
+            &pair,
+            &reverse_complement(&insert_span(base, 40, 3, 999)),
+        );
         let mut concat = seq[10..90].to_vec();
         concat.extend_from_slice(&seq[600..680]);
-        record_overlaps(&mut golden, &format!("{id}_rc_concat"), &pair, &reverse_complement(&concat));
+        record_overlaps(
+            &mut golden,
+            &format!("{id}_rc_concat"),
+            &pair,
+            &reverse_complement(&concat),
+        );
     }
 
     // boundary lengths.
     {
         let (id, seq) = &pair.records[3];
         for len in [35usize, 40, 44, 45, 46, 50, 60] {
-            record_overlaps(&mut golden, &format!("{id}_boundary_len{len}"), &pair, &seq[300..300 + len]);
+            record_overlaps(
+                &mut golden,
+                &format!("{id}_boundary_len{len}"),
+                &pair,
+                &seq[300..300 + len],
+            );
         }
         record_overlaps(&mut golden, &format!("{id}_len_k"), &pair, &seq[50..50 + KMER_LENGTH]);
         record_overlaps(&mut golden, &format!("{id}_len_k+1"), &pair, &seq[50..=50 + KMER_LENGTH]);
@@ -294,13 +382,23 @@ fn get_overlaps_matches_golden() {
         let (id, seq) = &hla_pair.records[2];
         let base = &seq[300..420];
         for k in [20usize, 30, 40, 50, 60] {
-            record_overlaps(&mut golden, &format!("{id}_heavy_k{k}"), &hla_pair, &mutate_k_positions(base, k.min(120), 3000 + k as u64));
+            record_overlaps(
+                &mut golden,
+                &format!("{id}_heavy_k{k}"),
+                &hla_pair,
+                &mutate_k_positions(base, k.min(120), 3000 + k as u64),
+            );
         }
     }
 
     // pure noise.
     for (seed, len) in [(1u64, 80), (2, 120), (3, 60), (4, 150), (5, 40)] {
-        record_overlaps(&mut golden, &format!("noise_seed{seed}_len{len}"), &pair, &pseudo_random_acgt(seed, len));
+        record_overlaps(
+            &mut golden,
+            &format!("noise_seed{seed}_len{len}"),
+            &pair,
+            &pseudo_random_acgt(seed, len),
+        );
     }
 
     // large seeded random batch (hla).
@@ -353,7 +451,12 @@ fn get_overlaps_matches_golden() {
                     insert_span(base, ins_pos, ins_len, seed.wrapping_mul(211) + 3)
                 }
             };
-            record_overlaps(&mut golden, &format!("random_batch_seed{seed}_cat{category}"), &hla_pair, &read);
+            record_overlaps(
+                &mut golden,
+                &format!("random_batch_seed{seed}_cat{category}"),
+                &hla_pair,
+                &read,
+            );
         }
     }
 

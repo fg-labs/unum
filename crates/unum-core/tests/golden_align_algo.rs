@@ -1,5 +1,5 @@
 //! Golden-file test for `unum_core::align_algo`, converted from the retired
-//! the retired T1K-oracle FFI differential (`diff_align_algo.rs`) FFI differential (see
+//! T1K-oracle FFI differential (`diff_align_algo.rs`; see
 //! `tests/common/mod.rs` for the conversion rationale).
 //!
 //! # Why compare the FULL `align[]` array, not just the score
@@ -32,7 +32,7 @@ use unum_core::align_algo::{
 /// Serializes an `(score, align)` result to the golden's per-case value:
 /// `score;a0,a1,a2,...` (align ops as their raw `i8` codes).
 fn serialize(score: i32, align: &[i8]) -> String {
-    let ops = align.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",");
+    let ops = align.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(",");
     format!("{score};{ops}")
 }
 
@@ -46,8 +46,20 @@ fn record_global_alignment(golden: &mut Golden, label: &str, t: &[u8], p: &[u8],
 // ---- exact match, mismatches, indels, mixed / band edges / short-empty -----
 
 fn record_curated_global_cases(golden: &mut Golden) {
-    record_global_alignment(golden, "exact_match", b"ACGTACGTACGTACGT", b"ACGTACGTACGTACGT", DEFAULT_BAND);
-    record_global_alignment(golden, "single_mismatch", b"ACGTACGTACGTACGT", b"ACGTAAGTACGTACGT", DEFAULT_BAND);
+    record_global_alignment(
+        golden,
+        "exact_match",
+        b"ACGTACGTACGTACGT",
+        b"ACGTACGTACGTACGT",
+        DEFAULT_BAND,
+    );
+    record_global_alignment(
+        golden,
+        "single_mismatch",
+        b"ACGTACGTACGTACGT",
+        b"ACGTAAGTACGTACGT",
+        DEFAULT_BAND,
+    );
     record_global_alignment(
         golden,
         "multiple_mismatches",
@@ -76,7 +88,13 @@ fn record_curated_global_cases(golden: &mut Golden) {
         b"ACGAACGTACGTACGCACGTACGT",
         DEFAULT_BAND,
     );
-    record_global_alignment(golden, "n_wildcard_bases", b"ACGTNACGTACGT", b"ACGTAACGTNCGT", DEFAULT_BAND);
+    record_global_alignment(
+        golden,
+        "n_wildcard_bases",
+        b"ACGTNACGTACGT",
+        b"ACGTAACGTNCGT",
+        DEFAULT_BAND,
+    );
     record_global_alignment(
         golden,
         "indel_at_band_edge_small_band",
@@ -84,7 +102,13 @@ fn record_curated_global_cases(golden: &mut Golden) {
         b"ACGTACGTACGTACGTACGTACGT",
         2,
     );
-    record_global_alignment(golden, "indel_at_band_edge_band_one", b"AAAAAAAAAAAAAAAA", b"AAAAAAAAAAAAAAAAA", 1);
+    record_global_alignment(
+        golden,
+        "indel_at_band_edge_band_one",
+        b"AAAAAAAAAAAAAAAA",
+        b"AAAAAAAAAAAAAAAAA",
+        1,
+    );
     record_global_alignment(
         golden,
         "differing_lengths_widens_band_left",
@@ -202,14 +226,26 @@ fn record_seeded_random(golden: &mut Golden) {
         let n_mismatches = rng.next_range(0, 6);
         let n_indels = rng.next_range(0, 5);
         let p = mutate(&mut rng, &t, n_mismatches, n_indels);
-        record_global_alignment(golden, &format!("seeded_random band=10 trial={trial}"), &t, &p, 10);
+        record_global_alignment(
+            golden,
+            &format!("seeded_random band=10 trial={trial}"),
+            &t,
+            &p,
+            10,
+        );
     }
 
     let mut rng = XorShift64::new(0x5EED_5EED);
     for trial in 0..10 {
         let t_len = rng.next_range(5, 30);
         let t = random_seq(&mut rng, t_len);
-        record_global_alignment(golden, &format!("seeded_random no-mutation trial={trial}"), &t, &t, 5);
+        record_global_alignment(
+            golden,
+            &format!("seeded_random no-mutation trial={trial}"),
+            &t,
+            &t,
+            5,
+        );
     }
 }
 
@@ -260,14 +296,26 @@ fn record_length_skew(golden: &mut Golden) {
     for &band in &[1, 2, 5, 10] {
         let t = random_seq(&mut rng, 70);
         let p = random_seq(&mut rng, 1);
-        record_global_alignment(golden, &format!("tiny_p_against_long_t band={band}"), &t, &p, band);
+        record_global_alignment(
+            golden,
+            &format!("tiny_p_against_long_t band={band}"),
+            &t,
+            &p,
+            band,
+        );
     }
 
     let mut rng = XorShift64::new(0xC0DE_BABE);
     for &band in &[1, 2, 5, 10] {
         let p = random_seq(&mut rng, 70);
         let t = random_seq(&mut rng, 1);
-        record_global_alignment(golden, &format!("tiny_t_against_long_p band={band}"), &t, &p, band);
+        record_global_alignment(
+            golden,
+            &format!("tiny_t_against_long_p band={band}"),
+            &t,
+            &p,
+            band,
+        );
     }
 }
 
@@ -298,7 +346,12 @@ fn record_pos_weight(golden: &mut Golden, label: &str, weights: &[PosWeight], p:
 fn record_pos_weight_cases(golden: &mut Golden) {
     let t = b"ACGTACGTACGTACGT";
     record_pos_weight(golden, "pos_weight_exact_match", &unanimous_pos_weights(t), t);
-    record_pos_weight(golden, "pos_weight_with_mismatch", &unanimous_pos_weights(t), b"ACGTAAGTACGTACGT");
+    record_pos_weight(
+        golden,
+        "pos_weight_with_mismatch",
+        &unanimous_pos_weights(t),
+        b"ACGTAAGTACGTACGT",
+    );
     record_pos_weight(
         golden,
         "pos_weight_with_indel",
@@ -355,7 +408,12 @@ fn record_pos_weight_cases(golden: &mut Golden) {
         }
         let lenp = rng.next_range(1, 2);
         let p = random_seq(&mut rng, lenp);
-        record_pos_weight(golden, &format!("pos_weight_length_skew lent>>lenp trial={trial}"), &weights, &p);
+        record_pos_weight(
+            golden,
+            &format!("pos_weight_length_skew lent>>lenp trial={trial}"),
+            &weights,
+            &p,
+        );
     }
 
     let mut rng = XorShift64::new(0xFACE_FEED);
@@ -368,7 +426,12 @@ fn record_pos_weight_cases(golden: &mut Golden) {
         }
         let p_len = rng.next_range(30, 70);
         let p = random_seq(&mut rng, p_len);
-        record_pos_weight(golden, &format!("pos_weight_length_skew lenp>>lent trial={trial}"), &weights, &p);
+        record_pos_weight(
+            golden,
+            &format!("pos_weight_length_skew lenp>>lent trial={trial}"),
+            &weights,
+            &p,
+        );
     }
 
     let t = b"ACG";
@@ -620,7 +683,8 @@ fn global_alignment_flipped_tie_break(
             1 => {
                 align.push(EDIT_INSERT);
                 if tagi > 0 {
-                    if m.get(tagi - 1, tagj) + SCORE_GAPOPEN + SCORE_GAPEXTEND == e.get(tagi, tagj) {
+                    if m.get(tagi - 1, tagj) + SCORE_GAPOPEN + SCORE_GAPEXTEND == e.get(tagi, tagj)
+                    {
                         tagi -= 1;
                         mat = 0;
                     } else {
@@ -633,7 +697,8 @@ fn global_alignment_flipped_tie_break(
             _ => {
                 align.push(EDIT_DELETE);
                 if tagj > 0 {
-                    if m.get(tagi, tagj - 1) + SCORE_GAPOPEN + SCORE_GAPEXTEND == f.get(tagi, tagj) {
+                    if m.get(tagi, tagj - 1) + SCORE_GAPOPEN + SCORE_GAPEXTEND == f.get(tagi, tagj)
+                    {
                         tagj -= 1;
                         mat = 0;
                     } else {

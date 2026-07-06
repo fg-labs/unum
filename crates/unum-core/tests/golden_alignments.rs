@@ -1,5 +1,5 @@
 //! Golden-file test for `unum_core::alignments::Alignments`, converted from
-//! the retired T1K-oracle FFI differential (`diff_alignments.rs`) FFI/subprocess differential
+//! the retired T1K-oracle FFI/subprocess differential (`diff_alignments.rs`)
 //! (see `tests/common/mod.rs`). Builds the SAME small coordinate-sorted BAMs
 //! programmatically (via `rust_htslib::bam::Writer`), reads them with the Rust
 //! `Alignments` port, and freezes each record's accessor fields + the global
@@ -11,11 +11,11 @@
 mod common;
 
 use common::Golden;
-use unum_core::alignments::Alignments;
 use rust_htslib::bam::header::HeaderRecord;
 use rust_htslib::bam::record::{Cigar, CigarString};
 use rust_htslib::bam::{self, Header, Writer};
 use std::path::Path;
+use unum_core::alignments::Alignments;
 
 #[allow(clippy::too_many_lines)]
 fn build_test_bam(path: &Path) {
@@ -41,7 +41,12 @@ fn build_test_bam(path: &Path) {
     let mut r1 = bam::Record::new();
     let r1_seq = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
     let r1_len = u32::try_from(r1_seq.len()).unwrap();
-    r1.set(b"pair_fwd", Some(&CigarString(vec![Cigar::Match(r1_len)])), r1_seq, &vec![30u8; r1_seq.len()]);
+    r1.set(
+        b"pair_fwd",
+        Some(&CigarString(vec![Cigar::Match(r1_len)])),
+        r1_seq,
+        &vec![30u8; r1_seq.len()],
+    );
     r1.set_tid(0);
     r1.set_pos(100);
     r1.set_mtid(0);
@@ -83,7 +88,12 @@ fn build_test_bam(path: &Path) {
     let mut r4 = bam::Record::new();
     let r4_seq = b"GATTACAGATTACAGATTACAGATTACAG";
     let r4_len = u32::try_from(r4_seq.len()).unwrap();
-    r4.set(b"one_unmapped", Some(&CigarString(vec![Cigar::Match(r4_len)])), r4_seq, &vec![20u8; r4_seq.len()]);
+    r4.set(
+        b"one_unmapped",
+        Some(&CigarString(vec![Cigar::Match(r4_len)])),
+        r4_seq,
+        &vec![20u8; r4_seq.len()],
+    );
     r4.set_tid(0);
     r4.set_pos(2000);
     r4.set_mtid(0);
@@ -145,7 +155,8 @@ fn build_test_bam(path: &Path) {
 
 /// Serializes the current record's every accessor field into one golden line.
 fn serialize_record(a: &Alignments) -> String {
-    let segs = a.segments().iter().map(|s| format!("{},{}", s.a, s.b)).collect::<Vec<_>>().join(";");
+    let segs =
+        a.segments().iter().map(|s| format!("{},{}", s.a, s.b)).collect::<Vec<_>>().join(";");
     format!(
         "seq={}|qual={}|id={}|first={}|rev={}|materev={}|aligned={}|tmplaligned={}|primary={}|chrom={}|segs={}",
         String::from_utf8_lossy(&a.read_seq()),
@@ -183,7 +194,12 @@ fn build_general_info_bam(path: &Path, n_pairs: i64, read_len: usize) {
         let pos2 = pos1 + insert - i64::try_from(read_len).unwrap();
 
         let mut m1 = bam::Record::new();
-        m1.set(format!("pair{i}").as_bytes(), Some(&CigarString(vec![Cigar::Match(cigar_len)])), &seq, &qual);
+        m1.set(
+            format!("pair{i}").as_bytes(),
+            Some(&CigarString(vec![Cigar::Match(cigar_len)])),
+            &seq,
+            &qual,
+        );
         m1.set_tid(0);
         m1.set_pos(pos1);
         m1.set_mtid(0);
@@ -192,7 +208,12 @@ fn build_general_info_bam(path: &Path, n_pairs: i64, read_len: usize) {
         writer.write(&m1).expect("write m1");
 
         let mut m2 = bam::Record::new();
-        m2.set(format!("pair{i}").as_bytes(), Some(&CigarString(vec![Cigar::Match(cigar_len)])), &seq, &qual);
+        m2.set(
+            format!("pair{i}").as_bytes(),
+            Some(&CigarString(vec![Cigar::Match(cigar_len)])),
+            &seq,
+            &qual,
+        );
         m2.set_tid(0);
         m2.set_pos(pos2);
         m2.set_mtid(0);
@@ -219,7 +240,12 @@ fn build_single_end_bam(path: &Path) {
     let qual = vec![30u8; 75];
     for i in 0..20i64 {
         let mut r = bam::Record::new();
-        r.set(format!("single{i}").as_bytes(), Some(&CigarString(vec![Cigar::Match(75)])), &seq, &qual);
+        r.set(
+            format!("single{i}").as_bytes(),
+            Some(&CigarString(vec![Cigar::Match(75)])),
+            &seq,
+            &qual,
+        );
         r.set_tid(0);
         r.set_pos(1000 + i * 200);
         r.set_mtid(-1);
@@ -266,14 +292,20 @@ fn alignments_matches_golden() {
     let mut gi = Alignments::open(&gi_bam).expect("open general_info");
     let info = gi.general_info(false).expect("general_info");
     assert!(info.frag_stdev > 0, "paired dataset must exercise frag_stdev>0");
-    golden.record("general_info/paired", format!("read_len={},frag_stdev={}", info.read_len, info.frag_stdev));
+    golden.record(
+        "general_info/paired",
+        format!("read_len={},frag_stdev={}", info.read_len, info.frag_stdev),
+    );
 
     let se_bam = dir.path().join("single_end.bam");
     build_single_end_bam(&se_bam);
     let mut se = Alignments::open(&se_bam).expect("open single_end");
     let se_info = se.general_info(false).expect("general_info single");
     assert_eq!(se_info.frag_stdev, 0, "single-end must yield frag_stdev==0");
-    golden.record("general_info/single_end", format!("read_len={},frag_stdev={}", se_info.read_len, se_info.frag_stdev));
+    golden.record(
+        "general_info/single_end",
+        format!("read_len={},frag_stdev={}", se_info.read_len, se_info.frag_stdev),
+    );
 
     golden.finish();
 }

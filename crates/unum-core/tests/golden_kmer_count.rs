@@ -1,5 +1,5 @@
 //! Golden-file test for `unum_core::kmer_count`, converted from the retired
-//! the retired T1K-oracle FFI differential (`diff_kmercount.rs`) FFI differential (see `tests/common/mod.rs`).
+//! T1K-oracle FFI differential (`diff_kmercount.rs`) (see `tests/common/mod.rs`).
 //! Drives the same `add_count` sequences and `get_count`/`jaccard_similarity`
 //! queries the differential drove, freezing the Rust output (which was
 //! byte-identical to the C++ `KmerCount` oracle) into `kmer_count.txt`.

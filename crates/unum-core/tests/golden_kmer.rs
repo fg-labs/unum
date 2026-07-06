@@ -1,5 +1,5 @@
 //! Golden-file tests for `unum_core::kmer`, converted from the retired
-//! the retired T1K-oracle FFI differential (`diff_kmer.rs`) and `diff_kmercode.rs` FFI differentials (see
+//! T1K-oracle FFI differentials (`diff_kmer.rs` and `diff_kmercode.rs`; see
 //! `tests/common/mod.rs`). The former lockstep-drove the Rust `KmerCode` and a
 //! real C++ `KmerCode` and asserted agreement after every operation; here the
 //! same operation sequences are driven and each operation's full observable
@@ -11,6 +11,7 @@
 //! they guarded the C++ shim's argument validation, which no longer exists.
 //! `is_equal_matches_code_equality` (already Rust-only) is kept.
 
+#![allow(clippy::too_many_lines)] // test drivers enumerate many cases inline
 mod common;
 
 use common::Golden;

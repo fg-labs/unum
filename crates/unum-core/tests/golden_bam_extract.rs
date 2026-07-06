@@ -1,5 +1,5 @@
 //! Byte-golden test for `unum_core::bam_extract::extract_from_bam`,
-//! converted from the retired T1K-oracle FFI differential (`diff_bam_extract.rs`) FFI/subprocess
+//! converted from the retired T1K-oracle FFI differential (`diff_bam_extract.rs`)/subprocess
 //! differential (see `tests/common/mod.rs`). Builds the SAME coordinate-sorted
 //! BAMs programmatically (via `rust_htslib`), runs the Rust `bam_extract`
 //! driver over them, and asserts the emitted FASTQ bytes match the committed
@@ -10,14 +10,14 @@
 mod common;
 
 use common::assert_byte_golden;
-use unum_core::alignments::Alignments;
-use unum_core::bam_extract::{self, CoordRecord};
-use unum_core::extract::{CandidateSink, ReadRecord, output_seq};
-use unum_core::ref_kmer_filter::RefKmerFilter;
 use rust_htslib::bam::header::HeaderRecord;
 use rust_htslib::bam::record::{Cigar, CigarString};
 use rust_htslib::bam::{self, Header, Writer};
 use std::path::{Path, PathBuf};
+use unum_core::alignments::Alignments;
+use unum_core::bam_extract::{self, CoordRecord};
+use unum_core::extract::{CandidateSink, ReadRecord, output_seq};
+use unum_core::ref_kmer_filter::RefKmerFilter;
 
 const INITIAL_KMER_LENGTH: usize = 9;
 
@@ -42,7 +42,8 @@ fn kir2dl1_sequence() -> String {
 }
 
 fn noise_seq(len: usize) -> Vec<u8> {
-    let pattern = b"GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGC";
+    let pattern =
+        b"GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGC";
     (0..len).map(|i| pattern[i % pattern.len()]).collect()
 }
 
@@ -68,7 +69,12 @@ fn build_test_bam(path: &Path) {
     let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("writer");
 
     let mut ot1 = bam::Record::new();
-    ot1.set(b"on_target_pair", Some(&CigarString(vec![Cigar::Match(100)])), &kir_bytes[0..100], &[30u8; 100]);
+    ot1.set(
+        b"on_target_pair",
+        Some(&CigarString(vec![Cigar::Match(100)])),
+        &kir_bytes[0..100],
+        &[30u8; 100],
+    );
     ot1.set_tid(0);
     ot1.set_pos(KIR2DL1_START + 10);
     ot1.set_mtid(0);
@@ -76,7 +82,12 @@ fn build_test_bam(path: &Path) {
     ot1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
     writer.write(&ot1).unwrap();
     let mut ot2 = bam::Record::new();
-    ot2.set(b"on_target_pair", Some(&CigarString(vec![Cigar::Match(100)])), &kir_bytes[200..300], &[30u8; 100]);
+    ot2.set(
+        b"on_target_pair",
+        Some(&CigarString(vec![Cigar::Match(100)])),
+        &kir_bytes[200..300],
+        &[30u8; 100],
+    );
     ot2.set_tid(0);
     ot2.set_pos(KIR2DL1_START + 210);
     ot2.set_mtid(0);
@@ -104,7 +115,12 @@ fn build_test_bam(path: &Path) {
 
     let homopolymer = vec![b'A'; 90];
     let mut lc1 = bam::Record::new();
-    lc1.set(b"low_complexity_pair", Some(&CigarString(vec![Cigar::Match(90)])), &homopolymer, &[30u8; 90]);
+    lc1.set(
+        b"low_complexity_pair",
+        Some(&CigarString(vec![Cigar::Match(90)])),
+        &homopolymer,
+        &[30u8; 90],
+    );
     lc1.set_tid(0);
     lc1.set_pos(KIR2DL1_START + 1000);
     lc1.set_mtid(0);
@@ -112,7 +128,12 @@ fn build_test_bam(path: &Path) {
     lc1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
     writer.write(&lc1).unwrap();
     let mut lc2 = bam::Record::new();
-    lc2.set(b"low_complexity_pair", Some(&CigarString(vec![Cigar::Match(90)])), &homopolymer, &[30u8; 90]);
+    lc2.set(
+        b"low_complexity_pair",
+        Some(&CigarString(vec![Cigar::Match(90)])),
+        &homopolymer,
+        &[30u8; 90],
+    );
     lc2.set_tid(0);
     lc2.set_pos(KIR2DL1_START + 1200);
     lc2.set_mtid(0);
@@ -121,7 +142,12 @@ fn build_test_bam(path: &Path) {
     writer.write(&lc2).unwrap();
 
     let mut alt1 = bam::Record::new();
-    alt1.set(b"alt_chrom_pair", Some(&CigarString(vec![Cigar::Match(80)])), &kir_bytes[400..480], &[30u8; 80]);
+    alt1.set(
+        b"alt_chrom_pair",
+        Some(&CigarString(vec![Cigar::Match(80)])),
+        &kir_bytes[400..480],
+        &[30u8; 80],
+    );
     alt1.set_tid(1);
     alt1.set_pos(500);
     alt1.set_mtid(1);
@@ -129,7 +155,12 @@ fn build_test_bam(path: &Path) {
     alt1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
     writer.write(&alt1).unwrap();
     let mut alt2 = bam::Record::new();
-    alt2.set(b"alt_chrom_pair", Some(&CigarString(vec![Cigar::Match(80)])), &kir_bytes[600..680], &[30u8; 80]);
+    alt2.set(
+        b"alt_chrom_pair",
+        Some(&CigarString(vec![Cigar::Match(80)])),
+        &kir_bytes[600..680],
+        &[30u8; 80],
+    );
     alt2.set_tid(1);
     alt2.set_pos(700);
     alt2.set_mtid(1);
@@ -192,7 +223,12 @@ fn build_single_end_test_bam(path: &Path) {
     let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("writer");
 
     let mut r1 = bam::Record::new();
-    r1.set(b"single_on_target", Some(&CigarString(vec![Cigar::Match(100)])), &kir_bytes[0..100], &[30u8; 100]);
+    r1.set(
+        b"single_on_target",
+        Some(&CigarString(vec![Cigar::Match(100)])),
+        &kir_bytes[0..100],
+        &[30u8; 100],
+    );
     r1.set_tid(0);
     r1.set_pos(KIR2DL1_START + 10);
     r1.set_mtid(-1);
@@ -200,7 +236,12 @@ fn build_single_end_test_bam(path: &Path) {
     r1.set_flags(0);
     writer.write(&r1).unwrap();
     let mut r1_dup = bam::Record::new();
-    r1_dup.set(b"single_on_target", Some(&CigarString(vec![Cigar::Match(100)])), &kir_bytes[0..100], &[30u8; 100]);
+    r1_dup.set(
+        b"single_on_target",
+        Some(&CigarString(vec![Cigar::Match(100)])),
+        &kir_bytes[0..100],
+        &[30u8; 100],
+    );
     r1_dup.set_tid(0);
     r1_dup.set_pos(KIR2DL1_START + 20);
     r1_dup.set_mtid(-1);
@@ -220,7 +261,12 @@ fn build_single_end_test_bam(path: &Path) {
 
     let homopolymer = vec![b'T'; 90];
     let mut r3 = bam::Record::new();
-    r3.set(b"single_low_complexity", Some(&CigarString(vec![Cigar::Match(90)])), &homopolymer, &[30u8; 90]);
+    r3.set(
+        b"single_low_complexity",
+        Some(&CigarString(vec![Cigar::Match(90)])),
+        &homopolymer,
+        &[30u8; 90],
+    );
     r3.set_tid(0);
     r3.set_pos(KIR2DL1_START + 500);
     r3.set_mtid(-1);
@@ -258,7 +304,11 @@ impl CandidateSink for FastqFileSink {
     }
 }
 
-fn run_rust(bam_path: &Path, coord_fasta: &Path, out_prefix: &Path) -> bam_extract::BamExtractMetrics {
+fn run_rust(
+    bam_path: &Path,
+    coord_fasta: &Path,
+    out_prefix: &Path,
+) -> bam_extract::BamExtractMetrics {
     let coord_records = bam_extract::parse_coord_fa(coord_fasta).unwrap();
     let mut filter = RefKmerFilter::from_reference_fasta(coord_fasta, INITIAL_KMER_LENGTH).unwrap();
     let mut alignments = Alignments::open(bam_path).unwrap();
@@ -270,7 +320,8 @@ fn run_rust(bam_path: &Path, coord_fasta: &Path, out_prefix: &Path) -> bam_extra
     } else {
         FastqFileSink::create_paired(out_prefix)
     };
-    bam_extract::extract_from_bam(&mut alignments, &mut filter, &genes, false, -1, &mut sink).unwrap()
+    bam_extract::extract_from_bam(&mut alignments, &mut filter, &genes, false, -1, &mut sink)
+        .unwrap()
 }
 
 #[test]
@@ -350,7 +401,8 @@ fn missing_unaligned_mate_is_rejected_by_the_port() {
     let mut alignments = Alignments::open(&bam_path).unwrap();
     let genes = bam_extract::build_genes(&alignments, &coord_records).unwrap();
     let mut sink = FastqFileSink::create_paired(&dir.path().join("rust_out"));
-    let result = bam_extract::extract_from_bam(&mut alignments, &mut filter, &genes, false, -1, &mut sink);
+    let result =
+        bam_extract::extract_from_bam(&mut alignments, &mut filter, &genes, false, -1, &mut sink);
     assert!(result.is_err(), "must reject a missing unaligned mate");
     assert!(result.unwrap_err().to_string().contains("not showing up together"));
 }

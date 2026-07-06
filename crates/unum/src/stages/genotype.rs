@@ -35,12 +35,12 @@
 //! do ordinary filesystem I/O as an implementation detail.
 use crate::cli::GenotypeArgs;
 use anyhow::{Context, Result, bail, ensure};
-use unum_core::fastq::FastqReader;
-use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper};
-use unum_core::ref_kmer_filter::RefKmerFilter;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use unum_core::fastq::FastqReader;
+use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper};
+use unum_core::ref_kmer_filter::RefKmerFilter;
 
 /// The k-mer length the genotyper's reference index/alignment is built at
 /// (`Genotyper genotyper(11)`, `Genotyper.cpp:207`) -- distinct from the

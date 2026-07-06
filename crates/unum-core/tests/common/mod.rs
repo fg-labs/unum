@@ -71,12 +71,8 @@ impl Golden {
     /// to the frozen golden (same labels, same serialized value for each) --
     /// panicking with a precise diff on any mismatch.
     pub fn finish(self) {
-        let serialized = self
-            .recorded
-            .iter()
-            .map(|(k, v)| format!("{k}\t{v}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let serialized =
+            self.recorded.iter().map(|(k, v)| format!("{k}\t{v}")).collect::<Vec<_>>().join("\n");
 
         if matches!(std::env::var("UPDATE_GOLDENS").as_deref(), Ok("1")) {
             let serialized = format!("{serialized}\n");
@@ -86,10 +82,7 @@ impl Golden {
         }
 
         let contents = std::fs::read_to_string(&self.path).unwrap_or_else(|e| {
-            panic!(
-                "reading golden {:?}: {e}\n(run with UPDATE_GOLDENS=1 to create it)",
-                self.path
-            )
+            panic!("reading golden {:?}: {e}\n(run with UPDATE_GOLDENS=1 to create it)", self.path)
         });
         let mut golden: BTreeMap<&str, &str> = BTreeMap::new();
         for line in contents.lines() {

@@ -22,13 +22,13 @@
 //! `BamExtractor.cpp:599-610`, identical naming convention).
 use crate::cli::ExtractArgs;
 use anyhow::{Context, Result, bail, ensure};
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
 use unum_core::alignments::Alignments;
 use unum_core::bam_extract;
 use unum_core::extract::{self, CandidateSink, ReadRecord};
 use unum_core::ref_kmer_filter::RefKmerFilter;
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::Path;
 
 /// `FastqExtractor.cpp:272` / `BamExtractor.cpp:480`: the literal initial
 /// k-mer length the reference is first loaded at, before any data-dependent

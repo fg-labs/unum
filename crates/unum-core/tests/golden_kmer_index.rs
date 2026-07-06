@@ -1,5 +1,5 @@
 //! Tests for `unum_core::kmer_index`, converted from the retired
-//! the retired T1K-oracle FFI differential (`diff_kmerindex.rs`) FFI differential (see `tests/common/mod.rs`).
+//! T1K-oracle FFI differential (`diff_kmerindex.rs`) (see `tests/common/mod.rs`).
 //!
 //! The `insert`/`search`/`remove` behavioral tests already asserted explicit
 //! Rust-side expected values in the original differential (the C++ oracle was
@@ -148,7 +148,14 @@ fn serialize_hits(hits: &[IndexInfo]) -> String {
 
 /// Runs `build_index_from_read` and records the search result of every
 /// length-`k` window (in order) under a `label`-prefixed key.
-fn record_build_index(golden: &mut Golden, read: &[u8], k: usize, id: i32, shift: i32, label: &str) {
+fn record_build_index(
+    golden: &mut Golden,
+    read: &[u8],
+    k: usize,
+    id: i32,
+    shift: i32,
+    label: &str,
+) {
     let mut index = KmerIndex::new();
     let mut kc = KmerCode::new(k);
     index.build_index_from_read(&mut kc, read, id, shift);

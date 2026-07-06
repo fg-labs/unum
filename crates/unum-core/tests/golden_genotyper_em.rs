@@ -1,7 +1,7 @@
 //! Golden-file test for `unum_core::genotyper`'s quantification slice
 //! (`coalesce_read_assignments` / `finalize_read_assignments` /
 //! `quantify_allele_equivalent_class`), converted from the retired
-//! the retired T1K-oracle FFI differential (`diff_genotyper_em.rs`) FFI differential (see
+//! T1K-oracle FFI differential (`diff_genotyper_em.rs`) (see
 //! `tests/common/mod.rs`).
 //!
 //! The scenarios are all ENUMERATED (hardcoded scripted read-assignment
@@ -86,7 +86,9 @@ fn run(alleles: &[AlleleDef], reads: &[ScriptedRead]) -> Genotyper {
     // AlleleRef's own value -- what the real genotype driver computes).
     let missing_coverage: Vec<i32> = alleles
         .iter()
-        .map(|a| get_seq_missing_base_coverage(&AlleleRef::new(a.seq.as_bytes().to_vec(), None), 0.01))
+        .map(|a| {
+            get_seq_missing_base_coverage(&AlleleRef::new(a.seq.as_bytes().to_vec(), None), 0.01)
+        })
         .collect();
     g.finalize_read_assignments(&missing_coverage);
     g.quantify_allele_equivalent_class(&seq_effective_len, &seq_weight);
@@ -119,25 +121,61 @@ fn record_scenario(golden: &mut Golden, label: &str, g: &Genotyper, n_alleles: u
 
 fn two_hla_a_alleles() -> Vec<AlleleDef> {
     vec![
-        AlleleDef { name: "A*01:01:01", seq: "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", weight: 1 },
-        AlleleDef { name: "A*01:02:01", seq: "TTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", weight: 1 },
+        AlleleDef {
+            name: "A*01:01:01",
+            seq: "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            weight: 1,
+        },
+        AlleleDef {
+            name: "A*01:02:01",
+            seq: "TTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            weight: 1,
+        },
     ]
 }
 
 fn two_gene_four_allele_mix() -> Vec<AlleleDef> {
     vec![
-        AlleleDef { name: "A*01:01:01", seq: "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", weight: 1 },
-        AlleleDef { name: "A*01:02:01", seq: "TTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", weight: 1 },
-        AlleleDef { name: "B*07:02:01", seq: "CCCCACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", weight: 1 },
-        AlleleDef { name: "B*08:01:01", seq: "GGGGACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", weight: 1 },
+        AlleleDef {
+            name: "A*01:01:01",
+            seq: "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            weight: 1,
+        },
+        AlleleDef {
+            name: "A*01:02:01",
+            seq: "TTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            weight: 1,
+        },
+        AlleleDef {
+            name: "B*07:02:01",
+            seq: "CCCCACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            weight: 1,
+        },
+        AlleleDef {
+            name: "B*08:01:01",
+            seq: "GGGGACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            weight: 1,
+        },
     ]
 }
 
 fn three_hla_a_alleles() -> Vec<AlleleDef> {
     vec![
-        AlleleDef { name: "A*01:01:01", seq: "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", weight: 1 },
-        AlleleDef { name: "A*02:01:01", seq: "TTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", weight: 1 },
-        AlleleDef { name: "A*03:01:01", seq: "CCCCACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", weight: 1 },
+        AlleleDef {
+            name: "A*01:01:01",
+            seq: "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            weight: 1,
+        },
+        AlleleDef {
+            name: "A*02:01:01",
+            seq: "TTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            weight: 1,
+        },
+        AlleleDef {
+            name: "A*03:01:01",
+            seq: "CCCCACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            weight: 1,
+        },
     ]
 }
 

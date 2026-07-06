@@ -1,5 +1,5 @@
 //! Byte-golden test for `unum_core::extract::extract_candidates`, converted
-//! from the retired T1K-oracle FFI differential (`diff_fastq_extract.rs`) FFI differential (see
+//! from the retired T1K-oracle FFI differential (`diff_fastq_extract.rs`) (see
 //! `tests/common/mod.rs`). Runs the Rust extractor over the same inputs the
 //! differential ran the C++ `fastq-extractor` oracle over, and asserts the
 //! emitted FASTQ bytes match the committed byte-goldens (which are the Rust
@@ -21,10 +21,10 @@
 mod common;
 
 use common::assert_byte_golden;
-use unum_core::extract::{self, CandidateSink, ReadRecord};
-use unum_core::ref_kmer_filter::RefKmerFilter;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use unum_core::extract::{self, CandidateSink, ReadRecord};
+use unum_core::ref_kmer_filter::RefKmerFilter;
 
 const INITIAL_KMER_LENGTH: usize = 9;
 const DEFAULT_SIMILARITY: f64 = extract::DEFAULT_REF_SEQ_SIMILARITY;
@@ -43,7 +43,8 @@ struct FastqFileSink {
 impl FastqFileSink {
     fn create(prefix: &Path, paired: bool) -> Self {
         let fp1 = std::fs::File::create(format!("{}_1.fq", prefix.display())).unwrap();
-        let fp2 = paired.then(|| std::fs::File::create(format!("{}_2.fq", prefix.display())).unwrap());
+        let fp2 =
+            paired.then(|| std::fs::File::create(format!("{}_2.fq", prefix.display())).unwrap());
         Self { fp1, fp2 }
     }
     fn create_single(prefix: &Path) -> Self {
@@ -136,8 +137,10 @@ fn mate2_longer_byte_golden() {
     }
     let hit1 = reference[0..100].to_string();
     let hit2 = reference[120..220].to_string();
-    let r1_records: Vec<(String, String)> = (0..3).map(|i| (format!("p{i}"), hit1.clone())).collect();
-    let mut r2_records: Vec<(String, String)> = (0..3).map(|i| (format!("p{i}"), hit2.clone())).collect();
+    let r1_records: Vec<(String, String)> =
+        (0..3).map(|i| (format!("p{i}"), hit1.clone())).collect();
+    let mut r2_records: Vec<(String, String)> =
+        (0..3).map(|i| (format!("p{i}"), hit2.clone())).collect();
     r2_records.push(("extra0".to_string(), hit1.clone()));
     r2_records.push(("extra1".to_string(), hit2.clone()));
     let r1 = dir.path().join("r1.fq");
@@ -146,8 +149,14 @@ fn mate2_longer_byte_golden() {
     write_fastq(&r2, &r2_records);
     let prefix = dir.path().join("rust");
     run_rust_paired(&ref_fasta, &r1, &r2, &prefix);
-    assert_byte_golden("fastq_extract/mate2_longer_1.fq", &std::fs::read(dir.path().join("rust_1.fq")).unwrap());
-    assert_byte_golden("fastq_extract/mate2_longer_2.fq", &std::fs::read(dir.path().join("rust_2.fq")).unwrap());
+    assert_byte_golden(
+        "fastq_extract/mate2_longer_1.fq",
+        &std::fs::read(dir.path().join("rust_1.fq")).unwrap(),
+    );
+    assert_byte_golden(
+        "fastq_extract/mate2_longer_2.fq",
+        &std::fs::read(dir.path().join("rust_2.fq")).unwrap(),
+    );
 }
 
 fn build_synthetic_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {

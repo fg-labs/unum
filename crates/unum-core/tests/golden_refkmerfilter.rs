@@ -1,7 +1,7 @@
 //! Golden-file test for `unum_core::ref_kmer_filter`'s
 //! `is_low_complexity`/`is_good_candidate`/`passes_bucket_count_gate_only`,
-//! converted from the retired T1K-oracle FFI differential (`diff_refkmerfilter.rs`) FFI
-//! differential (see `tests/common/mod.rs`). Drives the same large
+//! converted from the retired T1K-oracle FFI differential (`diff_refkmerfilter.rs`;
+//! see `tests/common/mod.rs`). Drives the same large
 //! adversarial read battery (exact substrings, mismatch sweeps, indels,
 //! noncolinear concatenations, RC reads, low-complexity, seeded random) and
 //! freezes the three per-read booleans into the `refkmerfilter.txt` golden
@@ -11,11 +11,12 @@
 //! the max-length-read acceptance test (all guarded the C++ shim's fixed
 //! `rcBuf[100001]` buffer, which no longer exists).
 
+#![allow(clippy::too_many_lines)] // test drivers enumerate many cases inline
 mod common;
 
 use common::Golden;
-use unum_core::ref_kmer_filter::{RefKmerFilter, Scratch, is_low_complexity};
 use std::path::{Path, PathBuf};
+use unum_core::ref_kmer_filter::{RefKmerFilter, Scratch, is_low_complexity};
 
 const KMER_LENGTH: usize = 9;
 
@@ -140,9 +141,15 @@ fn refkmerfilter_matches_golden() {
 
     // kir exact substrings + RC.
     assert!(pair.rust.seq_count() >= 7);
-    for &(rec_idx, start, len) in
-        &[(0, 0, 60), (0, 200, 100), (1, 500, 150), (2, 50, 80), (3, 900, 120), (5, 10, 200), (6, 300, 45)]
-    {
+    for &(rec_idx, start, len) in &[
+        (0, 0, 60),
+        (0, 200, 100),
+        (1, 500, 150),
+        (2, 50, 80),
+        (3, 900, 120),
+        (5, 10, 200),
+        (6, 300, 45),
+    ] {
         let (id, seq) = &pair.records[rec_idx];
         let read = &seq[start..start + len];
         record_predicates(&mut golden, &format!("kir_substr_{id}@{start}+{len}"), &pair, read);
@@ -152,7 +159,9 @@ fn refkmerfilter_matches_golden() {
 
     // hla exact substrings.
     assert!(hla_pair.rust.seq_count() >= 12);
-    for &(rec_idx, start, len) in &[(0, 0, 70), (1, 300, 90), (4, 700, 110), (8, 150, 60), (11, 700, 130)] {
+    for &(rec_idx, start, len) in
+        &[(0, 0, 70), (1, 300, 90), (4, 700, 110), (8, 150, 60), (11, 700, 130)]
+    {
         let (id, seq) = &hla_pair.records[rec_idx];
         let read = &seq[start..start + len];
         record_predicates(&mut golden, &format!("hla_substr_{id}@{start}+{len}"), &hla_pair, read);
@@ -174,8 +183,8 @@ fn refkmerfilter_matches_golden() {
     }
 
     // low-complexity reads.
-    record_predicates(&mut golden, "homopolymer_A", &pair, &vec![b'A'; 100]);
-    record_predicates(&mut golden, "homopolymer_T", &pair, &vec![b'T'; 60]);
+    record_predicates(&mut golden, "homopolymer_A", &pair, &[b'A'; 100]);
+    record_predicates(&mut golden, "homopolymer_T", &pair, &[b'T'; 60]);
     record_predicates(
         &mut golden,
         "dinucleotide_AT",
@@ -201,7 +210,12 @@ fn refkmerfilter_matches_golden() {
         let (id, seq) = &pair.records[0];
         record_predicates(&mut golden, &format!("{id}_len5"), &pair, &seq[0..5]);
         record_predicates(&mut golden, &format!("{id}_len_k"), &pair, &seq[50..50 + KMER_LENGTH]);
-        record_predicates(&mut golden, &format!("{id}_len_k+1"), &pair, &seq[50..=50 + KMER_LENGTH]);
+        record_predicates(
+            &mut golden,
+            &format!("{id}_len_k+1"),
+            &pair,
+            &seq[50..=50 + KMER_LENGTH],
+        );
     }
 
     // mismatch sweep kir.
@@ -255,14 +269,20 @@ fn refkmerfilter_matches_golden() {
         assert!(!is_low_complexity(hit_read));
         golden.record("highfreq_hit", u8::from(rust.is_good_candidate(hit_read)).to_string());
         let unrelated = "TGCA".repeat(20).into_bytes();
-        golden.record("highfreq_unrelated", u8::from(rust.is_good_candidate(&unrelated)).to_string());
+        golden
+            .record("highfreq_unrelated", u8::from(rust.is_good_candidate(&unrelated)).to_string());
     }
 
     // boundary length reads.
     {
         let (id, seq) = &pair.records[3];
         for len in [35usize, 40, 44, 45, 46, 50, 60] {
-            record_predicates(&mut golden, &format!("{id}_boundary_len{len}"), &pair, &seq[300..300 + len]);
+            record_predicates(
+                &mut golden,
+                &format!("{id}_boundary_len{len}"),
+                &pair,
+                &seq[300..300 + len],
+            );
         }
     }
 
@@ -295,7 +315,12 @@ fn refkmerfilter_matches_golden() {
         record_predicates(&mut golden, &format!("{id}_rc_mutated"), &pair, &rc_mutated);
         let mut concat = seq[10..90].to_vec();
         concat.extend_from_slice(&seq[600..680]);
-        record_predicates(&mut golden, &format!("{id}_rc_concat"), &pair, &reverse_complement(&concat));
+        record_predicates(
+            &mut golden,
+            &format!("{id}_rc_concat"),
+            &pair,
+            &reverse_complement(&concat),
+        );
         let mut with_one_n = seq[300..400].to_vec();
         with_one_n[50] = b'N';
         record_predicates(&mut golden, &format!("{id}_single_N"), &pair, &with_one_n);
@@ -306,7 +331,12 @@ fn refkmerfilter_matches_golden() {
         record_predicates(&mut golden, &format!("{id}_three_N"), &pair, &with_few_n);
         let short_exact = &seq[500..500 + KMER_LENGTH + 5];
         record_predicates(&mut golden, &format!("{id}_short_exact"), &pair, short_exact);
-        record_predicates(&mut golden, &format!("{id}_short_mutated"), &pair, &mutate_k_positions(short_exact, 2, 777));
+        record_predicates(
+            &mut golden,
+            &format!("{id}_short_mutated"),
+            &pair,
+            &mutate_k_positions(short_exact, 2, 777),
+        );
     }
 
     // large random batch (hla).
@@ -337,7 +367,12 @@ fn refkmerfilter_matches_golden() {
                     mutate_k_positions(base, k, seed.wrapping_mul(97) + 13)
                 }
             };
-            record_predicates(&mut golden, &format!("random_batch_seed{seed}_cat{category}"), &hla_pair, &read);
+            record_predicates(
+                &mut golden,
+                &format!("random_batch_seed{seed}_cat{category}"),
+                &hla_pair,
+                &read,
+            );
         }
     }
 
