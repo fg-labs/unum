@@ -96,13 +96,17 @@ pub struct GeneInterval {
 /// mirroring the header-scan loop `BamExtractor.cpp:557-567`'s `fscanf( fpRef,
 /// "%s %s %d %d %s", geneName, chrom, &start, &end, strand )` (five
 /// whitespace-separated tokens on the header line, PAST the leading `>`) --
-/// the record's SEQUENCE lines are read-but-discarded by this parse (stock's
-/// `fscanf( fpRef, "%s", buffer )` right after, `BamExtractor.cpp:566`, reads
-/// exactly one more whitespace-delimited token -- i.e. ASSUMES each
-/// sequence is on a single unwrapped line, matching every `_coord.fa`
-/// fixture this port has been validated against; a multi-line-wrapped
-/// sequence would desync stock's own `fscanf` loop too, so this is a
-/// faithful, not a lossy, reproduction).
+/// the record's SEQUENCE lines are read-but-discarded by this parse. Stock
+/// reads the sequence with `fscanf( fpRef, "%s", buffer )` (`BamExtractor.cpp:566`)
+/// -- exactly ONE whitespace-delimited token -- i.e. stock ASSUMES each
+/// sequence is on a single unwrapped line and would desync (parse a wrapped
+/// continuation line as the next header) on a multi-line sequence. This parse
+/// is instead LINE-BASED: it accumulates every non-`>` line until the next
+/// header, so it correctly handles multi-line-wrapped sequences that stock
+/// cannot -- a deliberate DIVERGENCE in the safe direction. Every real
+/// `_coord.fa` (machine-emitted by `unum build`) is single-line, so the two
+/// agree byte-for-byte on all real inputs; the divergence only surfaces on
+/// pathological wrapped input, where `unum` is the more robust of the two.
 ///
 /// This function does NOT resolve `chrom` to a `chrId` -- that requires an
 /// open [`Alignments`] (`GetChromIdFromName`), which the caller performs

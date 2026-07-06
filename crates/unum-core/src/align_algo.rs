@@ -516,22 +516,9 @@ pub fn global_alignment(t: &[u8], p: &[u8], band: i32) -> AlignResult {
     e.set(0, 0, 0);
     f.set(0, 0, 0);
 
-    // Mirrors AlignAlgo.hpp:256-266 verbatim, including the row-0 `e`
-    // initialization quirk: `e[0+j] = SCORE_GAPOPEN + i * SCORE_GAPOPEN` reads
-    // the LOOP VARIABLE `i` LEFT OVER from the immediately preceding `for (i
-    // = 1; i <= lenp; ++i)` loop, NOT the current `j`. In C++, a `for` loop's
-    // control variable is NOT scoped to the loop body when declared outside
-    // it (as it is here -- `i`/`j` are declared once, above both loops), so
-    // after that loop exits its condition check fails at `i == lenp + 1`,
-    // leaving `i == lenp + 1` for the second loop to read. So every `e[0][j]`
-    // cell (all `j`) is set to the SAME value, `SCORE_GAPOPEN + (lenp + 1) *
-    // SCORE_GAPOPEN`. This cell is NOT dead: the `mat == 0` traceback reads
-    // `max = e[tagi * bmax + tagj]` unconditionally on entry to that state
-    // (AlignAlgo.hpp:332), including when `tagi == 0` -- and widening the
-    // band (e.g. `lent` much greater than `lenp`) can steer the traceback
-    // into visiting `e` at `tagi == 0` before the loop terminates on `tagj ==
-    // 0` too. It is reproduced exactly (leftover-loop-index value, not the
-    // "intended" `j`-indexed value) per this port's byte-identity mandate.
+    // Boundary rows/columns mirror AlignAlgo.hpp:256-266. The col-0 (`i`) and
+    // row-0 (`j`) gap-open/extend inits below are ordinary Gotoh boundaries,
+    // with ONE subtlety in the row-0 `e` cell -- see `row0_e_sentinel` below.
     for i in 1..=lenp {
         #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         let i_i32 = i as i32;
@@ -539,11 +526,32 @@ pub fn global_alignment(t: &[u8], p: &[u8], band: i32) -> AlignResult {
         f.set(i, 0, SCORE_GAPOPEN + i_i32 * SCORE_GAPOPEN);
         m.set(i, 0, SCORE_GAPOPEN + i_i32 * SCORE_GAPOPEN);
     }
+
+    // Row-0 `e` is an UNREACHABLE gap-state boundary: with zero characters of
+    // `p` consumed you cannot already be extending an `e`-direction gap, so this
+    // cell must act as a -inf sentinel the traceback never enters from row 0.
+    //
+    // T1K reaches that sentinel BY ACCIDENT: `AlignAlgo.hpp:268` initializes
+    // `e[0][j]` with `SCORE_GAPOPEN + i * SCORE_GAPOPEN`, reading the loop
+    // variable `i` LEFT OVER from the preceding `for (i = 1; i <= lenp; ++i)`
+    // loop (`i == lenp + 1`), NOT the column index `j`. The result is a single
+    // large-negative constant for every column -- exactly the sentinel we want.
+    // We keep that EXACT value: it is byte-identical to T1K (the goldens enforce
+    // it) AND functionally correct.
+    //
+    // DO NOT "correct" this to a `j`-indexed value (`SCORE_GAPOPEN + j *
+    // SCORE_GAPOPEN`, the "intended" formula): that makes the impossible state
+    // cheaply reachable and REGRESSES real alignments. Verified 2026-07-06 --
+    // the `j`-indexed form drove `golden_align_algo`'s `length_skew lent>>lenp
+    // band=1` case from the correct score -22 to -63 (a lone match + all-deletes
+    // instead of a grouped local alignment). This cell is live, not dead: the
+    // `mat == 0` traceback reads it at `tagi == 0` (`AlignAlgo.hpp:332`).
+    let row0_e_sentinel = SCORE_GAPOPEN + (lenp_i32 + 1) * SCORE_GAPOPEN;
     for j in 1..=lent {
         #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         let j_i32 = j as i32;
         f.set(0, j, SCORE_GAPOPEN + j_i32 * SCORE_GAPEXTEND);
-        e.set(0, j, SCORE_GAPOPEN + (lenp_i32 + 1) * SCORE_GAPOPEN);
+        e.set(0, j, row0_e_sentinel);
         m.set(0, j, SCORE_GAPOPEN + j_i32 * SCORE_GAPOPEN);
     }
 
