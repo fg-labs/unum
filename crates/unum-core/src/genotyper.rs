@@ -3957,18 +3957,19 @@ impl Genotyper {
     /// return value: `0`, `1`, or `2`, counting how many of rank 0/1 got a
     /// non-empty major-allele name).
     ///
-    /// # The secondary-candidates field only ever shows the LAST `type >= 2`
-    /// group
+    /// # DIVERGENCE from T1K: all secondary groups are retained
     ///
-    /// The C++ resets `secondaryAlleles[0] = '\0'` unconditionally at the
-    /// top of EVERY loop iteration whose `buffer` is `secondaryAlleles`
-    /// (i.e. every `type >= 2` -- `Genotyper.hpp:2133`, `buffer[0] = '\0'`,
-    /// reached regardless of `type`), so each `type >= 2` iteration
-    /// OVERWRITES whatever the previous `type >= 2` iteration wrote. When
-    /// `GetGeneAlleleTypes(gene_idx) > 3` (more than one secondary
-    /// candidate group), only the group from the HIGHEST `type` value
-    /// survives in the final string -- a genuine T1K quirk, not a typo in
-    /// this port; preserved exactly.
+    /// The C++ resets `secondaryAlleles[0] = '\0'` unconditionally at the top
+    /// of EVERY loop iteration whose `buffer` is `secondaryAlleles` (i.e. every
+    /// `type >= 2` -- `Genotyper.hpp:2133`, `buffer[0] = '\0'`, reached
+    /// regardless of `type`), so each `type >= 2` iteration OVERWRITES whatever
+    /// the previous one wrote. When `GetGeneAlleleTypes(gene_idx) > 3` (more
+    /// than one secondary candidate group), T1K keeps only the HIGHEST `type`
+    /// group and its `else // only happens for secondary alleles` `|`-join
+    /// branch is dead code. `unum` instead ACCUMULATES all secondary groups
+    /// (seeding `buffer` from `secondary_alleles` for `type > 1`), activating
+    /// that `|`-join so distinct secondary groups are joined with `|`. See
+    /// `docs/DIVERGENCES.md`.
     ///
     /// # Field formatting
     ///
@@ -4018,7 +4019,13 @@ impl Genotyper {
             // to ';' once `type > 1` and never reset back).
             let sep = if type_ > 1 { ';' } else { '\t' };
             let mut added = false;
-            let mut buffer = String::new(); // Reset every iteration -- see doc comment for the type>=2 quirk.
+            // DIVERGENCE from T1K (see docs/DIVERGENCES.md): for secondary types
+            // (`type > 1`) seed `buffer` from the accumulated `secondary_alleles`
+            // so each secondary group is APPENDED (via the `|`-join below) rather
+            // than overwritten. T1K re-clears the shared `secondaryAlleles`
+            // buffer every iteration (`Genotyper.hpp:2133`), so only the highest
+            // type's group survives and its `|`-join branch is dead code.
+            let mut buffer = if type_ > 1 { secondary_alleles.clone() } else { String::new() };
 
             let mut local_qual: i32 = -1;
             if type_ == 1 && qualities[0] == 0 {
@@ -5624,5 +5631,46 @@ mod tests {
         g.gene_cnt = 1;
         g.selected_alleles = vec![Vec::new()];
         assert_eq!(g.get_gene_allele_types(0), 0);
+    }
+
+    #[test]
+    fn get_allele_description_keeps_all_secondary_groups() {
+        // DIVERGENCE from T1K (see docs/DIVERGENCES.md): T1K re-clears the
+        // shared `secondaryAlleles` buffer on every `type > 1` iteration
+        // (`Genotyper.hpp:2133`), so when a gene has more than one secondary
+        // group only the HIGHEST type's group survives -- and the `|`-join
+        // branch is dead. `unum` accumulates all secondary groups. Here a gene
+        // has four allele types (0,1,2,3) => two secondary groups (type 2 and
+        // type 3); BOTH must appear in the secondary-candidates field.
+        let mut g = Genotyper::new();
+        g.gene_cnt = 1;
+        g.major_allele_cnt = 4;
+        g.major_allele_idx_to_name =
+            ["m0", "m1", "m2", "m3"].iter().map(|s| (*s).to_string()).collect();
+        g.allele_info = (0..4)
+            .map(|i| AlleleInfo {
+                major_allele_idx: i,
+                genotype_quality: 30 + i,
+                abundance: f64::from(i + 1),
+                ..AlleleInfo::default()
+            })
+            .collect();
+        // Allele k is selected at rank/type k, so types 2 and 3 are two
+        // distinct secondary groups (m2 and m3).
+        g.selected_alleles = vec![vec![(0, 0), (1, 1), (2, 2), (3, 3)]];
+
+        let (_a1, _a2, secondary, _ret) = g.get_allele_description(0);
+        assert!(
+            secondary.contains("m2"),
+            "type-2 secondary group must survive, got: {secondary:?}"
+        );
+        assert!(
+            secondary.contains("m3"),
+            "type-3 secondary group must survive, got: {secondary:?}"
+        );
+        assert!(
+            secondary.contains('|'),
+            "distinct secondary groups must be `|`-joined, got: {secondary:?}"
+        );
     }
 }
