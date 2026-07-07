@@ -825,6 +825,12 @@ pub struct AlleleRef {
     /// Initialized to all-zero (`SetSeqExonInfo`'s `posWeight.SetZero`,
     /// `SeqSet.hpp:646`).
     pub pos_weight: Vec<crate::align_algo::PosWeight>,
+    /// `_seqWrapper::separator` -- computed once at load time, identically in
+    /// both `InputRefFa` (`SeqSet.hpp:~896`) and `InputRefSeq` (`SeqSet.hpp:
+    /// ~913`): `[-1, <index of each 'N' byte>, seq_len]`, in that
+    /// order. Consumed by [`is_separator_in_range`], which ports
+    /// `SeqSet::IsSeparatorInRange` (`SeqSet.hpp:487-498`).
+    pub separator: Vec<i32>,
 }
 
 impl AlleleRef {
@@ -840,7 +846,13 @@ impl AlleleRef {
             Some(c) => parse_exon_comment(c, len),
             None => vec![(0, i32::try_from(len).unwrap_or(0) - 1)],
         };
-        Self { consensus, exons, pos_weight: vec![crate::align_algo::PosWeight::default(); len] }
+        let separator = compute_separator(&consensus);
+        Self {
+            consensus,
+            exons,
+            pos_weight: vec![crate::align_algo::PosWeight::default(); len],
+            separator,
+        }
     }
 
     /// `true` if position `pos` (0-based) falls within any parsed exon
@@ -849,6 +861,51 @@ impl AlleleRef {
     fn is_exon(&self, pos: i32) -> bool {
         self.exons.iter().any(|&(s, e)| pos >= s && pos <= e)
     }
+}
+
+/// Ported from the `separator`-building loop shared, IDENTICALLY, by
+/// `SeqSet::InputRefFa` and `SeqSet::InputRefSeq` (`SeqSet.hpp:~896` and
+/// `~913` respectively):
+/// ```c
+/// sw.separator.push_back(-1) ;
+/// for (i = 0 ; sw.consensus[i] ; ++i)
+///     if (sw.consensus[i] == 'N')
+///         sw.separator.push_back(i) ;
+/// sw.separator.push_back(i) ;   // i == seqLen here (loop exits at the NUL)
+/// ```
+/// i.e. `[-1, <index of each 'N' byte, in ascending order>, seq_len]`.
+#[must_use]
+pub fn compute_separator(consensus: &[u8]) -> Vec<i32> {
+    // No pre-sized capacity: a `.filter().count()` bytecount pass just to
+    // size this small, once-per-allele Vec is not worth the extra full scan
+    // clippy's `naive_bytecount` lint is really guarding against (that lint
+    // targets bytecount used as an END in itself, not an allocation hint).
+    let mut separator = Vec::new();
+    separator.push(-1);
+    for (i, &b) in consensus.iter().enumerate() {
+        if b == b'N' {
+            separator.push(i32::try_from(i).unwrap_or(i32::MAX));
+        }
+    }
+    separator.push(i32::try_from(consensus.len()).unwrap_or(i32::MAX));
+    separator
+}
+
+/// Ported from `SeqSet::IsSeparatorInRange(int s, int e, int seqIdx)`
+/// (`SeqSet.hpp:487-498`): `true` iff any entry of `separator` (the
+/// `seqIdx`-th allele's [`AlleleRef::separator`], as built by
+/// [`compute_separator`]) falls within the inclusive range `[s, e]`.
+///
+/// ```c
+/// for each p in seqs[seqIdx].separator: if (p >= s && p <= e) return 1;
+/// return 0;
+/// ```
+/// A plain linear scan matches the C++ exactly; `separator` is tiny (two
+/// sentinels plus one entry per `N` byte -- including any at the sequence
+/// endpoints) for every allele this port targets.
+#[must_use]
+pub fn is_separator_in_range(separator: &[i32], s: i32, e: i32) -> bool {
+    separator.iter().any(|&p| p >= s && p <= e)
 }
 
 /// Ported from `InputRefSeq`'s comment-parsing loop (`SeqSet.hpp:936-961`):
@@ -920,19 +977,27 @@ pub fn parse_exon_comment(comment: &str, seq_len: usize) -> Vec<(i32, i32)> {
 /// unreachable here since `allele_refs` is non-empty by construction in every
 /// caller).
 ///
-/// # Separators are always absent in this port's fixtures
+/// # `AssignRead`'s OWN two `IsSeparatorInRange` calls (fixes #40)
 ///
-/// `IsSeparatorInRange` (`SeqSet.hpp:2163-2169`) always returns `false` for
-/// every reference this port targets: `kir_rna_seq.fa`'s per-allele
-/// sequences contain no interior `N` runs (the only source of a non-trivial
-/// `separator` list, `SeqSet.hpp:896-900`), so `seqs[i].separator` is always
-/// exactly `[-1, len]` and no `(s, e)` range with `s, e` inside `[0, len)`
-/// can ever contain one of those two sentinel values. This port therefore
-/// omits the `IsSeparatorInRange` calls (both the per-overlap skip and the
-/// `needClip` computation, which then feeds `onlyConsiderClip`'s SIMILARITY
-/// exception at `< 0.95` -- with `needClip` always `false`, that exception
-/// is dead too) rather than threading a separator predicate through for a
-/// condition that is provably always `false` for this port's inputs.
+/// `AssignRead` (`SeqSet.hpp:2163-2169`) calls `IsSeparatorInRange` twice,
+/// independently of [`Genotyper::set_read_assignments`]'s
+/// `IsFragmentSpanSeparator` filter (see [`is_separator_in_range`]'s doc
+/// comment, which #39 fixed): a per-overlap skip (`continue` when
+/// `[seqStart, seqEnd]` spans a separator, `SeqSet.hpp:2163-2164`) and a
+/// `needClip` computation (`SeqSet.hpp:2166-2169`) that feeds
+/// `onlyConsiderClip`'s `similarity < 0.95` escape hatch
+/// (`SeqSet.hpp:2170-2172`). This function ports BOTH, inline in the loop
+/// below. For `kir_rna_seq.fa` (no interior `N` runs, so `separator` is
+/// always exactly `[-1, len]`) both are a no-op, matching the oracle exactly.
+/// For references with interior `N`s (e.g. the HLA DNA reference #39 was
+/// diagnosed against) neither is a no-op: `similarity` for overlaps reaching
+/// this loop is NOT always `0.0` (a real, `matchCnt`-derived ratio survives
+/// `GetOverlapsFromRead`'s own `>= refSeqSimilarity` filter, `SeqSet.hpp:
+/// 1836-1845,1896`, typically landing in `[0.8, 1.0]` for ref alleles since
+/// `radius = 10` by default means per-overlap indels don't force it to `0`
+/// either, `SeqSet.hpp:1754,1763`), so `needClip`'s `similarity < 0.95`
+/// escape hatch is a genuinely reachable condition, not dead code -- both
+/// calls are ported for fidelity.
 ///
 /// # Panics
 ///
@@ -941,6 +1006,7 @@ pub fn parse_exon_comment(comment: &str, seq_len: usize) -> Vec<(i32, i32)> {
 /// [`crate::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read`] against
 /// the same reference set `allele_refs` was built from).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn assign_read(
     read: &[u8],
     overlaps: &[overlap::Overlap],
@@ -970,14 +1036,26 @@ pub fn assign_read(
     let mut only_consider_clip = false;
     let mut good_match_cnt: i32 = -1;
 
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let len = r.len() as i32;
     for o in &sorted_overlaps {
-        if only_consider_clip && o.match_cnt < good_match_cnt {
-            // `needClip` is always false in this port's fixtures (see doc
-            // comment), so the `(!needClip || similarity < 0.95)` escape
-            // hatch never fires -- this is an unconditional `continue` here.
+        let allele_idx = usize::try_from(o.seq_idx).expect("seq_idx is non-negative");
+        // SeqSet.hpp:2163-2172 (fixes #40): see this function's doc comment
+        // ("AssignRead's OWN two IsSeparatorInRange calls") for why both
+        // calls are ported and why `needClip` is NOT dead code here.
+        let separator = &allele_refs[allele_idx].separator;
+        if is_separator_in_range(separator, o.seq_start, o.seq_end) {
             continue;
         }
-        let allele_idx = usize::try_from(o.seq_idx).expect("seq_idx is non-negative");
+        let need_clip = is_separator_in_range(
+            separator,
+            o.seq_start - o.read_start,
+            o.seq_end + (len - o.read_end - 1),
+        );
+        if only_consider_clip && o.match_cnt < good_match_cnt && (!need_clip || o.similarity < 0.95)
+        {
+            continue;
+        }
         let consensus = &allele_refs[allele_idx].consensus;
         if let Some(extended) = extend_overlap(r, consensus, o, ref_seq_similarity) {
             extended_overlaps.push(extended);
@@ -1249,11 +1327,13 @@ pub fn is_overlap_intersect(a: &ExtendedOverlap, b: &ExtendedOverlap) -> bool {
 /// missing because the reference allele sequence is too short to contain it
 /// (i.e. the implied mate position falls off the end of `consensus_len`).
 ///
-/// `separator_in_range` always returns `false` for this port's fixtures (see
-/// [`assign_read`]'s doc comment for why); accepted as a parameter anyway
-/// (rather than hardcoded away) to keep this function's signature
-/// independent of that fixture-specific fact, matching
-/// [`Genotyper::set_read_assignments`]'s own `separator_lookup` pattern.
+/// `separator_in_range` mirrors `IsSeparatorInRange` (see
+/// [`is_separator_in_range`]) -- callers pass a closure over each allele's
+/// [`AlleleRef::separator`] (built by [`compute_separator`]), matching
+/// [`Genotyper::set_read_assignments`]'s own `separator_lookup` pattern. For
+/// `kir_rna_seq.fa` (no interior `N`s) `separator` is always exactly
+/// `[-1, len]`, so this is a no-op there; for references with interior `N`s
+/// it is live.
 ///
 /// # Panics
 ///
@@ -1341,9 +1421,9 @@ struct Assembled {
 /// `consensus_len_of(seq_idx)` mirrors `refSet.GetSeqConsensusLen`/
 /// `seqs[seqIdx].consensusLen` (needed by [`truncated_mate_pair_overlap`]'s
 /// filter, `SeqSet.hpp:2580-2653`); `separator_in_range` mirrors
-/// `IsSeparatorInRange` (see [`assign_read`]'s doc comment: always `false`
-/// for this port's fixtures, but threaded through rather than hardcoded
-/// away).
+/// `IsSeparatorInRange` (see [`is_separator_in_range`]) and is live for
+/// references with interior `N`s (a no-op for `kir_rna_seq.fa`, which has
+/// none).
 ///
 /// # Panics
 ///
@@ -1630,12 +1710,18 @@ fn read_assignment_to_fragment_assignment_impl(
             if filter {
                 break;
             }
+            // SeqSet.hpp:2601-2609: the "unused" guard (`seqIdxToOverlapIdx.find
+            // == end`) binds ONLY to the `matchCnt ==` branch, NOT the
+            // `matchCnt >` branch -- an overlap that strictly dominates on
+            // matchCnt triggers this filter even if it is already assigned.
+            // (This crate previously gated the whole `dominates` on `unused`,
+            // wrongly sparing already-assigned dominating overlaps and
+            // over-keeping fragments -- e.g. HLA-U U*01:03 over-assignment.)
             let dominates = o.match_cnt > rep_overlap1.match_cnt
                 || (o.match_cnt == rep_overlap1.match_cnt
-                    && o.similarity > rep_overlap1.similarity);
-            let unused = !seq_idx_to_assign_idx.contains_key(&o.seq_idx);
+                    && o.similarity > rep_overlap1.similarity
+                    && !seq_idx_to_assign_idx.contains_key(&o.seq_idx));
             if dominates
-                && unused
                 && (truncated_mate_pair_overlap(
                     o,
                     &rep_overlap1,
@@ -1655,12 +1741,14 @@ fn read_assignment_to_fragment_assignment_impl(
                     if filter {
                         break;
                     }
+                    // SeqSet.hpp:2627-2635: `unused` guard binds ONLY to the
+                    // `matchCnt ==` branch, not the `matchCnt >` branch (see the
+                    // "better read 1" block above for the full rationale).
                     let dominates = o.match_cnt > rep_overlap2.match_cnt
                         || (o.match_cnt == rep_overlap2.match_cnt
-                            && o.similarity > rep_overlap2.similarity);
-                    let unused = !seq_idx_to_assign_idx.contains_key(&o.seq_idx);
+                            && o.similarity > rep_overlap2.similarity
+                            && !seq_idx_to_assign_idx.contains_key(&o.seq_idx));
                     if dominates
-                        && unused
                         && (truncated_mate_pair_overlap(
                             o,
                             &rep_overlap2,
@@ -2152,10 +2240,14 @@ impl Genotyper {
     ///
     /// `separator_lookup(seq_idx, seq_start, seq_end)` mirrors
     /// `SeqSet::IsFragmentSpanSeparator`/`IsSeparatorInRange`
-    /// (`SeqSet.hpp:2305-2308`, `487-498`): a caller-supplied predicate so
-    /// this port stays independent of a full `SeqSet::_seqWrapper::separator`
-    /// port; see [`Genotyper::init_allele_info`]'s doc comment for the same
-    /// "caller supplies the reference-derived input" pattern.
+    /// (`SeqSet.hpp:2305-2308`, `487-498`): note the argument order here is
+    /// `(seq_idx, s, e)` (matching `IsFragmentSpanSeparator`'s
+    /// `IsSeparatorInRange(assign.seqStart, assign.seqEnd, assign.seqIdx)`
+    /// call, just reordered to put `seq_idx` first) -- callers should build
+    /// this closure from each allele's [`AlleleRef::separator`] (via
+    /// [`is_separator_in_range`]), matching
+    /// [`Genotyper::init_allele_info`]'s "caller supplies the
+    /// reference-derived input" pattern.
     ///
     /// # Panics
     ///
@@ -5407,6 +5499,46 @@ mod tests {
             |_, _, _| false,
         );
         assert!(assign.is_empty());
+    }
+
+    #[test]
+    fn read_assignment_to_fragment_assignment_dominating_matchcnt_filters_even_if_assigned() {
+        // Regression (HLA-U U*01:03 over-assignment): SeqSet.hpp:2601-2609's
+        // "better read 1" truncated-mate-pair filter applies the "unused"
+        // (not-already-assigned) guard ONLY to the `matchCnt ==` branch, NOT
+        // the `matchCnt >` branch -- an overlap that strictly dominates the
+        // representative on matchCnt triggers the filter even when it is
+        // already assigned. A prior port wrote `dominates && unused` (gating
+        // the `>` branch on `unused` too), so an already-assigned dominating
+        // overlap failed to fire the filter and the fragment was over-kept.
+        //
+        // allele 0: representative mate pair, fragment matchCnt = 42+42 = 84.
+        // allele 1: its mate-1 overlap (matchCnt 62) STRICTLY DOMINATES allele
+        //   0's mate-1 (42); allele 1 also forms its own (weaker, total 74)
+        //   fragment so its seq_idx IS in the assign map ("used"); and its
+        //   mate-1 projects beyond the small consensus_len (100) so it is
+        //   "truncated". The correct port fires the filter and clears assign.
+        let overlaps1 = vec![
+            extended(0, 0, 20, 0, 20, 1), // allele 0 mate1, mc=42 (representative)
+            extended(1, 0, 30, 0, 30, 1), // allele 1 mate1, mc=62 > 42, truncated
+        ];
+        let overlaps2 = vec![
+            extended(0, 0, 20, 100, 120, -1), // allele 0 mate2, mc=42
+            extended(1, 0, 5, 200, 205, -1),  // allele 1 mate2, mc=12 -> frag1 total 74 < 84
+        ];
+        let assign = read_assignment_to_fragment_assignment(
+            &overlaps1,
+            Some(&overlaps2),
+            false,
+            3,
+            |_| 100, // small consensus_len => allele 1's mate1 is truncated
+            |_, _, _| false,
+        );
+        assert!(
+            assign.is_empty(),
+            "an already-assigned overlap that strictly dominates the representative on \
+             matchCnt must trigger the truncated-mate-pair filter (SeqSet.hpp:2601)"
+        );
     }
 
     // --- select_alleles_for_genes / get_allele_description (small
