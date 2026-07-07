@@ -130,6 +130,13 @@ const SCORE_INDEL: i32 = -4;
 /// 5;` (`AlignAlgo.hpp:106-107`).
 pub const DEFAULT_BAND: i32 = 5;
 
+/// Maximum mismatch count for which [`global_alignment`]'s equal-length
+/// diagonal fast path is provably the exact DP optimum (see that function's
+/// doc comment for the score arithmetic: `SCORE_MATCH - SCORE_MISMATCH = 4`
+/// gain per rescued mismatch vs. `2 * (SCORE_GAPOPEN + SCORE_GAPEXTEND) =
+/// -10` for the cheapest gap pair, so `4 * 2 - 10 = -2 < 0` at 2 mismatches).
+const DIAGONAL_FAST_PATH_MAX_MISMATCHES: u32 = 2;
+
 /// Per-position base counts at one reference position, ported from
 /// `struct _posWeight` (`AlignAlgo.hpp:21-44`).
 ///
@@ -462,6 +469,32 @@ pub fn global_alignment_pos_weight(t_weights: &[PosWeight], p: &[u8]) -> AlignRe
     AlignResult { score: ret, align }
 }
 
+/// Whether [`global_alignment`]'s equal-length diagonal fast path applies to
+/// `t`/`p`: both the same length AND differing by at most
+/// [`DIAGONAL_FAST_PATH_MAX_MISMATCHES`] mismatches (the exact condition under
+/// which the no-indel diagonal is provably the unique DP optimum -- see
+/// [`global_alignment`]'s doc comment). Extracted so the `<= 2` cutoff is
+/// directly unit-testable at its boundary: the fast path and the full DP are
+/// byte-identical for every equal-length input at this mismatch count, so the
+/// contract cannot otherwise be observed through `global_alignment`'s output
+/// alone (a loosened cutoff would still produce identical results because the
+/// bound is conservative, not tight).
+fn diagonal_fast_path_applies(t: &[u8], p: &[u8]) -> bool {
+    if t.len() != p.len() {
+        return false;
+    }
+    let mut mismatches = 0u32;
+    for k in 0..t.len() {
+        if !chars_match(t[k], p[k]) {
+            mismatches += 1;
+            if mismatches > DIAGONAL_FAST_PATH_MAX_MISMATCHES {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Ported from `AlignAlgo::GlobalAlignment` (`AlignAlgo.hpp:215-421`):
 /// banded, affine-gap (`SCORE_GAPOPEN` + `SCORE_GAPEXTEND` per run) global
 /// alignment of two plain sequences. `band` mirrors the C++ `int band = 5`
@@ -474,6 +507,17 @@ pub fn global_alignment_pos_weight(t_weights: &[PosWeight], p: &[u8]) -> AlignRe
 /// tracked in lockstep, banded to `[i - left_band, i + right_band]` per row
 /// (asymmetric when `lent != lenp`, widened on whichever side accommodates
 /// the length difference -- see the C++ comments this mirrors verbatim).
+///
+/// # Diagonal fast path (perf, not a behavior change)
+///
+/// When `t.len() == p.len()` and the two sequences differ by at most 2
+/// mismatches, the no-indel diagonal alignment is returned directly,
+/// bypassing the DP below. This is provably byte-identical to running the
+/// full DP -- not merely a good approximation -- because for equal-length
+/// sequences any alignment using a gap needs at least one insertion AND one
+/// deletion, so it is always strictly worse than the diagonal when there are
+/// at most 2 mismatches to "fix" (see the inline comment at the shortcut for
+/// the score arithmetic). Folds fork commit `b11027d`.
 ///
 /// # Panics
 ///
@@ -494,6 +538,38 @@ pub fn global_alignment(t: &[u8], p: &[u8], band: i32) -> AlignResult {
         } else {
             AlignResult { score: SCORE_MISMATCH, align: vec![EDIT_MISMATCH] }
         };
+    }
+
+    // Diagonal fast path (folds fork commit `b11027d`): for equal-length
+    // sequences with at most 2 mismatches, the pure diagonal (no-indel)
+    // alignment is PROVABLY the unique optimum, so it can be returned
+    // directly without running the banded affine-gap DP below.
+    //
+    // Why it's byte-identical (not just "as good"): any gapped global
+    // alignment of two equal-length sequences needs at least one insertion
+    // AND at least one deletion (to stay equal-length end-to-end), costing
+    // at least `2 * (SCORE_GAPOPEN + SCORE_GAPEXTEND)` = `2 * (-4 + -1)` =
+    // `-10`. Each mismatch a gap pair could possibly rescue (turn into a
+    // match) is worth at most `SCORE_MATCH - SCORE_MISMATCH` = `2 - (-2)` =
+    // `+4`. With at most 2 mismatches, the best possible gain from adding a
+    // gap pair is `4 * 2 - 10 = -2 < 0`, so the diagonal STRICTLY beats
+    // every gapped alternative -- there is no tie for the DP to break
+    // differently. The DP would therefore compute the exact same score and
+    // the exact same all-`EDIT_MATCH`/`EDIT_MISMATCH` traceback, so skipping
+    // it changes nothing observable.
+    if diagonal_fast_path_applies(t, p) {
+        let mut align = Vec::with_capacity(lent);
+        let mut score: i32 = 0;
+        for k in 0..lent {
+            if chars_match(t[k], p[k]) {
+                align.push(EDIT_MATCH);
+                score += SCORE_MATCH;
+            } else {
+                align.push(EDIT_MISMATCH);
+                score += SCORE_MISMATCH;
+            }
+        }
+        return AlignResult { score, align };
     }
 
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
@@ -839,6 +915,121 @@ mod tests {
         let p_consumed = r.align.iter().filter(|&&a| a != EDIT_DELETE).count();
         assert_eq!(t_consumed, t.len());
         assert_eq!(p_consumed, p.len());
+    }
+
+    // ---- global_alignment: diagonal fast path vs full DP (regression) -----
+    //
+    // These assert the fast-path (0/1/2 mismatches, equal length) returns
+    // exactly the hand-computed diagonal score/align -- the same values the
+    // full DP is required to produce per the byte-identity proof on
+    // `global_alignment`'s doc comment. A 3-mismatch case is included to
+    // prove the shortcut correctly declines (falls through to the DP) and
+    // that the DP path still returns the correct result independently.
+
+    #[test]
+    fn global_alignment_fast_path_zero_mismatches() {
+        let t = b"ACGTACGTACGT";
+        let p = b"ACGTACGTACGT";
+        let r = global_alignment(t, p, DEFAULT_BAND);
+        assert_eq!(r.score, 12 * SCORE_MATCH);
+        assert_eq!(r.align, vec![EDIT_MATCH; 12]);
+    }
+
+    #[test]
+    fn global_alignment_fast_path_one_mismatch() {
+        let t = b"ACGTACGTACGT";
+        let p = b"ACCTACGTACGT"; // mismatch at position 2
+        let r = global_alignment(t, p, DEFAULT_BAND);
+        assert_eq!(r.score, 11 * SCORE_MATCH + SCORE_MISMATCH);
+        let mut expected = vec![EDIT_MATCH; 12];
+        expected[2] = EDIT_MISMATCH;
+        assert_eq!(r.align, expected);
+    }
+
+    #[test]
+    fn global_alignment_fast_path_two_mismatches() {
+        let t = b"ACGTACGTACGT";
+        let p = b"ACCTACCTACGT"; // mismatches at positions 2, 6
+        let r = global_alignment(t, p, DEFAULT_BAND);
+        assert_eq!(r.score, 10 * SCORE_MATCH + 2 * SCORE_MISMATCH);
+        let mut expected = vec![EDIT_MATCH; 12];
+        expected[2] = EDIT_MISMATCH;
+        expected[6] = EDIT_MISMATCH;
+        assert_eq!(r.align, expected);
+    }
+
+    #[test]
+    fn global_alignment_fast_path_two_mismatches_with_n_wildcard() {
+        // `N` on either side is a wildcard match (chars_match), so it must
+        // NOT count toward the mismatch tally, and must score as a match.
+        let t = b"ACGTACGTACGT";
+        let p = b"ACCTACNTACGT"; // real mismatch at 2, N-wildcard "match" at 6
+        let r = global_alignment(t, p, DEFAULT_BAND);
+        assert_eq!(r.score, 11 * SCORE_MATCH + SCORE_MISMATCH);
+        let mut expected = vec![EDIT_MATCH; 12];
+        expected[2] = EDIT_MISMATCH;
+        assert_eq!(r.align, expected);
+
+        // Two `N`-wildcard positions (one in `t`, one in `p`, free matches)
+        // PLUS two real mismatches: still only 2 scoring mismatches, so the
+        // fast path must still trigger (4 differing positions total, but
+        // only 2 count toward the `<= 2` mismatch tally).
+        //   t2: A C N T A C G T A C C T
+        //   p2: A C C T A C N T A A A T
+        //       .  .  N  .  .  .  N  .  .  X  X  .   (N = wildcard match, X = real mismatch)
+        let t2 = b"ACNTACGTACCT";
+        let p2 = b"ACCTACNTAAAT";
+        let r2 = global_alignment(t2, p2, DEFAULT_BAND);
+        assert_eq!(r2.score, 10 * SCORE_MATCH + 2 * SCORE_MISMATCH);
+        let mut expected2 = vec![EDIT_MATCH; 12];
+        expected2[9] = EDIT_MISMATCH;
+        expected2[10] = EDIT_MISMATCH;
+        assert_eq!(r2.align, expected2);
+    }
+
+    #[test]
+    fn global_alignment_three_mismatches_falls_through_to_dp() {
+        // 3 mismatches (scattered, non-adjacent) is one past the fast
+        // path's `<= 2` cutoff, so this must fall through to the full banded
+        // DP below. Verified independently (see PR description / commit
+        // message) that the DP still resolves this to the pure diagonal --
+        // i.e. the fast path's `<= 2` threshold is conservative, not tight,
+        // but this test locks in that the DP path alone (fast path
+        // deliberately not taken) still returns the correct score/align.
+        let t = b"ACGTACGTACGT";
+        let p = b"ACCTACCTACCT"; // mismatches at positions 2, 6, 10
+        let r = global_alignment(t, p, DEFAULT_BAND);
+        assert_eq!(r.score, 9 * SCORE_MATCH + 3 * SCORE_MISMATCH);
+        let mut expected = vec![EDIT_MATCH; 12];
+        expected[2] = EDIT_MISMATCH;
+        expected[6] = EDIT_MISMATCH;
+        expected[10] = EDIT_MISMATCH;
+        assert_eq!(r.align, expected);
+    }
+
+    #[test]
+    fn diagonal_fast_path_cutoff_is_locked_at_two_mismatches() {
+        // The `<= 2` cutoff cannot be observed through `global_alignment`'s
+        // OUTPUT (the fast path and full DP are byte-identical for every
+        // equal-length input at this many mismatches -- the bound is
+        // conservative, so a loosened cutoff would still return the same
+        // score/traceback). This test locks the literal contract by asserting
+        // the eligibility predicate directly at its boundary.
+
+        // Eligible: equal length, 0/1/2 mismatches.
+        assert!(diagonal_fast_path_applies(b"ACGT", b"ACGT")); // 0 mismatches
+        assert!(diagonal_fast_path_applies(b"ACGT", b"AGGT")); // 1 mismatch
+        assert!(diagonal_fast_path_applies(b"ACGT", b"AGGA")); // 2 mismatches
+
+        // NOT eligible: 3 mismatches is one past the cutoff -- must fall
+        // through to the DP. (Same input as
+        // `global_alignment_three_mismatches_falls_through_to_dp`.)
+        assert!(!diagonal_fast_path_applies(b"ACGTACGTACGT", b"ACCTACCTACCT")); // 3 mismatches
+
+        // NOT eligible: unequal length never takes the fast path, regardless
+        // of mismatch count.
+        assert!(!diagonal_fast_path_applies(b"ACGT", b"ACG"));
+        assert!(!diagonal_fast_path_applies(b"ACG", b"ACGT"));
     }
 
     // ---- global_alignment_pos_weight: hand-computed cases -----------------
