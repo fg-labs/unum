@@ -158,6 +158,67 @@ impl PosWeight {
     }
 }
 
+/// Interior-mutable variant of [`PosWeight`] used for the SHARED per-allele
+/// base-coverage counters in `AlleleRef::pos_weight`, so the base-coverage
+/// marking step of `assign_read` can run across `rayon` workers in parallel
+/// without a data race and WITHOUT per-thread copies of the (RSS-dominating)
+/// coverage structures.
+///
+/// The only shared mutation `assign_read` performs is `count[code] += weight`
+/// (an integer add). Integer addition is associative and commutative, so the
+/// FINAL sum after all workers join is independent of the order the adds land
+/// -- `fetch_add(_, Relaxed)` therefore yields byte-identical results to the
+/// sequential `+=` loop while `Relaxed` avoids any unnecessary fences (we only
+/// require the exact total once all threads have joined; no add ever depends
+/// on the value another add produced, and no code reads `count` mid-pass, so
+/// no `Acquire`/`Release` ordering is needed). Each `AtomicI32` is the same
+/// size as an `i32`, so switching to this type does not grow peak RSS.
+///
+/// Reads (`sum`, `count`) are only ever performed AFTER the parallel
+/// assignment pass has fully joined (`get_seq_missing_base_coverage`,
+/// `exon_base_coverage`), where `Relaxed` loads observe every prior
+/// `fetch_add`.
+#[derive(Debug, Default)]
+pub struct AtomicPosWeight {
+    /// Per-base observed counts, indexed by `nucToNum['A'..'T']` (A=0, C=1,
+    /// G=2, T=3) -- the atomic counterpart of [`PosWeight::count`].
+    pub count: [std::sync::atomic::AtomicI32; 4],
+}
+
+impl AtomicPosWeight {
+    /// Atomically adds `weight` to the `code`-th base count (mirrors
+    /// `count[code] += weight`). `Relaxed` is sufficient -- see the type-level
+    /// doc comment.
+    pub fn add(&self, code: usize, weight: i32) {
+        self.count[code].fetch_add(weight, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Loads the `code`-th base count. `Relaxed` is sufficient; only ever
+    /// called after the parallel pass has joined.
+    #[must_use]
+    pub fn get(&self, code: usize) -> i32 {
+        self.count[code].load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Clone for AtomicPosWeight {
+    /// A fresh, independent copy of the current counts (loads each atomic with
+    /// `Relaxed`). Only used off the hot path -- `AlleleRef::pos_weight` is
+    /// built once and shared by reference during assignment, never cloned per
+    /// read.
+    fn clone(&self) -> Self {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        Self {
+            count: [
+                AtomicI32::new(self.count[0].load(Ordering::Relaxed)),
+                AtomicI32::new(self.count[1].load(Ordering::Relaxed)),
+                AtomicI32::new(self.count[2].load(Ordering::Relaxed)),
+                AtomicI32::new(self.count[3].load(Ordering::Relaxed)),
+            ],
+        }
+    }
+}
+
 /// Maps `A`/`C`/`G`/`T` to their `nucToNum` index (0-3), matching the table
 /// defined in `Genotyper.cpp:37-40` (the binary that actually links
 /// `SeqSet`/`AlignAlgo`): every letter other than `A`/`C`/`G`/`T` maps to
@@ -238,6 +299,70 @@ fn chars_match(t: u8, p: u8) -> bool {
 pub struct AlignResult {
     pub score: i32,
     pub align: Vec<i8>,
+}
+
+/// Per-thread memoization cache for the DP alignment path of
+/// [`global_alignment`] (folds fork commit `a35ed72`).
+///
+/// # Why memoization is a large, byte-identical win here
+///
+/// During genotyping a read is aligned against ~212 highly similar candidate
+/// HLA alleles, and there are tens of thousands of near-identical alleles in
+/// the reference. The fork measured ~114x redundancy: 273.8M `GlobalAlignment`
+/// calls resolved to only ~2.4M **distinct** `(t, p)` pairs. Because the DP is
+/// a pure, deterministic function of `(t, p)` (same inputs => same score AND
+/// same traceback `align[]`), returning a cached result for a repeated
+/// `(t, p)` is *byte-identical* to recomputing it -- the exact property this
+/// port's FFI differentials assert.
+///
+/// # Reused key buffer (the lesson from the matrix-reuse regression)
+///
+/// [`dp_key`] is a single `Vec<u8>` reused across every call
+/// (`clear()` + rebuild), NOT allocated per call -- so a cache HIT costs one
+/// hash of borrowed bytes and zero heap allocation. Only a cache MISS
+/// allocates (the owned key to insert + the stored `align` copy), and misses
+/// are ~1/114 of calls, so that allocation no longer dominates.
+///
+/// Construct one per worker thread (inside the per-rayon-worker [`Scratch`]),
+/// which is the lock-free thread-local equivalent of the fork's
+/// `thread_local unordered_map`.
+///
+/// [`Scratch`]: crate::ref_kmer_filter::Scratch
+/// [`dp_key`]: DpCache::dp_key
+#[derive(Debug, Default, Clone)]
+pub struct DpCache {
+    /// `(lent, lenp, t, p)`-keyed cache of `(score, align)` DP results. The key
+    /// frames both lengths and both full sequences so two different `(t, p)`
+    /// inputs can never alias to the same key (see [`DpCache::build_key`]).
+    cache: std::collections::HashMap<Vec<u8>, (i32, Vec<i8>)>,
+    /// Reused scratch buffer for the lookup key; cleared and rebuilt each call
+    /// so a cache hit performs no heap allocation.
+    dp_key: Vec<u8>,
+}
+
+impl DpCache {
+    /// Create an empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Rebuild [`Self::dp_key`] in place for the pair `(t, p)`.
+    ///
+    /// Layout: `lent` (8 bytes LE) `lenp` (8 bytes LE) `t[..]` `0xFF` `p[..]`.
+    /// Including both explicit lengths AND a `0xFF` separator between the two
+    /// sequences guarantees the byte string uniquely determines `(t, p)`:
+    /// `t` and `p` are both plain uppercase nucleotide/`N` bytes (never `0xFF`),
+    /// and the leading lengths pin the split even if `0xFF` ever appeared, so
+    /// no two distinct `(t, p)` pairs can collide onto one key.
+    fn build_key(&mut self, t: &[u8], p: &[u8]) {
+        self.dp_key.clear();
+        self.dp_key.extend_from_slice(&(t.len() as u64).to_le_bytes());
+        self.dp_key.extend_from_slice(&(p.len() as u64).to_le_bytes());
+        self.dp_key.extend_from_slice(t);
+        self.dp_key.push(0xFF);
+        self.dp_key.extend_from_slice(p);
+    }
 }
 
 /// 2D DP matrix stored as a flat `Vec<i32>`, row-major with `bmax = lent + 1`
@@ -526,6 +651,32 @@ fn diagonal_fast_path_applies(t: &[u8], p: &[u8]) -> bool {
 /// [`DEFAULT_BAND`]).
 #[must_use]
 pub fn global_alignment(t: &[u8], p: &[u8], band: i32) -> AlignResult {
+    global_alignment_impl(t, p, band, None)
+}
+
+/// [`global_alignment`] variant that memoizes the DP path through a per-thread
+/// [`DpCache`]. The cheap early-exits (empty/single-base) and the diagonal
+/// fast path run first (never cached -- they are already O(len) with no
+/// allocation churn); only the expensive banded affine-gap DP is looked up in,
+/// and stored to, `cache`. Byte-identical to [`global_alignment`] because the
+/// DP is a pure function of `(t, p)` -- a cache hit returns the exact same
+/// `(score, align)` a recompute would. Folds fork commit `a35ed72`.
+#[must_use]
+pub fn global_alignment_cached(t: &[u8], p: &[u8], band: i32, cache: &mut DpCache) -> AlignResult {
+    global_alignment_impl(t, p, band, Some(cache))
+}
+
+/// Shared implementation for [`global_alignment`] (no cache) and
+/// [`global_alignment_cached`] (per-thread memoized DP path). See those
+/// functions' docs.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+fn global_alignment_impl(
+    t: &[u8],
+    p: &[u8],
+    band: i32,
+    mut cache: Option<&mut DpCache>,
+) -> AlignResult {
     let lent = t.len();
     let lenp = p.len();
 
@@ -571,6 +722,36 @@ pub fn global_alignment(t: &[u8], p: &[u8], band: i32) -> AlignResult {
         }
         return AlignResult { score, align };
     }
+
+    // DP memoization (folds fork commit `a35ed72`): AFTER the diagonal fast
+    // path, BEFORE allocating the DP matrices. A read is aligned against ~212
+    // highly similar candidate alleles, so the same `(t, p)` recurs ~114x on
+    // average; caching each distinct DP once is a pure, byte-identical win
+    // (the DP is a deterministic function of `(t, p)`). The key buffer is
+    // reused (no per-call allocation on a hit); only a miss allocates.
+    let Some(cache) = cache.as_mut() else {
+        return global_alignment_dp(t, p, band);
+    };
+    cache.build_key(t, p);
+    if let Some((score, align)) = cache.cache.get(&cache.dp_key) {
+        return AlignResult { score: *score, align: align.clone() };
+    }
+
+    // Cache miss: run the DP, then store it under the (already-built) key.
+    let result = global_alignment_dp(t, p, band);
+    cache.cache.insert(cache.dp_key.clone(), (result.score, result.align.clone()));
+    result
+}
+
+/// The banded affine-gap DP core of [`global_alignment`], factored out so both
+/// the cached and uncached entry points share one identical implementation.
+/// Callers must have already handled the empty/single-base/diagonal fast paths;
+/// this is the expensive path the memoization cache wraps.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+fn global_alignment_dp(t: &[u8], p: &[u8], band: i32) -> AlignResult {
+    let lent = t.len();
+    let lenp = p.len();
 
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
     let (lent_i32, lenp_i32) = (lent as i32, lenp as i32);

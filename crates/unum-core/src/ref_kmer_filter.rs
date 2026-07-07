@@ -91,9 +91,11 @@
 //! `get_overlaps_from_hits`/LIS port for `has_hit_in_set`'s gate 2.
 
 use crate::kmer::KmerCode;
-use crate::kmer_index::KmerIndex;
+use crate::kmer_index::{IndexInfo, IndexT, for_each_kmer};
 use crate::overlap::{self, OverlapHit};
 use anyhow::{Context, Result};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -186,9 +188,14 @@ impl Hit {
 
 /// Ported from `_hit::operator<` (`SeqSet.hpp:74-86`): ascending by
 /// `strand`, then `indexHit.idx`, then `readOffset`, then `indexHit.offset`.
-/// This is the comparator `SortHits`'s `std::sort` fallback branch uses
-/// (`SeqSet.hpp:1589`); see [`sort_hits`]'s doc comment for the full
-/// bucket-sort-vs-`std::sort` dispatch this feeds into.
+/// This is the comparator `SortHits`'s `std::sort` fallback branch used
+/// (`SeqSet.hpp:1589`) before it was replaced by an equivalent radix sort on
+/// [`pack_hit_key`]; see [`sort_hits`]'s doc comment for the full
+/// bucket-sort-vs-radix dispatch this feeds into. It is retained as the
+/// canonical strict-total-order specification that [`pack_hit_key`]'s
+/// monotonicity is verified against (`pack_hit_key_matches_hit_less_than_order`);
+/// production sorting no longer calls it, hence `#[allow(dead_code)]`.
+#[allow(dead_code)]
 #[must_use]
 fn hit_less_than(a: &Hit, b: &Hit) -> bool {
     if a.strand != b.strand {
@@ -201,6 +208,45 @@ fn hit_less_than(a: &Hit, b: &Hit) -> bool {
         return a.read_offset < b.read_offset;
     }
     a.offset < b.offset
+}
+
+/// Packs a [`Hit`]'s four ordered fields (`strand`, `idx`, `read_offset`,
+/// `offset` -- exactly the fields [`hit_less_than`] compares, in that
+/// priority) into a single `u128` whose unsigned ordering is monotonic in
+/// [`hit_less_than`]: for any two hits `a`, `b`, `pack(a) < pack(b)` iff
+/// `hit_less_than(a, b)`, and `pack(a) == pack(b)` iff `a` and `b` tie in all
+/// four fields.
+///
+/// The packing is most-significant-field-first (`strand`, then `idx`, then
+/// `read_offset`, then `offset`), each field occupying a full-width lane so
+/// no reference size, read length, or offset value can overflow into a
+/// neighbouring field:
+///
+/// * `strand` (`i8`, only ever `-1` or `+1`): sign-flipped via `^ 0x80` so
+///   the two's-complement bit pattern orders `-1 < +1` as an unsigned byte
+///   (`0x7f < 0x81`), matching `hit_less_than`'s `a.strand < b.strand`.
+/// * `idx` (`u32`): used directly -- unsigned order already matches.
+/// * `read_offset` (`i32`): sign-flipped via `^ 0x8000_0000` so negative
+///   read offsets sort below non-negative ones as unsigned `u32`s.
+/// * `offset` (`u32`): used directly.
+///
+/// Because [`hit_less_than`] is a strict total order (two hits tie only when
+/// bit-identical in these four fields -- and each hit is a unique k-mer
+/// match, so real hit lists never actually tie), a stable radix sort keyed on
+/// this `u128` produces the SAME unique ordering as `sort_unstable_by(
+/// hit_less_than)` -- byte-identical to the C++ oracle. Verified by the
+/// `pack_hit_key_matches_hit_less_than_order` unit test.
+#[must_use]
+#[inline]
+fn pack_hit_key(h: &Hit) -> u128 {
+    #[allow(clippy::cast_sign_loss)]
+    let strand_flip = (h.strand as u8) ^ 0x80;
+    #[allow(clippy::cast_sign_loss)]
+    let read_offset_flip = (h.read_offset as u32) ^ 0x8000_0000;
+    (u128::from(strand_flip) << 96)
+        | (u128::from(h.idx) << 64)
+        | (u128::from(read_offset_flip) << 32)
+        | u128::from(h.offset)
 }
 
 /// Ported from `SeqSet::SortHits` (`SeqSet.hpp:1558-1590`): reorders `hits`
@@ -241,20 +287,17 @@ pub(crate) fn sort_hits(hits: &mut [Hit], already_read_order: bool, seq_count: u
         // `hit_less_than` is a strict total order over every field of `Hit`
         // that participates in equality (strand, idx, read_offset, offset --
         // `repeats` is not compared), so two hits only tie here if they are
-        // bit-identical in those four fields; `sort_unstable_by`'s lack of a
-        // stability guarantee is therefore unobservable, matching this
-        // codebase's established convention for other strict-total-order
-        // comparators (see `overlap.rs`'s `comp_sort_hit_coord_diff` doc
-        // comment for the same argument).
-        hits.sort_unstable_by(|a, b| {
-            if hit_less_than(a, b) {
-                std::cmp::Ordering::Less
-            } else if hit_less_than(b, a) {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+        // bit-identical in those four fields; the sorted order is therefore
+        // UNIQUELY determined and independent of the sort's stability. We
+        // exploit that to replace the O(n log n) comparison sort with an
+        // O(n) LSD radix sort keyed on `pack_hit_key`, whose unsigned u128
+        // order is monotonic in `hit_less_than` (see `pack_hit_key`'s doc and
+        // the `pack_hit_key_matches_hit_less_than_order` test) -- this yields
+        // the identical unique ordering, byte-identical to the C++ oracle,
+        // while being the dominant cost of `GetOverlapsFromRead`. `radsort`'s
+        // internal `unsafe` is the crate's own; `#![forbid(unsafe_code)]` on
+        // this crate is unaffected.
+        radsort::sort_by_key(hits, pack_hit_key);
     }
 }
 
@@ -271,9 +314,138 @@ pub struct Scratch {
     rc_buf: Vec<u8>,
     /// Reused hit list, cleared and refilled by every `get_hits_from_read` call.
     hits: Vec<Hit>,
+    /// Reused [`overlap::OverlapHit`] staging buffer: `has_hit_in_set`'s gate 2
+    /// and `get_overlaps_from_read` both need to hand `overlap`'s functions a
+    /// `&[OverlapHit]` view of `hits` (the two hit structs are field-identical
+    /// but distinct types, keeping `overlap` free of a `ref_kmer_filter`
+    /// dependency). Cleared and refilled per call rather than re-`collect`ed
+    /// into a fresh `Vec` each read, killing a per-read allocation.
+    overlap_hits: Vec<OverlapHit>,
     /// Reused `(tag, seqIdx) -> count` bucket map for `has_hit_in_set`'s
     /// add02ca touched-buckets bucket sort (see that function's doc comment).
     buckets: HashMap<(i8, u32), u32>,
+    /// Per-thread memoization cache for the DP alignment path
+    /// (`global_alignment`). `assign_reads_parallel`'s `map_init` gives one
+    /// `Scratch` -- hence one `DpCache` -- per rayon worker, which is the
+    /// lock-free thread-local equivalent of the fork's `thread_local`
+    /// `unordered_map` (folds fork commit `a35ed72`). See [`DpCache`].
+    ///
+    /// [`DpCache`]: crate::align_algo::DpCache
+    pub dp_cache: crate::align_algo::DpCache,
+}
+
+/// Flat, search-only forward-code-keyed k-mer position index.
+///
+/// Behaviorally identical to [`crate::kmer_index::KmerIndex`] for the
+/// `search` surface (the only surface `RefKmerFilter` needs) -- it returns a
+/// byte-identical `&[IndexInfo]` slice for any given forward code -- but
+/// stores all entries in ONE contiguous `positions` blob (each code mapping
+/// to a `(start, len)` window into it) rather than a heap `Vec` per code.
+/// That cuts allocator overhead and index RSS and keeps lookups
+/// cache-friendly. Keying uses [`FxHashMap`] (rustc-hash) instead of std's
+/// SipHash for faster build + lookup; rustc-hash is pure-safe, so
+/// `#![forbid(unsafe_code)]` still holds.
+///
+/// # Byte-identity with `KmerIndex`
+///
+/// `KmerIndex::build_index_from_read` pushes each code's entries in (`id`
+/// ascending, then `offset` ascending within an `id`) order, because
+/// `from_reference_fasta`/`update_kmer_length` process sequence `id` 0 fully
+/// before `id` 1 and roll offsets left->right within a sequence. This flat
+/// build collects `(code, idx, offset)` tuples from every sequence via the
+/// SAME shared [`for_each_kmer`] emitter, then `par_sort_unstable`s them
+/// lexicographically. Since a given forward code occurs at most once per
+/// `(seq, offset)`, the `(code, idx, offset)` tuples are all-distinct within
+/// a code, so the sort order is unambiguous and reproduces the sequential
+/// push order EXACTLY. Grouping consecutive-equal-`code` runs then yields,
+/// for each code, a `positions` slice byte-identical to the old per-code
+/// `Vec`.
+#[derive(Debug, Default)]
+struct FlatKmerIndex {
+    /// Forward `KmerCode::get_code()` -> `(start, len)` window into
+    /// [`positions`](Self::positions).
+    map: FxHashMap<u64, (u32, u32)>,
+    /// All `IndexInfo` entries across every code, contiguous and grouped by
+    /// code, each group in (idx, offset)-ascending order (see type docs).
+    positions: Vec<IndexInfo>,
+}
+
+impl FlatKmerIndex {
+    /// Builds the flat index over `seqs` at k-mer length `kmer_length`, in
+    /// parallel across the current rayon thread pool. Mirrors the result of
+    /// running [`KmerIndex::build_index_from_read`] over `seqs` in 0-based
+    /// load order (`id` = index), byte-for-byte (see type docs for the
+    /// ordering proof).
+    fn build(seqs: &[Vec<u8>], kmer_length: usize) -> Self {
+        // 1. Emit every (code, idx, offset) tuple, in parallel per sequence,
+        //    via the SAME shared emitter the sequential build uses.
+        let mut tuples: Vec<(u64, IndexT, IndexT)> = seqs
+            .par_iter()
+            .enumerate()
+            .flat_map_iter(|(seq_idx, seq)| {
+                // `seqs.len()` is bounded by an `i32` at load time
+                // (`from_reference_fasta`'s `i32::try_from`), so this cannot
+                // truncate; matches the `id: i32` the sequential build uses.
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                let id = seq_idx as i32;
+                let mut local: Vec<(u64, IndexT, IndexT)> = Vec::new();
+                for_each_kmer(seq, id, kmer_length, 0, &mut |code, idx, offset| {
+                    local.push((code, idx, offset));
+                });
+                local.into_iter()
+            })
+            .collect();
+
+        // 2. Sort lexicographically by (code, idx, offset). This is exactly
+        //    the sequential push order per code (see type docs). Unstable is
+        //    safe because the tuples are all-distinct within a code.
+        tuples.par_sort_unstable();
+
+        // 3. Group consecutive-equal-`code` runs into `(start, len)` windows
+        //    and flatten into the contiguous `positions` blob.
+        let mut map: FxHashMap<u64, (u32, u32)> = FxHashMap::default();
+        let mut positions: Vec<IndexInfo> = Vec::with_capacity(tuples.len());
+        let mut run_start = 0usize;
+        while run_start < tuples.len() {
+            let code = tuples[run_start].0;
+            let mut run_end = run_start + 1;
+            while run_end < tuples.len() && tuples[run_end].0 == code {
+                run_end += 1;
+            }
+            // Positions indices fit in u32: total entries are bounded by the
+            // reference size (well under u32::MAX for any real T1K reference).
+            #[allow(clippy::cast_possible_truncation)]
+            let start = positions.len() as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let len = (run_end - run_start) as u32;
+            map.insert(code, (start, len));
+            for &(_, idx, offset) in &tuples[run_start..run_end] {
+                positions.push(IndexInfo { idx, offset });
+            }
+            run_start = run_end;
+        }
+
+        Self { map, positions }
+    }
+
+    /// Ported search surface, byte-identical to
+    /// [`KmerIndex::search`](crate::kmer_index::KmerIndex::search): returns an
+    /// empty slice if `!kmer_code.is_valid()` or the forward code has no
+    /// entries, otherwise the code's full entry slice in insertion order.
+    #[must_use]
+    fn search(&self, kmer_code: &KmerCode) -> &[IndexInfo] {
+        if !kmer_code.is_valid() {
+            return &[];
+        }
+        match self.map.get(&kmer_code.get_code()) {
+            Some(&(start, len)) => {
+                let start = start as usize;
+                let end = start + len as usize;
+                &self.positions[start..end]
+            }
+            None => &[],
+        }
+    }
 }
 
 /// Reference-k-mer read-candidate filter: the pure-Rust port of the
@@ -282,10 +454,13 @@ pub struct Scratch {
 /// the deliberate `GetOverlapsFromHits`/`AlignAlgo` scope cut.
 pub struct RefKmerFilter {
     /// Forward-code-keyed k-mer position index over every loaded reference
-    /// sequence, built via repeated `KmerIndex::build_index_from_read` calls
-    /// (one per sequence, `id` = 0-based load order) -- mirrors
-    /// `SeqSet::seqIndex` after `InputRefFa` (`SeqSet.hpp:220,872-904`).
-    seq_index: KmerIndex,
+    /// sequence, built (in parallel) via the shared [`for_each_kmer`] emitter
+    /// -- byte-identical to the sequential `KmerIndex::build_index_from_read`
+    /// path (one emission per sequence, `id` = 0-based load order) -- mirrors
+    /// `SeqSet::seqIndex` after `InputRefFa` (`SeqSet.hpp:220,872-904`). Stored
+    /// flat (contiguous positions blob) rather than a heap `Vec` per code; see
+    /// [`FlatKmerIndex`].
+    seq_index: FlatKmerIndex,
     /// The k-mer length every sequence was indexed at (`SeqSet::kmerLength`,
     /// `SeqSet.hpp:221`). See the module docs for why this is an explicit
     /// caller-supplied parameter rather than a fixed default.
@@ -348,20 +523,24 @@ impl RefKmerFilter {
         let text = fs::read_to_string(path)
             .with_context(|| format!("reading reference FASTA {}", path.display()))?;
 
-        let mut seq_index = KmerIndex::new();
         let mut seq_names = Vec::new();
-        let mut seqs = Vec::new();
-        let mut kmer_code = KmerCode::new(kmer_length);
+        let mut seqs: Vec<Vec<u8>> = Vec::new();
 
         for record in parse_fasta(&text) {
             let seq_idx = seq_names.len();
-            let id = i32::try_from(seq_idx).with_context(|| {
+            // Preserve the historical bound check (id must fit in i32) even
+            // though the flat build derives ids from the `enumerate` index.
+            i32::try_from(seq_idx).with_context(|| {
                 format!("reference FASTA {} has more than i32::MAX sequences", path.display())
             })?;
-            seq_index.build_index_from_read(&mut kmer_code, record.seq.as_bytes(), id, 0);
             seq_names.push(record.id);
             seqs.push(record.seq.into_bytes());
         }
+
+        // Build the flat k-mer index in parallel over all sequences (byte-
+        // identical to the sequential per-sequence `build_index_from_read`
+        // path; see `FlatKmerIndex` docs for the ordering proof).
+        let seq_index = FlatKmerIndex::build(&seqs, kmer_length);
 
         let seq_count = seq_names.len();
         Ok(Self {
@@ -496,16 +675,10 @@ impl RefKmerFilter {
     pub fn update_kmer_length(&mut self, kl: usize) {
         assert!(kl >= 1, "kmer_length must be >= 1, got {kl}");
         self.kmer_length = kl;
-        let mut kmer_code = KmerCode::new(kl);
-        self.seq_index = KmerIndex::new();
-        for (id, seq) in self.seqs.iter().enumerate() {
-            // `seqs.len() == seq_count`, itself bounded by an `i32` at load
-            // time (`from_reference_fasta`'s own `i32::try_from` check), so
-            // this cannot truncate.
-            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-            let id = id as i32;
-            self.seq_index.build_index_from_read(&mut kmer_code, seq, id, 0);
-        }
+        // Rebuild the flat index from scratch at the new k over the stored
+        // sequences (same 0-based load order, so `id`s match exactly) --
+        // byte-identical to the old sequential rebuild.
+        self.seq_index = FlatKmerIndex::build(&self.seqs, kl);
     }
 
     /// Ergonomic entry point: `!is_low_complexity(read) &&
@@ -633,15 +806,22 @@ impl RefKmerFilter {
         // exactly, without needing to build all `2 * seqCount` buckets
         // up front.
         let (best_tag, best_idx) = best_bucket;
-        let winning_bucket_hits: Vec<OverlapHit> = scratch
-            .hits
-            .iter()
-            .filter(|hit| i8::from(hit.strand == 1) == best_tag && hit.idx == best_idx)
-            .map(|hit| hit.to_overlap_hit())
-            .collect();
+        // Reuse the scratch staging buffer (disjoint-field borrow: reads
+        // `hits`, refills `overlap_hits`) instead of `collect`ing a fresh `Vec`
+        // per read. Byte-identical: the stable filter over `scratch.hits`
+        // yields the same bucket members in the same encounter order.
+        scratch.overlap_hits.clear();
+        scratch.overlap_hits.extend(
+            scratch
+                .hits
+                .iter()
+                .filter(|hit| i8::from(hit.strand == 1) == best_tag && hit.idx == best_idx)
+                .map(|hit| hit.to_overlap_hit()),
+        );
+        let winning_bucket_hits = &scratch.overlap_hits;
 
         let overlaps = overlap::get_overlaps_from_hits(
-            &winning_bucket_hits,
+            winning_bucket_hits,
             self.hit_len_required,
             0,           // filter: HasHitInSet always passes filter=0 (SeqSet.hpp:1968).
             |_idx| true, // is_ref: every sequence loaded via from_reference_fasta is a reference (see module docs).
@@ -736,13 +916,18 @@ impl RefKmerFilter {
         self.get_hits_from_read(read, scratch);
         sort_hits(&mut scratch.hits, true, self.seq_count);
 
-        let winning_hits: Vec<OverlapHit> =
-            scratch.hits.iter().map(|hit| hit.to_overlap_hit()).collect();
+        // Stage the sorted hits as `OverlapHit`s in a reused scratch buffer
+        // (disjoint-field borrow: reads `hits`, refills `overlap_hits`), rather
+        // than `collect`ing a fresh `Vec` per read. Byte-identical: same values
+        // in the same order.
+        scratch.overlap_hits.clear();
+        scratch.overlap_hits.extend(scratch.hits.iter().map(|hit| hit.to_overlap_hit()));
+        let winning_hits = &scratch.overlap_hits;
 
         #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         let kmer_length_i32 = self.kmer_length as i32;
         let overlaps_with_coords = overlap::get_overlaps_from_hits_with_coords(
-            &winning_hits,
+            winning_hits,
             self.hit_len_required,
             0, // filter: GetOverlapsFromRead always passes filter=0 (SeqSet.hpp:1614).
             |idx| self.is_ref(idx),
@@ -787,19 +972,27 @@ impl RefKmerFilter {
             overlaps_hit_coords.truncate(k);
         }
 
-        reverse_complement_into(read, &mut scratch.rc_buf);
-        let rc_read = scratch.rc_buf.clone();
+        // `get_hits_from_read` (called above at the top of this method) already
+        // filled `scratch.rc_buf` with `reverse_complement(read)` -- a full
+        // `clear()`+`resize(len)`+per-base overwrite, deterministic and
+        // idempotent -- and nothing between that call and here writes
+        // `scratch.rc_buf`, so it still holds the correct reverse complement.
+        // Take it out (a Vec move: no allocation, no recompute) so the
+        // refinement loop below can borrow it as `rc_read` while separately
+        // holding `&mut scratch.dp_cache`. It is moved back into
+        // `scratch.rc_buf` after the loop (see below) so its capacity is
+        // pooled across calls rather than reallocated per sequence.
+        let rc_read = std::mem::take(&mut scratch.rc_buf);
 
         // Per-overlap AlignAlgo-based matchCnt/similarity refinement
-        // (SeqSet.hpp:1660-1882). `firstRef`/`bestNovelOverlap`/
-        // `readOverlapRepresentatives` are computed for fidelity with stock
-        // (see this function's own inline comments below) but -- as in
-        // stock -- never feed back into which overlaps are kept; only the
-        // final refSeqSimilarity/novelSeqSimilarity filter below does that.
-        let mut first_ref: i32 = -1;
-        let mut best_novel_overlap: i32 = -1;
-        let mut read_overlap_representatives: Vec<usize> = Vec::new();
-
+        // (SeqSet.hpp:1660-1882). Stock also maintains `firstRef`/
+        // `bestNovelOverlap`/`readOverlapRepresentatives` here, but -- as in
+        // stock -- they never feed back into which overlaps are kept (only the
+        // final refSeqSimilarity/novelSeqSimilarity filter below does that),
+        // so their bookkeeping (a `Vec` allocation plus an O(overlaps^2)
+        // containment scan) is omitted: it produced values this port's `let _
+        // = ...` sinks proved were never read. See this crate's history for
+        // the faithful-but-dead port that this removal replaces.
         for i in 0..overlaps.len() {
             let r: &[u8] = if overlaps[i].strand == 1 { read } else { &rc_read };
             let hit_coords = &overlaps_hit_coords[i];
@@ -811,12 +1004,6 @@ impl RefKmerFilter {
             let mut similarity: f64 = 1.0;
 
             let is_ref = self.is_ref(overlaps[i].seq_idx);
-            if is_ref && first_ref == -1 {
-                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-                {
-                    first_ref = i as i32;
-                }
-            }
 
             match_cnt += 2 * kmer_length_i32;
 
@@ -842,10 +1029,11 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment(
+                            crate::align_algo::global_alignment_cached(
                                 seq_slice,
                                 read_slice,
                                 crate::align_algo::DEFAULT_BAND,
+                                &mut scratch.dp_cache,
                             )
                         } else {
                             // Novel-seq path: ported but unreachable from
@@ -926,10 +1114,11 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment(
+                            crate::align_algo::global_alignment_cached(
                                 seq_slice,
                                 read_slice,
                                 crate::align_algo::DEFAULT_BAND,
+                                &mut scratch.dp_cache,
                             )
                         } else {
                             let gap_len = cur.b - (prev.b + kmer_length_i32);
@@ -980,38 +1169,14 @@ impl RefKmerFilter {
                 overlaps[i].similarity = 0.0;
             }
             overlaps[i].match_cnt = match_cnt;
-
-            if !is_ref && overlaps[i].similarity > 0.0 {
-                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-                let i_i32 = i as i32;
-                if best_novel_overlap == -1
-                    || overlap::overlap_less_than(
-                        &overlaps[i],
-                        &overlaps[usize::try_from(best_novel_overlap).unwrap_or(0)],
-                    )
-                {
-                    best_novel_overlap = i_i32;
-                }
-            }
-
-            if overlaps[i].similarity > 0.0 {
-                let mut found = false;
-                for &k in &read_overlap_representatives {
-                    if overlaps[i].read_start >= overlaps[k].read_start
-                        && overlaps[i].read_end <= overlaps[k].read_end
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    read_overlap_representatives.push(i);
-                }
-            }
         }
-        let _ = first_ref; // computed for fidelity; never read again (matches stock).
-        let _ = best_novel_overlap; // computed for fidelity; never read again (matches stock).
-        let _ = read_overlap_representatives; // computed for fidelity; never read again (matches stock).
+
+        // Return the reverse-complement buffer to the scratch so its allocated
+        // capacity survives for the next `get_hits_from_read` (which refills it
+        // in place). Without this move-back the `mem::take` above would leave
+        // `scratch.rc_buf` empty, forcing a fresh allocation per sequence and
+        // defeating the buffer pooling.
+        scratch.rc_buf = rc_read;
 
         // Final filter (SeqSet.hpp:1893-1908): keep only overlaps meeting
         // the isRef-vs-novel similarity threshold.
@@ -1101,7 +1266,13 @@ impl RefKmerFilter {
         }
 
         let mut kmer_code = KmerCode::new(kl);
-        let mut prev_kmer_code = KmerCode::new(kl);
+        // `KmerCode::is_equal` compares ONLY the raw `.code` (kmer.rs:276-278),
+        // and `prev_kmer_code` is read exclusively via `is_equal` below, so the
+        // consecutive-duplicate-window dedup state can be tracked as a bare
+        // `u64` code (`KmerCode::new(kl).get_code()` == 0) instead of cloning a
+        // full 32-byte `KmerCode` per window. Byte-identical: only `.code` ever
+        // affected the dedup decision.
+        let mut prev_code: u64 = KmerCode::new(kl).get_code();
         let skip_limit = kl / 2;
         let mut skip_cnt = 0usize;
 
@@ -1113,13 +1284,13 @@ impl RefKmerFilter {
         }
         while i < len {
             kmer_code.append(read[i]);
-            if i == kl - 1 || !prev_kmer_code.is_equal(&kmer_code) {
+            if i == kl - 1 || prev_code != kmer_code.get_code() {
                 let found = self.seq_index.search(&kmer_code);
                 let size = found.len();
                 if size >= 100 && i != kl - 1 && i != len - 1 && skip_cnt < skip_limit {
                     skip_cnt += 1;
                     i += 1;
-                    continue; // matches C++: also skips the prev_kmer_code update below
+                    continue; // matches C++: also skips the prev_code update below
                 }
                 skip_cnt = 0;
                 // `i`/`kl` are window positions bounded by `len` (a real
@@ -1146,7 +1317,7 @@ impl RefKmerFilter {
                     });
                 }
             }
-            prev_kmer_code = kmer_code.clone();
+            prev_code = kmer_code.get_code();
             i += 1;
         }
 
@@ -1158,7 +1329,7 @@ impl RefKmerFilter {
 
         // Reverse strand (SeqSet.hpp:1158-1227). `kmer_code.Restart()`
         // equivalent: fresh code/invalid_pos at the same kmer_length.
-        // `prev_kmer_code` is deliberately NOT reset -- see this function's
+        // `prev_code` is deliberately NOT reset -- see this function's
         // doc comment.
         kmer_code = KmerCode::new(kl);
         skip_cnt = 0; // stock explicitly re-zeroes skipCnt here (SeqSet.hpp:1164)
@@ -1169,7 +1340,7 @@ impl RefKmerFilter {
         }
         while i < len {
             kmer_code.append(scratch.rc_buf[i]);
-            if i == kl - 1 || !prev_kmer_code.is_equal(&kmer_code) {
+            if i == kl - 1 || prev_code != kmer_code.get_code() {
                 let found = self.seq_index.search(&kmer_code);
                 let size = found.len();
                 if size >= 100 && i != kl - 1 && i != len - 1 && skip_cnt < skip_limit {
@@ -1197,7 +1368,7 @@ impl RefKmerFilter {
                     });
                 }
             }
-            prev_kmer_code = kmer_code.clone();
+            prev_code = kmer_code.get_code();
             i += 1;
         }
     }
@@ -1768,6 +1939,66 @@ mod tests {
         let b = a;
         assert!(!hit_less_than(&a, &b));
         assert!(!hit_less_than(&b, &a));
+    }
+
+    // ---- pack_hit_key (radix key monotonicity) -----------------------------
+
+    #[test]
+    fn pack_hit_key_matches_hit_less_than_order() {
+        // For a diverse set of hits spanning both strands, small/large idx,
+        // negative/zero/positive read_offset, and varying offset (including
+        // extreme u32/i32 boundary values), the unsigned u128 ordering of
+        // `pack_hit_key` must be monotonic in `hit_less_than`:
+        //   pack(a) < pack(b)  <=>  hit_less_than(a, b)
+        //   pack(a) == pack(b) <=>  neither less (bit-identical fields).
+        // This is the invariant that makes a radix sort on `pack_hit_key`
+        // byte-identical to `sort_unstable_by(hit_less_than)`.
+        let hits = vec![
+            h(0, 0, 0, -1),
+            h(0, 0, 0, 1),
+            h(0, 0, -5, 1),
+            h(0, 0, i32::MIN, 1),
+            h(0, 0, i32::MAX, 1),
+            h(0, u32::MAX, 0, 1),
+            h(u32::MAX, 0, 0, 1),
+            h(3, 7, 3, -1),
+            h(3, 7, 3, 1),
+            h(3, 8, 3, 1),
+            h(3, 7, 4, 1),
+            h(3, 7, 3, 1), // duplicate of an earlier hit -> must tie
+            h(1, u32::MAX, i32::MIN, 0),
+        ];
+        for a in &hits {
+            for b in &hits {
+                let ka = pack_hit_key(a);
+                let kb = pack_hit_key(b);
+                assert_eq!(
+                    ka < kb,
+                    hit_less_than(a, b),
+                    "pack ordering must match hit_less_than for {a:?} vs {b:?}",
+                );
+                assert_eq!(
+                    ka == kb,
+                    !hit_less_than(a, b) && !hit_less_than(b, a),
+                    "pack equality must match field-identity for {a:?} vs {b:?}",
+                );
+            }
+        }
+
+        // A full sort by pack_hit_key must equal a sort by hit_less_than.
+        let mut by_pack = hits.clone();
+        radsort::sort_by_key(&mut by_pack, pack_hit_key);
+        let mut by_cmp = hits;
+        by_cmp.sort_by(|a, b| {
+            if hit_less_than(a, b) {
+                std::cmp::Ordering::Less
+            } else if hit_less_than(b, a) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        assert_eq!(by_pack, by_cmp);
     }
 
     // ---- sort_hits (SeqSet::SortHits) --------------------------------------

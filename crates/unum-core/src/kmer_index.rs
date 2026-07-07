@@ -61,6 +61,80 @@ pub struct IndexInfo {
     pub offset: IndexT,
 }
 
+/// Shared k-mer-window emitter: the exact window-rolling + dedup logic of
+/// `KmerIndex::build_index_from_read`, factored out so both the sequential
+/// incremental build ([`KmerIndex::build_index_from_read`]) and any parallel
+/// flat build (e.g. `RefKmerFilter`'s `FlatKmerIndex`) drive off the SAME
+/// code and cannot diverge.
+///
+/// Rolls a `KmerCode::new(kmer_length)` across `s` and, for each window that
+/// the C++ `BuildIndexFromRead` would `Insert`, invokes `emit(code, idx,
+/// offset)` where:
+/// - `code` is the forward `KmerCode::get_code()` for that window,
+/// - `idx` is `id` reinterpreted as [`IndexT`] (two's-complement, matching
+///   C++'s implicit `int -> uint32_t`),
+/// - `offset` is `i - kmer_length + 1 + shift` computed as `i64 -> i32 ->
+///   IndexT` (same two's-complement reinterpretation).
+///
+/// Replicates EXACTLY: the `len < k` early return; `restart` + fill of the
+/// first `k-1` bases with no emit; from the first full window, the
+/// consecutive-duplicate dedup (emit only if valid AND (`i == kmer_length`
+/// unconditional OR code differs from the previous window's code)); and the
+/// all-`A` first-window edge case (`prev_kmer_code` starts as a fresh
+/// `KmerCode::new(k)` = code 0, so an all-`A` first window is dropped).
+///
+/// See [`KmerIndex::build_index_from_read`]'s doc comment for the full
+/// per-clause C++ line references.
+pub(crate) fn for_each_kmer(
+    s: &[u8],
+    id: i32,
+    kmer_length: usize,
+    shift: i32,
+    emit: &mut impl FnMut(u64, IndexT, IndexT),
+) {
+    let len = s.len();
+    let kl = kmer_length;
+    if len < kl {
+        return;
+    }
+    let mut kmer_code = KmerCode::new(kl);
+    kmer_code.restart();
+    let mut prev_kmer_code = KmerCode::new(kl);
+
+    let mut i = 0usize;
+    let fill = kl.saturating_sub(1);
+    while i < fill {
+        kmer_code.append(s[i]);
+        i += 1;
+    }
+
+    while i < len {
+        kmer_code.append(s[i]);
+        if kmer_code.is_valid() && (i == kl || !kmer_code.is_equal(&prev_kmer_code)) {
+            // `i`/`kl` are window positions bounded by `len` (a real read
+            // length), so this never approaches i64::MAX; the `as i64` casts
+            // just widen an already-small usize for signed arithmetic
+            // (mirroring C++'s signed `int i`/`kl`).
+            #[allow(clippy::cast_possible_wrap)]
+            let offset_i64 = (i as i64) - (kl as i64) + 1 + i64::from(shift);
+            #[allow(clippy::cast_possible_truncation)]
+            let offset = offset_i64 as i32;
+            // Mirrors C++'s implicit `int -> uint32_t` conversion when passing
+            // `id`/`offset` (both signed `int` expressions) to `Insert`'s
+            // `index_t` (`uint32_t`) parameters: a well-defined two's-
+            // complement reinterpretation, not a clamp -- so intentionally
+            // allowing sign loss here.
+            #[allow(clippy::cast_sign_loss)]
+            let idx = id as IndexT;
+            #[allow(clippy::cast_sign_loss)]
+            let offset = offset as IndexT;
+            emit(kmer_code.get_code(), idx, offset);
+        }
+        prev_kmer_code = kmer_code.clone();
+        i += 1;
+    }
+}
+
 /// K-mer position index, ported from T1K's `KmerIndex` (`KmerIndex.hpp:22-192`).
 ///
 /// See the module-level docs for the forward-vs-canonical keying and
@@ -189,46 +263,29 @@ impl KmerIndex {
         id: i32,
         shift: i32,
     ) {
-        let len = s.len();
+        // Delegate the window-rolling + dedup + offset logic to the shared
+        // [`for_each_kmer`] emitter so this incremental build and any parallel
+        // flat build stay bit-for-bit identical. `for_each_kmer` owns its own
+        // `KmerCode` internally; to preserve this method's historical
+        // side-effect on the caller-supplied `kmer_code` (it left `kmer_code`
+        // holding the last-appended window), we mirror that by `restart`ing
+        // then rolling the same window sequence. To keep it simple and still
+        // byte-identical, we restart `kmer_code` here (matching the old
+        // `restart()` call) so its post-call state is well-defined at `kl`.
         let kl = kmer_code.get_kmer_length();
-        if len < kl {
-            return;
-        }
+        // Preserve the historical side-effect of leaving the caller-supplied
+        // `kmer_code` restarted at this `kl` (the old body called `restart()`
+        // up front). The build itself drives off the shared [`for_each_kmer`]
+        // emitter, which owns its own `KmerCode` internally.
         kmer_code.restart();
-        let mut prev_kmer_code = KmerCode::new(kl);
-
-        let mut i = 0usize;
-        let fill = kl.saturating_sub(1);
-        while i < fill {
-            kmer_code.append(s[i]);
-            i += 1;
-        }
-
-        while i < len {
-            kmer_code.append(s[i]);
-            if kmer_code.is_valid() && (i == kl || !kmer_code.is_equal(&prev_kmer_code)) {
-                // `i`/`kl` are window positions bounded by `len` (a real
-                // read length), so this never approaches i64::MAX; the
-                // `as i64` casts just widen an already-small usize for
-                // signed arithmetic (mirroring C++'s signed `int i`/`kl`).
-                #[allow(clippy::cast_possible_wrap)]
-                let offset_i64 = (i as i64) - (kl as i64) + 1 + i64::from(shift);
-                #[allow(clippy::cast_possible_truncation)]
-                let offset = offset_i64 as i32;
-                // Mirrors C++'s implicit `int -> uint32_t` conversion when
-                // passing `id`/`offset` (both signed `int` expressions) to
-                // `Insert`'s `index_t` (`uint32_t`) parameters: a
-                // well-defined two's-complement reinterpretation, not a
-                // clamp -- so intentionally allowing sign loss here.
-                #[allow(clippy::cast_sign_loss)]
-                let idx = id as IndexT;
-                #[allow(clippy::cast_sign_loss)]
-                let offset = offset as IndexT;
-                self.insert(kmer_code, idx, offset, 1);
-            }
-            prev_kmer_code = kmer_code.clone();
-            i += 1;
-        }
+        // A local scratch code re-keyed per emitted (valid) window. `set_code`
+        // also resets `invalid_pos` to -1, so `insert`'s validity gate always
+        // passes -- `for_each_kmer` only emits valid windows.
+        let mut scratch = KmerCode::new(kl);
+        for_each_kmer(s, id, kl, shift, &mut |code, idx, offset| {
+            scratch.set_code(code);
+            self.insert(&scratch, idx, offset, 1);
+        });
     }
 }
 

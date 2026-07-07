@@ -8,5 +8,7 @@ license.workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+rayon = "1"
+mimalloc = "0.1"
 tempfile = "3"
 unum-core = { path = "../unum-core" }
