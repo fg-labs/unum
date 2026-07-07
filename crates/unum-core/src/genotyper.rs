@@ -127,6 +127,14 @@
 //!   combines a read pair's two mate-end overlap lists (as produced by
 //!   [`assign_read`]) into per-allele [`FragmentOverlap`]s, the direct input
 //!   to [`Genotyper::set_read_assignments`].
+//! - [`assign_reads_parallel`] -- the P2 parallelism-campaign entry point:
+//!   runs [`RefKmerFilter::get_overlaps_from_read`] then [`assign_read`] over
+//!   every distinct read sequence, parallelizing only the read-only
+//!   `get_overlaps_from_read` phase across a scoped `rayon` thread pool (each
+//!   worker with its own [`Scratch`]) while keeping `assign_read`'s
+//!   `allele_refs`-mutating phase strictly sequential in input order -- see
+//!   its doc comment for why this makes `-t N` output byte-identical to
+//!   `-t 1` at any `N`.
 //! - [`Genotyper::remove_low_likelihood_allele_in_equivalent_class`] --
 //!   ported from `Genotyper::RemoveLowLikelihoodAlleleInEquivalentClass`
 //!   (`Genotyper.hpp:1371-1460`): a coverage-likelihood filter over each
@@ -153,8 +161,10 @@
 use std::collections::HashMap;
 
 use crate::overlap;
+use crate::ref_kmer_filter::{RefKmerFilter, Scratch};
 
 use crate::kmer_count::KmerCount;
+use rayon::prelude::*;
 
 /// KIR gene type constant, ported from `GENETYPE_KIR` (`Genotyper.hpp:13`).
 pub const GENE_TYPE_KIR: i32 = 0;
@@ -1015,7 +1025,9 @@ pub fn assign_read(
             eo.relaxed_match_cnt = eo.match_cnt;
 
             // Mark the base coverage (SeqSet.hpp:2252-2274). No locking
-            // needed: this port is single-threaded (see module docs).
+            // needed: `assign_read` runs sequentially -- only the per-read
+            // overlap computation is parallelized (`-t N`); this shared
+            // mutation stays on the single sequential path (see module docs).
             if weight > 0 {
                 let mut ref_pos = eo.seq_start;
                 let mut read_pos = eo.read_start;
@@ -1062,6 +1074,114 @@ pub fn assign_read(
     }
 
     Some(extended_overlaps)
+}
+
+/// Runs [`RefKmerFilter::get_overlaps_from_read`] followed by [`assign_read`]
+/// for every distinct read sequence in `sorted_seqs` (mirrors
+/// `Genotyper.cpp:463-480`/`AssignReads_Thread`'s per-distinct-sequence read
+/// loop -- see `crates/unum/src/stages/genotype.rs`'s `run()` for the
+/// caller that sorts/dedups `all_seqs` into `sorted_seqs` and computes
+/// `weight_of`), returning one `Option<Vec<ExtendedOverlap>>` per
+/// `sorted_seqs` entry, in the SAME order as `sorted_seqs` (index `i` of the
+/// result corresponds to `sorted_seqs[i]`).
+///
+/// # Parallelism: read-only `get_overlaps_from_read` in parallel, `assign_read`
+/// always sequential, in `sorted_seqs` order
+///
+/// `threads <= 1` runs the plain sequential loop (no `rayon` pool is built at
+/// all): for each `seq`, call `get_overlaps_from_read` then immediately
+/// `assign_read`, exactly as the single-threaded reference driver always has.
+///
+/// `threads > 1` splits the work into two phases:
+/// 1. **Parallel, read-only.** `get_overlaps_from_read` -- the dominant cost
+///    (k-mer hit lookup, LIS chaining, and `AlignAlgo`-based similarity
+///    refinement) -- is computed for every `sorted_seqs[i]` across `threads`
+///    `rayon` worker threads, each reusing its own [`Scratch`] via
+///    `map_init` (so `get_hits_from_read`'s hit list/bucket map/RC buffer are
+///    never shared across threads) and only ever borrowing `filter`/
+///    `allele_refs` (both `&`, hence `Sync`) -- no shared mutable state is
+///    touched in this phase. `rayon`'s `collect()` on an
+///    `IndexedParallelIterator` (`(&[&[u8]]).par_iter()` here) preserves
+///    input order, so the result `Vec` lines up with `sorted_seqs` regardless
+///    of which worker computed which entry or in what order they finished.
+/// 2. **Sequential, shared-mutation.** [`assign_read`] -- which mutates
+///    `allele_refs`' `pos_weight` base-coverage counters in place -- is then
+///    run over the precomputed overlaps SEQUENTIALLY, in `sorted_seqs` order
+///    (a plain `for` loop, zero `rayon`). Because this is the ONLY step that
+///    touches shared state, and it always runs in the same fixed order
+///    regardless of `threads`, the resulting `allele_refs` mutations (and
+///    therefore every downstream computation built on them) are
+///    thread-count-invariant -- `-t N` output is byte-identical to `-t 1` at
+///    any `N`. This is the SAFE-MINIMUM split documented in the P2
+///    parallelism task: `assign_read` itself (`SeqSet::AssignRead`,
+///    `SeqSet.hpp:2119-2303`) intersperses its own read-only
+///    `extend_overlap`/scoring loop with the `pos_weight` mutation loop
+///    inside a single ported, heavily cross-referenced function; splitting
+///    that function's two loops apart would risk introducing a genuine
+///    behavioral divergence from the C++ for a marginal additional speedup
+///    (the mutation loop itself is comparatively cheap -- one more
+///    `AlignAlgo::GlobalAlignment` per extended overlap, not the
+///    k-mer-index/LIS/hit-refinement work `get_overlaps_from_read` already
+///    does), so this port deliberately keeps `assign_read` a single
+///    sequential unit rather than splitting it further.
+///
+/// No global/thread-local mutable state is touched by either phase:
+/// `get_overlaps_from_read`'s `AlignAlgo`-based refinement
+/// (`crate::align_algo::global_alignment`/`global_alignment_pos_weight`)
+/// allocates fresh local buffers on every call -- there is no shared
+/// alignment scratch object to thread through, unlike `Scratch`'s
+/// hit-list/bucket-map/RC buffers, which are already per-worker via
+/// `map_init`.
+///
+/// # Panics
+///
+/// Panics if `threads > 1` and the OS refuses to spawn `rayon`'s worker
+/// threads for the scoped pool (mirrors this module's existing convention of
+/// `.expect()`-ing on invariants/environment preconditions rather than
+/// threading `anyhow::Result` through a pure-computation module -- see e.g.
+/// [`extend_overlap`]'s/[`assign_read`]'s own panicking-on-invariant-violation
+/// doc comments).
+#[must_use]
+pub fn assign_reads_parallel(
+    filter: &RefKmerFilter,
+    sorted_seqs: &[&[u8]],
+    allele_refs: &mut [AlleleRef],
+    ref_seq_similarity: f64,
+    weight_of: impl Fn(&[u8]) -> i32 + Sync,
+    threads: usize,
+) -> Vec<Option<Vec<ExtendedOverlap>>> {
+    if threads <= 1 {
+        return sorted_seqs
+            .iter()
+            .map(|&seq| {
+                let raw =
+                    filter.get_overlaps_from_read(seq, &mut Scratch::default()).unwrap_or_default();
+                assign_read(seq, &raw, allele_refs, ref_seq_similarity, weight_of(seq))
+            })
+            .collect();
+    }
+
+    // Phase 1: parallel, read-only get_overlaps_from_read, order-preserving.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("building rayon thread pool for parallel read assignment");
+    let raw_overlaps: Vec<Vec<overlap::Overlap>> = pool.install(|| {
+        sorted_seqs
+            .par_iter()
+            .map_init(Scratch::default, |scratch, &seq| {
+                filter.get_overlaps_from_read(seq, scratch).unwrap_or_default()
+            })
+            .collect()
+    });
+
+    // Phase 2: sequential assign_read, in sorted_seqs order -- the only step
+    // that mutates shared allele_refs state.
+    sorted_seqs
+        .iter()
+        .zip(raw_overlaps)
+        .map(|(&seq, raw)| assign_read(seq, &raw, allele_refs, ref_seq_similarity, weight_of(seq)))
+        .collect()
 }
 
 /// Ported from `SeqSet::GetSeqMissingBaseCoverage` (`SeqSet.hpp:2717-2755`):
@@ -5065,6 +5185,103 @@ mod tests {
                 "position {i} (base {base}) should have coverage"
             );
         }
+    }
+
+    // --- assign_reads_parallel ---
+
+    /// Writes a small reference FASTA to a tempfile and builds a
+    /// [`RefKmerFilter`] over it at `kmer_length` -- [`RefKmerFilter::
+    /// from_reference_fasta`] only accepts a path (see `ref_kmer_filter`'s
+    /// module doc for why), so every `assign_reads_parallel` test needs this
+    /// small setup helper.
+    fn build_test_filter(records: &[(&str, &str)], kmer_length: usize) -> RefKmerFilter {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write as _;
+            let mut f = tmp.reopen().unwrap();
+            for (name, seq) in records {
+                writeln!(f, ">{name}\n{seq}").unwrap();
+            }
+        }
+        RefKmerFilter::from_reference_fasta(tmp.path(), kmer_length).unwrap()
+    }
+
+    #[test]
+    fn assign_reads_parallel_threads_1_matches_manual_sequential_loop() {
+        // `threads <= 1` must be EXACTLY the same as calling
+        // get_overlaps_from_read + assign_read by hand in a loop (the prior
+        // driver code, before this function existed) -- a regression here
+        // would mean the "sequential fast path" silently changed behavior.
+        let consensus = b"ACGTACGTGGATTACAGATTACAGATTACAGATTACAGCCCTGACGTGTGACGTGTGACGTG".to_vec();
+        let filter = build_test_filter(&[("only", std::str::from_utf8(&consensus).unwrap())], 11);
+
+        let seq1 = b"ACGTACGTGGATTACAGATTACAGATTACAG".to_vec();
+        let seq2 = b"ATTACAGCCCTGACGTGTGACGTGTGACGTG".to_vec();
+        let mut sorted_seqs: Vec<&[u8]> = vec![&seq1, &seq2];
+        sorted_seqs.sort_unstable();
+
+        // Manual sequential loop (mirrors the pre-P2 driver code).
+        let mut manual_refs = vec![AlleleRef::new(consensus.clone(), None)];
+        let manual: Vec<Option<Vec<ExtendedOverlap>>> = sorted_seqs
+            .iter()
+            .map(|&seq| {
+                let raw = filter
+                    .get_overlaps_from_read(seq, &mut crate::ref_kmer_filter::Scratch::default())
+                    .unwrap_or_default();
+                assign_read(seq, &raw, &mut manual_refs, 0.8, 1)
+            })
+            .collect();
+
+        // assign_reads_parallel at threads=1.
+        let mut parallel_refs = vec![AlleleRef::new(consensus, None)];
+        let via_helper =
+            assign_reads_parallel(&filter, &sorted_seqs, &mut parallel_refs, 0.8, |_| 1, 1);
+
+        assert_eq!(manual, via_helper, "threads=1 must match the manual sequential loop exactly");
+        assert_eq!(
+            manual_refs[0].pos_weight.iter().map(|w| w.count).collect::<Vec<_>>(),
+            parallel_refs[0].pos_weight.iter().map(|w| w.count).collect::<Vec<_>>(),
+            "threads=1 must mutate pos_weight identically to the manual sequential loop"
+        );
+    }
+
+    #[test]
+    fn assign_reads_parallel_threads_4_matches_threads_1_byte_identical() {
+        // The core P2 invariant: parallelizing get_overlaps_from_read across
+        // several distinct sequences must not change either the returned
+        // ExtendedOverlaps OR the sequentially-applied pos_weight mutation,
+        // regardless of how many rayon workers computed which overlap.
+        let consensus = b"ACGTACGTGGATTACAGATTACAGATTACAGATTACAGCCCTGACGTGTGACGTGTGACGTGTGACGTGTGGATCAGATCAGATCAGATCAGGATCCATGGATCCATGGATCCATGACTGACTGACTGACTGCATGCATGCATGCATGGTACGTACGTACGTACG".to_vec();
+        let filter = build_test_filter(&[("only", std::str::from_utf8(&consensus).unwrap())], 11);
+
+        // Several distinct 40bp windows of the reference, so sorted_seqs has
+        // more entries than any thread count tested below.
+        let windows: Vec<Vec<u8>> = (0..8)
+            .map(|i| {
+                let start = i * 15;
+                consensus[start..start + 40].to_vec()
+            })
+            .collect();
+        let mut sorted_seqs: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
+        sorted_seqs.sort_unstable();
+        sorted_seqs.dedup();
+
+        let mut refs_t1 = vec![AlleleRef::new(consensus.clone(), None)];
+        let result_t1 = assign_reads_parallel(&filter, &sorted_seqs, &mut refs_t1, 0.8, |_| 1, 1);
+
+        let mut refs_t4 = vec![AlleleRef::new(consensus, None)];
+        let result_t4 = assign_reads_parallel(&filter, &sorted_seqs, &mut refs_t4, 0.8, |_| 1, 4);
+
+        assert_eq!(result_t1, result_t4, "threads=1 vs threads=4 ExtendedOverlaps must match");
+        assert_eq!(
+            refs_t1[0].pos_weight.iter().map(|w| w.count).collect::<Vec<_>>(),
+            refs_t4[0].pos_weight.iter().map(|w| w.count).collect::<Vec<_>>(),
+            "threads=1 vs threads=4 pos_weight mutations must match exactly"
+        );
+        assert!(
+            result_t1.iter().any(Option::is_some),
+            "sanity: at least one window should have produced overlaps"
+        );
     }
 
     // --- read_assignment_to_fragment_assignment ---
