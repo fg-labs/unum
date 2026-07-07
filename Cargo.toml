@@ -10,3 +10,14 @@ license = "MIT"
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Optimized build profile for CI test runs (see the `ci-test` cargo alias in
+# `.cargo/config.toml`). The heavy end-to-end / golden tests exercise the real
+# k-mer, alignment, and EM kernels in `unum-core`; unoptimized they dominate CI
+# wall time (a single genotype e2e run takes ~40s+ in debug). This profile keeps
+# `dev`'s debug-assertions and overflow-checks (so tests still catch UB) while
+# turning on optimization, and lives in its own `target/ci-test/` dir so a plain
+# local `cargo test` stays fast to compile.
+[profile.ci-test]
+inherits = "dev"
+opt-level = 3
