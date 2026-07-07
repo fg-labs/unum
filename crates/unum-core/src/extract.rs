@@ -79,8 +79,8 @@
 //! inner loop reproduces this exact short-circuit via Rust's `||`
 //! short-circuit evaluation.
 //!
-//! # Output order == input order, at ANY thread count -- why single-threaded
-//! Rust is byte-identical to the oracle regardless of `-t`
+//! # Output order == input order, at ANY thread count -- why this port's
+//! `-t N` is byte-identical to `-t 1` and to the oracle
 //!
 //! `FastqExtractor.cpp` has two code paths, gated on `threadCnt`:
 //! - `threadCnt == 1` (`FastqExtractor.cpp:447-480`): a single `while
@@ -101,17 +101,39 @@
 //!   order, one after another. So multi-threading only parallelizes the
 //!   per-read FILTER DECISION (a pure, side-effect-free boolean
 //!   computation, order-independent by construction), never the emission
-//!   order, which is ALWAYS sequential-in-input-order on both paths. A
-//!   correct single-threaded Rust re-implementation therefore produces
-//!   byte-identical output to the oracle at ANY `-t`, which is why this
-//!   module implements the decision-and-emit loop single-threaded
-//!   internally (see the CLI's `extract` subcommand for the `-t` flag,
-//!   accepted for compatibility but not used to spawn parallel workers).
+//!   order, which is ALWAYS sequential-in-input-order on both paths.
+//!
+//! [`extract_candidates_with_threads`] follows exactly the same pattern:
+//! `threads <= 1` runs the plain sequential decide-and-emit loop
+//! ([`run_sequential`], byte-identical to [`extract_candidates`]'s prior
+//! single-threaded-only behavior); `threads > 1` reads a bounded batch (`512
+//! * threads` pairs, mirroring stock's own batch size), evaluates every
+//! pair's [`is_good_pair`] decision across a `rayon` thread pool (each worker
+//! reusing its own [`Scratch`] via `map_init`, so no output-affecting state
+//! is EVER shared across threads -- only the immutable [`RefKmerFilter`] is,
+//! which is `Sync` because [`RefKmerFilter::is_good_candidate_with_scratch`]
+//! takes `&self`), collects the decisions into an order-preserving `Vec`
+//! (`rayon`'s `collect()` on an `IndexedParallelIterator` -- which
+//! `Vec::par_iter()`'s `.map_init()` is -- preserves input order), then emits
+//! passing pairs to `sink` SEQUENTIALLY in original batch order (see
+//! [`run_batch_parallel`]). This makes `-t N` output byte-identical to `-t 1`
+//! output (and therefore to the oracle) at ANY `N`, for exactly the same
+//! reason stock's own `-t N` output is threadCnt-invariant.
 
 use crate::fastq::{FastqReader, FastqRecord};
 use crate::ref_kmer_filter::{RefKmerFilter, Scratch};
 use anyhow::{Context, Result, bail, ensure};
+use rayon::prelude::*;
 use std::path::Path;
+
+/// Batch size used by the parallel (`threads > 1`) extraction path, mirroring
+/// `FastqExtractor.cpp:521-524`'s `512 * threadCnt` batch-read size: enough
+/// pairs per batch to keep every worker busy without unbounded memory growth
+/// on very large inputs. Purely a throughput/memory knob -- it has NO effect
+/// on output (see [`extract_candidates`]'s module docs: batches are still
+/// processed strictly in file order, one after another, and decisions within
+/// a batch are collected order-preserving before any emission happens).
+const PARALLEL_BATCH_SIZE_PER_THREAD: usize = 512;
 
 /// `FastqExtractor.cpp:390`: base `hitLenRequired` for paired input.
 const HIT_LEN_REQUIRED_PAIRED: i32 = 27;
@@ -211,6 +233,41 @@ pub fn extract_candidates(
     ref_seq_similarity: f64,
     sink: &mut impl CandidateSink,
 ) -> Result<ExtractMetrics> {
+    extract_candidates_with_threads(source, filter, ref_seq_similarity, 1, sink)
+}
+
+/// Same as [`extract_candidates`], but runs the per-pair candidate DECISION
+/// (`IsGoodCandidate` on mate 1, short-circuit-then-mate-2) across `threads`
+/// worker threads via a scoped `rayon` thread pool, while keeping emission
+/// strictly sequential in input order -- see the module docs ("Output order
+/// == input order") for why this makes the output byte-identical to the
+/// `threads == 1` path (and to the oracle) at ANY thread count.
+///
+/// `threads <= 1` takes the exact sequential fast path (no rayon pool is
+/// built at all), matching [`extract_candidates`]'s prior behavior exactly.
+/// `threads > 1` reads pairs into a bounded batch (up to
+/// `threads * `[`PARALLEL_BATCH_SIZE_PER_THREAD`]` pairs per batch, mirroring
+/// `FastqExtractor.cpp`'s own `512 * threadCnt` batching -- module docs),
+/// evaluates every pair's candidate decision in parallel (each worker reusing
+/// its own [`Scratch`] via `rayon`'s `map_init`, so `has_hit_in_set`'s hot
+/// buffers are never reallocated per-read even under threading -- folding in
+/// the per-thread scratch-buffer design from the single-threaded scratch-
+/// reuse commits), collects the decisions in an order-preserving `Vec`
+/// (`rayon`'s parallel iterators preserve input order on `collect()`), then
+/// emits passing pairs to `sink` sequentially over the batch in original
+/// order. Batches themselves are still read and processed strictly one after
+/// another in file order, so no output can ever depend on `threads`.
+///
+/// # Errors
+///
+/// See [`extract_candidates`].
+pub fn extract_candidates_with_threads(
+    source: &mut ReadSource,
+    filter: &mut RefKmerFilter,
+    ref_seq_similarity: f64,
+    threads: usize,
+    sink: &mut impl CandidateSink,
+) -> Result<ExtractMetrics> {
     let has_mate = matches!(source, ReadSource::Paired(_, _));
 
     // Step 2: base hitLenRequired (FastqExtractor.cpp:390-392).
@@ -261,43 +318,20 @@ pub fn extract_candidates(
 
     // Main extraction pass (FastqExtractor.cpp:447-480, single-threaded
     // reference semantics -- see module docs for why this is byte-identical
-    // to the oracle's output at ANY -t).
-    let mut scratch = Scratch::default();
-    let mut total_reads: u64 = 0;
-    let mut candidates_emitted: u64 = 0;
-
-    loop {
-        let (rec1, rec2) = match source {
-            ReadSource::Single(r) => {
-                let Some(rec1) = r.next_record().context("reading single-end read")? else {
-                    break;
-                };
-                (rec1, None)
-            }
-            ReadSource::Paired(r1, r2) => {
-                let Some(rec1) = r1.next_record().context("reading mate-1 read")? else {
-                    break;
-                };
-                let Some(rec2_val) = r2.next_record().context("reading mate-2 read")? else {
-                    bail!("The two mate-pair read files have different number of reads.");
-                };
-                (rec1, Some(rec2_val))
-            }
-        };
-        total_reads += 1;
-
-        // FastqExtractor.cpp:463-468: exact short-circuit -- read 2 is
-        // never filter-evaluated once read 1 already passed.
-        let good = filter.is_good_candidate_with_scratch(&rec1.seq, &mut scratch)
-            || rec2
-                .as_ref()
-                .is_some_and(|r2| filter.is_good_candidate_with_scratch(&r2.seq, &mut scratch));
-
-        if good {
-            sink.emit_pair(&rec1, rec2.as_ref())?;
-            candidates_emitted += 1;
-        }
-    }
+    // to the oracle's output at ANY -t). `threads <= 1` runs the plain
+    // sequential decide-and-emit loop (unchanged from before this function
+    // gained a `threads` parameter); `threads > 1` batches reads and
+    // parallelizes only the decision (see `run_batch_parallel`'s doc
+    // comment).
+    let (total_reads, candidates_emitted) = if threads <= 1 {
+        run_sequential(source, filter, sink)?
+    } else {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .context("building rayon thread pool for parallel extraction")?;
+        run_batch_parallel(source, filter, &pool, threads, sink)?
+    };
 
     // DIVERGENCE from T1K (see docs/DIVERGENCES.md): stock loops on mate-1
     // (`FastqExtractor.cpp:449-479`) and errors only when mate-2 is *exhausted
@@ -319,6 +353,126 @@ pub fn extract_candidates(
         kmer_length: filter.kmer_length(),
         hit_len_required,
     })
+}
+
+/// Reads one pair/read from `source`. `Ok(None)` means mate-1 (or the
+/// single-end source) is exhausted -- the caller should stop. An error is
+/// returned if mate-2 is exhausted before mate-1 (matching
+/// `FastqExtractor.cpp:451-455`'s "different number of reads" error).
+fn read_next_pair(source: &mut ReadSource) -> Result<Option<(FastqRecord, Option<FastqRecord>)>> {
+    match source {
+        ReadSource::Single(r) => {
+            let Some(rec1) = r.next_record().context("reading single-end read")? else {
+                return Ok(None);
+            };
+            Ok(Some((rec1, None)))
+        }
+        ReadSource::Paired(r1, r2) => {
+            let Some(rec1) = r1.next_record().context("reading mate-1 read")? else {
+                return Ok(None);
+            };
+            let Some(rec2_val) = r2.next_record().context("reading mate-2 read")? else {
+                bail!("The two mate-pair read files have different number of reads.");
+            };
+            Ok(Some((rec1, Some(rec2_val))))
+        }
+    }
+}
+
+/// Evaluates the per-pair candidate decision for a single pair/read,
+/// reproducing `FastqExtractor.cpp:463-468`'s exact short-circuit: read 2 is
+/// never filter-evaluated once read 1 already passed. Shared by both the
+/// sequential and parallel paths so the decision logic itself has exactly
+/// one implementation.
+fn is_good_pair(
+    filter: &RefKmerFilter,
+    rec1: &FastqRecord,
+    rec2: Option<&FastqRecord>,
+    scratch: &mut Scratch,
+) -> bool {
+    filter.is_good_candidate_with_scratch(&rec1.seq, scratch)
+        || rec2.is_some_and(|r2| filter.is_good_candidate_with_scratch(&r2.seq, scratch))
+}
+
+/// The plain sequential decide-and-emit loop: reads, decides, and (if
+/// passing) emits each pair one at a time, in file order. Returns
+/// `(total_reads, candidates_emitted)`.
+fn run_sequential(
+    source: &mut ReadSource,
+    filter: &RefKmerFilter,
+    sink: &mut impl CandidateSink,
+) -> Result<(u64, u64)> {
+    let mut scratch = Scratch::default();
+    let mut total_reads: u64 = 0;
+    let mut candidates_emitted: u64 = 0;
+
+    while let Some((rec1, rec2)) = read_next_pair(source)? {
+        total_reads += 1;
+        if is_good_pair(filter, &rec1, rec2.as_ref(), &mut scratch) {
+            sink.emit_pair(&rec1, rec2.as_ref())?;
+            candidates_emitted += 1;
+        }
+    }
+
+    Ok((total_reads, candidates_emitted))
+}
+
+/// The parallel-decision path: reads a bounded batch of pairs in file order,
+/// evaluates every pair's [`is_good_pair`] decision across `pool`'s worker
+/// threads (each worker reusing its own [`Scratch`] via `rayon::map_init`),
+/// collects the decisions into an order-preserving `Vec` (`rayon`'s
+/// `collect()` on an `IndexedParallelIterator` preserves input order), then
+/// emits passing pairs to `sink` SEQUENTIALLY over the batch in original
+/// order -- never in parallel. Batches are processed one after another,
+/// strictly in file order, so this is byte-identical to [`run_sequential`]'s
+/// output regardless of `threads`/batch size. Returns
+/// `(total_reads, candidates_emitted)`.
+fn run_batch_parallel(
+    source: &mut ReadSource,
+    filter: &RefKmerFilter,
+    pool: &rayon::ThreadPool,
+    threads: usize,
+    sink: &mut impl CandidateSink,
+) -> Result<(u64, u64)> {
+    let batch_capacity = threads.saturating_mul(PARALLEL_BATCH_SIZE_PER_THREAD).max(1);
+    let mut total_reads: u64 = 0;
+    let mut candidates_emitted: u64 = 0;
+
+    loop {
+        // Read a batch in strict file order (sequential; only the DECISION
+        // below is parallelized).
+        let mut batch: Vec<(FastqRecord, Option<FastqRecord>)> = Vec::with_capacity(batch_capacity);
+        while batch.len() < batch_capacity {
+            match read_next_pair(source)? {
+                Some(pair) => batch.push(pair),
+                None => break,
+            }
+        }
+        if batch.is_empty() {
+            break;
+        }
+        total_reads += u64::try_from(batch.len()).unwrap_or(u64::MAX);
+
+        // Parallel decision, order-preserving collect.
+        let decisions: Vec<bool> = pool.install(|| {
+            batch
+                .par_iter()
+                .map_init(Scratch::default, |scratch, (rec1, rec2)| {
+                    is_good_pair(filter, rec1, rec2.as_ref(), scratch)
+                })
+                .collect()
+        });
+
+        // Sequential emit, in original batch (== file) order.
+        for ((rec1, rec2), good) in batch.into_iter().zip(decisions) {
+            if good {
+                sink.emit_pair(&rec1, rec2.as_ref())?;
+                candidates_emitted += 1;
+            }
+        }
+    }
+
+    Ok((total_reads, candidates_emitted))
 }
 
 /// Samples up to [`HIT_LEN_SAMPLE_SIZE`] records from `read1`, returning
