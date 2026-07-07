@@ -3,7 +3,7 @@
 
 # unum
 
-`unum` is a pure-Rust HLA/KIR genotyper — a port of [T1K](https://github.com/mourisl/T1K) that rebuilds its kmer-based genotyping pipeline in Rust. The port was validated by differential-testing against the original C++ implementation; that byte-for-byte parity is now frozen into self-contained golden/unit tests, so `unum` has no C++ dependency.
+`unum` is a pure-Rust HLA/KIR genotyper — a port of [T1K](https://github.com/mourisl/T1K) that rebuilds its kmer-based genotyping pipeline in Rust. It started as a byte-identical port, validated by differential-testing against the original C++ implementation, but has since diverged from T1K with deliberate bug fixes and improvements. Owning the port lets us correct T1K's latent bugs and improve behavior where `unum` can do better; every such divergence is tracked in [docs/DIVERGENCES.md](docs/DIVERGENCES.md). Much of the original byte-for-byte parity remains frozen into self-contained golden/unit tests, and `unum` has no C++ dependency.
 
 <p>
 <a href="https://fulcrumgenomics.com">
@@ -32,6 +32,10 @@ cargo build
 ```
 
 The build is pure Rust with no C++ dependency — `unum-core` and `unum` never invoke a C++ compiler.
+
+## Divergences from T1K
+
+`unum` began as a byte-identical port but intentionally diverges from T1K where it can be more correct or robust. Each divergence — what changed, why, and the T1K source it departs from — is recorded in [docs/DIVERGENCES.md](docs/DIVERGENCES.md).
 
 ## License
 

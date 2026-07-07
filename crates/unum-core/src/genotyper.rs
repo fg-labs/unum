@@ -1231,15 +1231,80 @@ struct Assembled {
 /// expected: every allele index this port produces is small and
 /// non-negative).
 #[must_use]
-#[allow(clippy::too_many_lines, clippy::similar_names)]
 pub fn read_assignment_to_fragment_assignment(
     overlaps1: &[ExtendedOverlap],
     overlaps2: Option<&[ExtendedOverlap]>,
     has_n: bool,
     hit_len_required: i32,
     consensus_len_of: impl Fn(u32) -> i32,
-    mut separator_in_range: impl FnMut(i32, i32, i32) -> bool,
+    separator_in_range: impl FnMut(i32, i32, i32) -> bool,
 ) -> Vec<FragmentOverlap> {
+    read_assignment_to_fragment_assignment_impl(
+        overlaps1,
+        overlaps2,
+        has_n,
+        hit_len_required,
+        consensus_len_of,
+        separator_in_range,
+    )
+    .into_iter()
+    .map(|a| a.fragment)
+    .collect()
+}
+
+/// Same port as [`read_assignment_to_fragment_assignment`], but additionally
+/// returns each kept fragment's underlying mate-end [`ExtendedOverlap`](s) it
+/// was built from (`_fragmentOverlap::overlap1`/`overlap2`,
+/// `SeqSet.hpp:158-159`) alongside the [`FragmentOverlap`] itself.
+///
+/// [`read_assignment_to_fragment_assignment`] (5a/5b's entry point) discards
+/// this `overlap1`/`overlap2` state once fragment assembly finishes, since
+/// [`Genotyper::set_read_assignments`] never reads it. Task 6b's `Analyzer`
+/// driver DOES need it: `_fragmentOverlap::overlap1`/`overlap2` (the
+/// per-mate-end coordinates/strand) are exactly what
+/// `SeqSet::AddOverlapAlignmentInfo`/`AddFragmentAlignmentInfo`
+/// (`SeqSet.hpp:2657-2680,2758-2778`) populate an alignment op-sequence onto
+/// before `VariantCaller::ComputeVariant` runs -- see
+/// [`crate::variant_caller::add_fragment_alignment_info`]. Rather than
+/// widening [`FragmentOverlap`]'s public fields (which would ripple into
+/// every 5a/5b caller that has no use for them), this is a second, additive
+/// entry point over the exact same shared implementation.
+#[must_use]
+pub fn read_assignment_to_fragment_assignment_with_overlaps(
+    overlaps1: &[ExtendedOverlap],
+    overlaps2: Option<&[ExtendedOverlap]>,
+    has_n: bool,
+    hit_len_required: i32,
+    consensus_len_of: impl Fn(u32) -> i32,
+    separator_in_range: impl FnMut(i32, i32, i32) -> bool,
+) -> Vec<(FragmentOverlap, ExtendedOverlap, Option<ExtendedOverlap>)> {
+    read_assignment_to_fragment_assignment_impl(
+        overlaps1,
+        overlaps2,
+        has_n,
+        hit_len_required,
+        consensus_len_of,
+        separator_in_range,
+    )
+    .into_iter()
+    .map(|a| (a.fragment, a.overlap1, a.overlap2))
+    .collect()
+}
+
+/// Shared implementation behind [`read_assignment_to_fragment_assignment`]
+/// and [`read_assignment_to_fragment_assignment_with_overlaps`] -- see the
+/// former's doc comment for the full C++ citation; this function differs
+/// from that doc comment only in its `Vec<Assembled>` return type (both
+/// public wrappers project out exactly what they need from it).
+#[allow(clippy::too_many_lines, clippy::similar_names)]
+fn read_assignment_to_fragment_assignment_impl(
+    overlaps1: &[ExtendedOverlap],
+    overlaps2: Option<&[ExtendedOverlap]>,
+    has_n: bool,
+    hit_len_required: i32,
+    consensus_len_of: impl Fn(u32) -> i32,
+    mut separator_in_range: impl FnMut(i32, i32, i32) -> bool,
+) -> Vec<Assembled> {
     // Build the (mate1Idx, mate2Idx) fragment index pairs (SeqSet.hpp:2314-2384).
     // `-1` (C++'s sentinel for "no pairing on this side") is modeled as `None`.
     let mut fragments: Vec<(Option<usize>, Option<usize>)> = Vec::new();
@@ -1495,7 +1560,7 @@ pub fn read_assignment_to_fragment_assignment(
         }
     }
 
-    assign.into_iter().map(|a| a.fragment).collect()
+    assign
 }
 
 /// Ported from `_fragmentOverlap::operator<` (`SeqSet.hpp:161-172`): the

@@ -29,15 +29,15 @@
 //! exactly the deduplicated allele set `Genotyper::init_allele_info` also sees.
 //!
 //! [`RefKmerFilter::from_reference_fasta`] only accepts a filesystem path (not an in-memory
-//! sequence list), so [`load_reference`] writes the deduplicated sequences to a scratch file
-//! under [`std::env::temp_dir`] (process-id-and-counter-unique name, removed before returning)
-//! rather than widening that Phase-3/3b/4 API -- this CLI crate is exactly the layer allowed to
-//! do ordinary filesystem I/O as an implementation detail.
+//! sequence list), so [`load_reference`] writes the deduplicated sequences to a securely-created
+//! scratch file under [`std::env::temp_dir`] (via `tempfile`, unlinked on drop) rather than
+//! widening that Phase-3/3b/4 API -- this CLI crate is exactly the layer allowed to do ordinary
+//! filesystem I/O as an implementation detail.
 use crate::cli::GenotypeArgs;
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use unum_core::fastq::FastqReader;
 use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper};
 use unum_core::ref_kmer_filter::RefKmerFilter;
@@ -368,30 +368,26 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
 /// module's doc comment for why), so this writes a scratch FASTA to
 /// [`std::env::temp_dir`] and removes it before returning.
 fn build_ref_kmer_filter(names: &[String], consensus: &[Vec<u8>]) -> Result<RefKmerFilter> {
-    let scratch_path: PathBuf = std::env::temp_dir().join(format!(
-        "unum-genotype-ref-{}-{}.fa",
-        std::process::id(),
-        SCRATCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-
-    {
-        let mut f = std::fs::File::create(&scratch_path).with_context(|| {
-            format!("creating scratch reference FASTA {}", scratch_path.display())
-        })?;
-        for (name, seq) in names.iter().zip(consensus) {
-            writeln!(f, ">{name}")?;
-            f.write_all(seq)?;
-            writeln!(f)?;
-        }
+    // Use a securely-created temp file (random name + O_EXCL, via `tempfile`)
+    // rather than a predictable `temp_dir()/pid-counter` path: a predictable
+    // name in a shared temp dir can be pre-created or symlink-swapped by another
+    // local user. `NamedTempFile` is unlinked on drop, so it cleans up on every
+    // return path (including the error path below).
+    let mut scratch = tempfile::Builder::new()
+        .prefix("unum-genotype-ref-")
+        .suffix(".fa")
+        .tempfile()
+        .context("creating scratch reference FASTA")?;
+    for (name, seq) in names.iter().zip(consensus) {
+        writeln!(scratch, ">{name}")?;
+        scratch.write_all(seq)?;
+        writeln!(scratch)?;
     }
+    scratch.flush().context("flushing scratch reference FASTA")?;
 
-    let result = RefKmerFilter::from_reference_fasta(&scratch_path, GENOTYPER_KMER_LENGTH)
-        .with_context(|| format!("building k-mer index over {} deduplicated alleles", names.len()));
-    let _ = std::fs::remove_file(&scratch_path);
-    result
+    RefKmerFilter::from_reference_fasta(scratch.path(), GENOTYPER_KMER_LENGTH)
+        .with_context(|| format!("building k-mer index over {} deduplicated alleles", names.len()))
 }
-
-static SCRATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Ported from `Genotyper.cpp:658-670`: writes `{prefix}_genotype.tsv`, one
 /// row per gene, formatted as `{geneName}\t{calledAlleleCnt}\t{allele1}\t
