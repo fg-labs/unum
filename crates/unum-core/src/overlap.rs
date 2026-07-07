@@ -655,14 +655,17 @@ pub(crate) fn get_overlaps_from_hits_with_coords(
             // sorted-hitCoordDiff-local positions against unrelated absolute
             // `hits` entries whenever `i > 0` or the sort actually
             // reordered anything), but it is EXACTLY what stock does, so it
-            // is reproduced verbatim rather than "fixed". For this
-            // codebase's only caller (`has_hit_in_set`'s gate 2, always
-            // `filter == 0` on a single already-homogeneous `(strand, idx)`
-            // bucket), `remove_only_repeats` is never set (`filter == 1`
-            // only) and `i` is always `0`, so this quirk is provably inert
-            // on the reachable path -- but it is still ported generally
-            // (matching stock bit-for-bit) rather than special-cased away,
-            // per this module's "ported generally" scope note.
+            // is reproduced verbatim rather than "fixed". It is provably
+            // INERT on every reachable path: this block runs only when
+            // `remove_only_repeats[..]` is set, which happens only under
+            // `filter == 1` (see the `filter == 1` block earlier in this
+            // function), and BOTH callers -- `has_hit_in_set` and
+            // `get_overlaps_from_read` -- pass `filter == 0`. (Manifesting the
+            // bug would also need `i > 0` or a reordering sort;
+            // `get_overlaps_from_read` can supply `i > 0`, so inertness rests
+            // on the `filter == 0` gate, NOT on `i == 0`.) It is still ported
+            // generally rather than special-cased away, per this module's
+            // "ported generally" scope note.
             if remove_only_repeats[is_plus_strand] {
                 let hi = s.min(hit_size);
                 let he = e.min(hit_size);
