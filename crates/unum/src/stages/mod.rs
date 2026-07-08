@@ -15,20 +15,41 @@
 //! (genotype -> analyze in-memory hand-off is a deliberate follow-up, out of
 //! scope here).
 //!
-//! # Scope: FASTQ paired + single-end only; no native BAM (`-b`) yet
+//! # Scope: FASTQ paired/single-end, and BAM/CRAM (no-alignment + coordinate alignment)
 //!
-//! `-1`/`-2` (paired) and `-u` (single-end) FASTQ input are supported. `-b`
-//! (BAM/CRAM) input is NOT yet wired into the fused flow -- the extract
-//! library's `bam_extract` path exists but plumbing it into `run` (coord-FASTA
-//! resolution, gene intervals) is a follow-up; `-b` on `run` currently errors
-//! with a clear message.
-use crate::cli::{GenotypeArgs, RunArgs};
-use anyhow::{Context, bail};
+//! `-1`/`-2` (paired) and `-u` (single-end) FASTQ input are supported via [`run`]'s
+//! original in-memory extract -> genotype fusion. `-b` (BAM/CRAM) input is ALSO fused
+//! in-memory, via [`run_bam_fused`]: `--bam-mode no-alignment` (coordinate/unsorted 2-pass
+//! or grouped/name-sorted one-pass, matching `extract::run_bam_no_alignment`'s routing)
+//! and `--bam-mode alignment` on a COORDINATE-sorted BAM/CRAM are both wired through
+//! [`unum_core::bam_extract`] into an [`unum_core::extract::InMemoryCandidateSink`], same
+//! as the FASTQ path. `--bam-mode alignment` on a grouped/name-sorted BAM/CRAM is NOT yet
+//! supported here (the grouped-alignment extractor doesn't exist yet) and errors with a
+//! clear message. `-r` is accepted (and required for CRAM); for BAM it is accepted and
+//! ignored, matching `extract`'s own CRAM handling. Unlike the FASTQ path, `has_mate` for
+//! BAM/CRAM input is derived from the extractor's own [`unum_core::bam_extract::BamExtractMetrics::single_end`]
+//! (there is no `-2` flag for BAM). `-o` remains required for both input kinds -- no T1K
+//! basename inference.
+use crate::cli::{BamMode, GenotypeArgs, RunArgs};
+use anyhow::{Context, bail, ensure};
+use unum_core::bam_extract::BamExtractMetrics;
+use unum_core::extract::InMemoryCandidateSink;
 
 pub mod analyze;
 pub mod build;
 pub mod extract;
 pub mod genotype;
+
+/// `extract`'s `--abnormal-unmapped` flag isn't exposed by [`RunArgs`] (mirrors
+/// `genotype_args_for`'s hardcoded defaults): [`run_bam_alignment_fused`] always passes the
+/// same default `ExtractArgs` itself defaults to when the flag is omitted.
+const RUN_BAM_ABNORMAL_UNALIGNED_FLAG: bool = false;
+
+/// `extract`'s `--mate-id-suffix-len` flag isn't exposed by [`RunArgs`] (mirrors
+/// [`RUN_BAM_ABNORMAL_UNALIGNED_FLAG`]'s doc comment): [`run_bam_no_alignment_fused`]/
+/// [`run_bam_alignment_fused`] always pass the same default `ExtractArgs` itself defaults to
+/// when the flag is omitted.
+const RUN_BAM_MATE_ID_SUFFIX_LEN: i32 = -1;
 
 /// The resolved FASTQ read source for the fused native path.
 enum FastqSource<'a> {
@@ -38,15 +59,10 @@ enum FastqSource<'a> {
     Single(&'a str),
 }
 
-/// Resolves `-1`/`-2`/`-u`/`-b` into a [`FastqSource`], rejecting BAM input on the fused path and
-/// the usual mutually-exclusive-flag misuse (mirroring [`extract`]'s own validation).
+/// Resolves `-1`/`-2`/`-u` into a [`FastqSource`], enforcing the usual mutually-exclusive-flag
+/// misuse (mirroring [`extract`]'s own validation). Never called when `-b` is given -- [`run`]
+/// branches to [`run_bam_fused`] before reaching this function.
 fn resolve_fastq_source(args: &RunArgs) -> anyhow::Result<FastqSource<'_>> {
-    if args.bam.is_some() {
-        bail!(
-            "BAM/CRAM input (-b) is not yet supported by `unum run`; extract candidates with \
-             `unum extract -b ...` and genotype separately"
-        );
-    }
     let paired = args.mate1.is_some() || args.mate2.is_some();
     if paired && args.single.is_some() {
         bail!("specify either -u (single-end) or -1/-2 (paired), not both");
@@ -81,10 +97,21 @@ fn resolve_fastq_source(args: &RunArgs) -> anyhow::Result<FastqSource<'_>> {
 pub fn run(args: &RunArgs) -> anyhow::Result<()> {
     use std::path::Path;
     use unum_core::extract as core_extract;
-    use unum_core::extract::InMemoryCandidateSink;
     use unum_core::ref_kmer_filter::RefKmerFilter;
 
     let prefix = resolve_prefix(args)?;
+
+    if let Some(bam) = args.bam.as_deref() {
+        // Mirrors `extract::resolve_extract_input`'s `-b` arm: `-b` is mutually exclusive
+        // with the FASTQ flags, so a caller combining them gets a clear error instead of
+        // `run_bam_fused` silently winning and the FASTQ flags being discarded.
+        ensure!(
+            args.mate1.is_none() && args.mate2.is_none() && args.single.is_none(),
+            "-b (BAM/CRAM mode) is mutually exclusive with -1/-2/-u"
+        );
+        return run_bam_fused(args, &prefix, bam);
+    }
+
     let source_desc = resolve_fastq_source(args)?;
 
     // --- Extract candidates in memory (fastq-extractor port) ---
@@ -142,6 +169,267 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
     run_analyze_native_source(args, &prefix, &allele_tsv, &aligned_1, &aligned_2, has_mate)?;
 
     Ok(())
+}
+
+/// Runs the BAM/CRAM branch of the fused `run` pipeline: extracts candidates from `bam` via
+/// [`unum_core::bam_extract`] straight into an in-memory
+/// [`unum_core::extract::InMemoryCandidateSink`] (no `{prefix}_candidate_*.fq` on disk), then
+/// hands them to the genotyper and analyzer exactly as [`run`]'s FASTQ branch does.
+///
+/// Routes on `--bam-mode` (`args.bam_mode`, required) and, for `no-alignment`, on the BAM's own
+/// `@HD` sort order -- EXACTLY mirroring `extract::run_bam_no_alignment`/
+/// `extract::run_bam_alignment`'s dispatch:
+/// - `no-alignment` on a coordinate-sorted/unsorted file: the seekable 2-pass
+///   ([`bam_extract::extract_from_bam_no_alignment`]).
+/// - `no-alignment` on a grouped/name-sorted file: the one-pass
+///   ([`bam_extract::extract_from_bam_no_alignment_grouped`]), fed a factory that always
+///   returns a fresh [`InMemoryCandidateSink`] (there is no output-naming decision to make in
+///   the fused path, unlike the CLI `extract` subcommand's `FastqFileSink`).
+/// - `alignment` on a coordinate-sorted file: [`bam_extract::extract_from_bam_with_threads`],
+///   fed gene intervals resolved from `-c` via [`bam_extract::parse_coord_fa`]/
+///   [`bam_extract::build_genes`].
+/// - `alignment` on a grouped/name-sorted file: NOT YET SUPPORTED -- the grouped-alignment
+///   one-pass extractor does not exist yet (a later task); errors with a clear message
+///   pointing at `samtools sort` as the workaround.
+/// - `alignment` on an unsorted file: rejected (mirrors `extract::run_bam_alignment`).
+///
+/// Unlike the FASTQ branch, `has_mate` is derived from the extractor's own
+/// `BamExtractMetrics::single_end` (there is no `-2` flag for BAM/CRAM input) -- see this
+/// module's doc comment.
+///
+/// # Errors
+///
+/// Returns an error if: `--bam-mode` is not given; the input cannot be content-sniffed/opened
+/// (including a missing `-r` for CRAM, or a mistaken FASTQ/FASTA `-b`); `--bam-mode alignment`
+/// is given a grouped/name-sorted or unsorted BAM/CRAM; `--bam-mode alignment` is given without
+/// `-c`; `--bam-mode no-alignment` is given `-c` (rejected -- see
+/// [`run_bam_no_alignment_fused`]); or the underlying extraction/genotyping/analysis itself
+/// fails.
+fn run_bam_fused(args: &RunArgs, prefix: &str, bam: &str) -> anyhow::Result<()> {
+    use unum_core::read_input::{InputSpec, OpenedInput, open_input};
+
+    let mode = args.bam_mode.context("run -b requires --bam-mode {alignment|no-alignment}")?;
+
+    // Content-sniff to distinguish BAM from CRAM (and reject a mistaken FASTQ/FASTA `-b`),
+    // mirroring `extract::resolve_extract_input`'s `-b` arm.
+    let (opened, _fmt) = open_input(&InputSpec::Path(std::path::PathBuf::from(bam)))
+        .with_context(|| format!("opening input {bam}"))?;
+    let is_cram = match opened {
+        OpenedInput::Bam => false,
+        OpenedInput::Cram => true,
+        OpenedInput::Fastq(_) => {
+            bail!("-b expects a BAM/CRAM file, but {bam} is FASTQ/FASTA input")
+        }
+    };
+    let reference = require_reference_for_cram_run(args, is_cram)?;
+    let threads = usize::try_from(args.threads).unwrap_or(usize::MAX).max(1);
+
+    let (single_end, sink) = match mode {
+        BamMode::NoAlignment => run_bam_no_alignment_fused(args, bam, reference, threads)?,
+        BamMode::Alignment => run_bam_alignment_fused(args, bam, reference, threads)?,
+    };
+
+    let has_mate = !single_end;
+    let (reads1, reads2) = sink.into_reads();
+
+    // --- Genotype directly from the in-memory candidate reads ---
+    let genotype_args = genotype_args_for(args, prefix);
+    genotype::run_with_candidate_reads(&genotype_args, reads1, reads2, has_mate)
+        .context("genotyping candidate reads")?;
+
+    // --- Analyze (native) on the genotyper's on-disk `_aligned_*.fa` ---
+    let allele_tsv = format!("{prefix}_allele.tsv");
+    let aligned_1 =
+        if has_mate { format!("{prefix}_aligned_1.fa") } else { format!("{prefix}_aligned.fa") };
+    let aligned_2 = format!("{prefix}_aligned_2.fa");
+    run_analyze_native_source(args, prefix, &allele_tsv, &aligned_1, &aligned_2, has_mate)?;
+
+    Ok(())
+}
+
+/// `run_bam_fused`'s `--bam-mode no-alignment` route: builds the [`RefKmerFilter`] straight
+/// from `-f` (same as the FASTQ path -- no coord-FASTA/gene-interval step) and routes by
+/// `alignments`' own `@HD` sort order, exactly like `extract::run_bam_no_alignment`: a
+/// coordinate/unsorted file takes the seekable 2-pass name-map
+/// ([`bam_extract::extract_from_bam_no_alignment`]); a grouped/name-sorted file takes the
+/// one-pass ([`bam_extract::extract_from_bam_no_alignment_grouped`]), fed a factory that always
+/// returns a fresh [`InMemoryCandidateSink`] (there is no output-naming decision to make in the
+/// fused path, unlike the CLI `extract` subcommand's `FastqFileSink`).
+///
+/// # Errors
+///
+/// Returns an error if `-c` was given (rejected: `no-alignment` has no aligned intervals to
+/// build gene records from, mirroring `extract::require_no_coord_fasta`), the reference FASTA
+/// cannot be opened/parsed, the BAM/CRAM cannot be opened, or the underlying extraction itself
+/// fails.
+fn run_bam_no_alignment_fused(
+    args: &RunArgs,
+    bam: &str,
+    reference: Option<&str>,
+    threads: usize,
+) -> anyhow::Result<(bool, InMemoryCandidateSink)> {
+    use std::path::Path;
+    use unum_core::alignments::{Alignments, SortOrder};
+    use unum_core::bam_extract;
+    use unum_core::ref_kmer_filter::RefKmerFilter;
+
+    ensure!(
+        args.ref_coord_fasta.is_none(),
+        "-c (coord FASTA) applies only to run -b --bam-mode alignment, not --bam-mode \
+         no-alignment"
+    );
+
+    let mut filter = RefKmerFilter::from_reference_fasta(
+        Path::new(&args.ref_seq_fasta),
+        self::extract::INITIAL_KMER_LENGTH,
+    )
+    .with_context(|| format!("loading reference FASTA {}", args.ref_seq_fasta))?;
+    let mut alignments = Alignments::open_with_reference(bam, reference)
+        .with_context(|| format!("opening BAM/CRAM {bam}"))?;
+
+    match alignments.sort_order() {
+        SortOrder::QueryName | SortOrder::QueryGrouped => {
+            let (metrics, single_end, sink) = bam_extract::extract_from_bam_no_alignment_grouped(
+                &mut alignments,
+                &mut filter,
+                unum_core::extract::DEFAULT_REF_SEQ_SIMILARITY,
+                RUN_BAM_MATE_ID_SUFFIX_LEN,
+                threads,
+                |_single_end| Ok(InMemoryCandidateSink::new()),
+            )
+            .context("extracting candidate reads from BAM (grouped no-alignment)")?;
+            report_bam_extract_metrics(single_end, &metrics);
+            Ok((single_end, sink))
+        }
+        SortOrder::Coordinate | SortOrder::Unsorted => {
+            let mut sink = InMemoryCandidateSink::new();
+            let metrics = bam_extract::extract_from_bam_no_alignment(
+                &mut alignments,
+                &mut filter,
+                unum_core::extract::DEFAULT_REF_SEQ_SIMILARITY,
+                RUN_BAM_MATE_ID_SUFFIX_LEN,
+                threads,
+                &mut sink,
+            )
+            .context("extracting candidate reads from BAM (no-alignment)")?;
+            report_bam_extract_metrics(metrics.single_end, &metrics);
+            Ok((metrics.single_end, sink))
+        }
+    }
+}
+
+/// `run_bam_fused`'s `--bam-mode alignment` route: parses `-c` as a coordinate FASTA (gene
+/// intervals + k-mer seed reference, same as `extract::run_coordinate_alignment`), then routes
+/// on `alignments`' `@HD` sort order -- coordinate-sorted takes
+/// [`bam_extract::extract_from_bam_with_threads`]; grouped/name-sorted is not yet supported
+/// here (the grouped-alignment one-pass extractor is a later task) and errors with a
+/// `samtools sort` workaround hint; unsorted is rejected outright, mirroring
+/// `extract::run_bam_alignment`.
+///
+/// # Errors
+///
+/// Returns an error if `-c` is missing or cannot be opened/parsed, the BAM/CRAM cannot be
+/// opened, `alignments` is grouped/name-sorted or unsorted, or the underlying extraction
+/// itself fails.
+fn run_bam_alignment_fused(
+    args: &RunArgs,
+    bam: &str,
+    reference: Option<&str>,
+    threads: usize,
+) -> anyhow::Result<(bool, InMemoryCandidateSink)> {
+    use std::path::Path;
+    use unum_core::alignments::{Alignments, SortOrder};
+    use unum_core::bam_extract;
+    use unum_core::ref_kmer_filter::RefKmerFilter;
+
+    let coord = require_coord_fasta_run(args)?;
+    let coord_records = bam_extract::parse_coord_fa(Path::new(coord))
+        .with_context(|| format!("parsing coord FASTA {coord}"))?;
+    let mut filter =
+        RefKmerFilter::from_reference_fasta(Path::new(coord), self::extract::INITIAL_KMER_LENGTH)
+            .with_context(|| format!("loading coord FASTA sequences {coord}"))?;
+    let mut alignments = Alignments::open_with_reference(bam, reference)
+        .with_context(|| format!("opening BAM/CRAM {bam}"))?;
+
+    match alignments.sort_order() {
+        SortOrder::Coordinate => {
+            let genes = bam_extract::build_genes(&alignments, &coord_records)
+                .context("resolving coord FASTA chroms to BAM header chrIds")?;
+            let mut sink = InMemoryCandidateSink::new();
+            let metrics = bam_extract::extract_from_bam_with_threads(
+                &mut alignments,
+                &mut filter,
+                &genes,
+                RUN_BAM_ABNORMAL_UNALIGNED_FLAG,
+                RUN_BAM_MATE_ID_SUFFIX_LEN,
+                threads,
+                &mut sink,
+            )
+            .context("extracting candidate reads from BAM")?;
+            report_bam_extract_metrics(metrics.single_end, &metrics);
+            Ok((metrics.single_end, sink))
+        }
+        SortOrder::QueryName | SortOrder::QueryGrouped => bail!(
+            "run -b --bam-mode alignment on a grouped/name-sorted BAM lands in a later task \
+             (grouped-alignment); coordinate-sort the BAM (samtools sort) to use the current \
+             alignment path"
+        ),
+        SortOrder::Unsorted => bail!(
+            "run -b --bam-mode alignment requires a coordinate-sorted BAM (@HD SO:coordinate); \
+             this input is unsorted/unstated -- run `samtools sort`"
+        ),
+    }
+}
+
+/// Shared BAM-extraction metrics `eprintln` for [`run_bam_fused`]'s two routes, mirroring
+/// `extract::report_no_alignment_metrics`'s style/wording for the fused path.
+fn report_bam_extract_metrics(single_end: bool, metrics: &BamExtractMetrics) {
+    if single_end {
+        eprintln!(
+            "extracted {} candidate reads (single-end, kmer_length={}, hit_len_required={})",
+            metrics.pass1_emitted, metrics.kmer_length, metrics.hit_len_required,
+        );
+    } else {
+        eprintln!(
+            "extracted {} + {} = {} candidate pairs (paired, kmer_length={}, \
+             hit_len_required={}, candidates_recorded={})",
+            metrics.pass1_emitted,
+            metrics.pass2_emitted,
+            metrics.pass1_emitted + metrics.pass2_emitted,
+            metrics.kmer_length,
+            metrics.hit_len_required,
+            metrics.candidates_recorded,
+        );
+    }
+}
+
+/// [`RunArgs`] twin of `extract::require_reference_for_cram`: resolves the CRAM decoding
+/// reference to pass into [`unum_core::alignments::Alignments::open_with_reference`] --
+/// `Some(-r)` when `is_cram` is true (erroring if `-r` was not given), else `None`
+/// unconditionally (a BAM never gets the reference threaded through, even if `-r` was
+/// harmlessly also passed).
+///
+/// # Errors
+///
+/// Returns an error if `is_cram` is true and `-r` was not given, naming both CRAM and `-r`
+/// plus the `.fai` sibling it requires.
+fn require_reference_for_cram_run(args: &RunArgs, is_cram: bool) -> anyhow::Result<Option<&str>> {
+    if is_cram {
+        Ok(Some(args.reference.as_deref().context(
+            "CRAM input requires -r <reference genome FASTA> (with a .fai sibling); the \
+             reference is used exclusively -- no REF_PATH/REF_CACHE/network fallback",
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// [`RunArgs`] twin of `extract::require_coord_fasta`: extracts the required `-c` gene-
+/// coordinate FASTA path for `run -b --bam-mode alignment`, erroring if absent.
+fn require_coord_fasta_run(args: &RunArgs) -> anyhow::Result<&str> {
+    args.ref_coord_fasta
+        .as_deref()
+        .context("run -b --bam-mode alignment requires -c <gene coordinate FASTA (*_coord.fa)>")
 }
 
 /// Builds the [`GenotypeArgs`] the fused genotype stage runs with, mirroring `run-t1k`'s own

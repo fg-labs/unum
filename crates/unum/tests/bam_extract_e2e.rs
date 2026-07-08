@@ -143,6 +143,71 @@ fn build_unsorted_bam(dir: &Path) -> PathBuf {
     build_bam(dir, "unsorted.bam", "unsorted")
 }
 
+/// A coordinate-sorted BAM with `copies` DUPLICATE on-target pairs (same
+/// positions/sequences as [`build_coordinate_bam`]'s single pair, distinct
+/// `QNAME`s), for the `run -b` fused-genotyping test below: a single read
+/// pair's EM-estimated abundance falls under the genotyper's default
+/// `filter_cov` (1.0) threshold (`Genotyper::select_alleles_for_genes_quality_scores`
+/// zeroes `genotype_quality` whenever a rank's summed abundance is below
+/// `filter_cov`), which in turn makes `output_representative_alleles` skip
+/// writing ANY representative allele (`genotype_quality < 1` gate) --
+/// leaving `_allele.tsv` empty and `analyze` erroring with "reference FASTA
+/// contains no sequences matching the selected-allele list". A few
+/// duplicate copies push the summed abundance comfortably past `filter_cov`
+/// so a real representative allele gets selected and `analyze` has
+/// something to work with, without changing [`build_bam`] (shared by other
+/// tests in this file that rely on its single-pair shape).
+fn build_coordinate_bam_replicated(dir: &Path, copies: u32) -> PathBuf {
+    let path = dir.join("coordinate_replicated.bam");
+    let kir_seq = kir2dl1_sequence();
+    let kir_bytes = kir_seq.as_bytes();
+
+    let mut header = Header::new();
+    let mut hd = HeaderRecord::new(b"HD");
+    hd.push_tag(b"VN", "1.6");
+    hd.push_tag(b"SO", "coordinate");
+    header.push_record(&hd);
+    let mut sq = HeaderRecord::new(b"SQ");
+    sq.push_tag(b"SN", KIR2DL1_CHROM);
+    sq.push_tag(b"LN", 58_617_616);
+    header.push_record(&sq);
+
+    let mut writer = Writer::from_path(&path, &header, bam::Format::Bam).expect("bam writer");
+    for copy in 0..copies {
+        let qname = format!("on_target_pair_{copy}");
+
+        let mut r1 = bam::Record::new();
+        r1.set(
+            qname.as_bytes(),
+            Some(&CigarString(vec![Cigar::Match(100)])),
+            &kir_bytes[0..100],
+            &[30u8; 100],
+        );
+        r1.set_tid(0);
+        r1.set_pos(KIR2DL1_START + 10);
+        r1.set_mtid(0);
+        r1.set_mpos(KIR2DL1_START + 210);
+        r1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
+        writer.write(&r1).expect("write mate 1");
+
+        let mut r2 = bam::Record::new();
+        r2.set(
+            qname.as_bytes(),
+            Some(&CigarString(vec![Cigar::Match(100)])),
+            &kir_bytes[200..300],
+            &[30u8; 100],
+        );
+        r2.set_tid(0);
+        r2.set_pos(KIR2DL1_START + 210);
+        r2.set_mtid(0);
+        r2.set_mpos(KIR2DL1_START + 10);
+        r2.set_flags(0x1 | 0x2 | 0x10 | 0x80);
+        writer.write(&r2).expect("write mate 2");
+    }
+    drop(writer);
+    path
+}
+
 /// `Path` -> `&str`, mirroring `extract_e2e.rs`'s `path_str` (named `s` here
 /// to match the task brief's helper name).
 fn s(p: &Path) -> &str {
@@ -1054,5 +1119,450 @@ fn stdin_cram_without_reference_fails_locally_not_over_network() {
     assert!(
         !single_end_out(&out_prefix).exists(),
         "a failed run must not emit a successful extraction output file"
+    );
+}
+
+// -- `run -b` fused BAM/CRAM extraction (Stage 2c Task 5) -------------------
+//
+// Proves `unum run -b <bam> --bam-mode no-alignment ...` -- the fused
+// extract -> genotype -> analyze native path, with candidates handed to the
+// genotyper entirely in memory (no `{prefix}_candidate_*.fq` on disk) --
+// produces the SAME `_genotype.tsv` as running the two-step CLI path
+// (`unum extract -b <bam> --bam-mode no-alignment` followed by a separate
+// `unum genotype` on the emitted candidate FASTQs). `--bam-mode alignment`'s
+// fused coordinate-alignment route is exercised indirectly by this same
+// `build_coordinate_bam` fixture in the `extract`-only tests above; this
+// file's job is proving the `run` in-memory hand-off itself, not
+// re-proving extraction correctness (already golden-gated elsewhere).
+
+/// Runs `unum run` with `args`, asserting a clean exit. Mirrors
+/// [`run_extract_ok`].
+fn run_run_ok(args: &[&str]) {
+    let status = Command::new(env!("CARGO_BIN_EXE_unum")).arg("run").args(args).status().unwrap();
+    assert!(status.success(), "`unum run` exited non-zero for args {args:?}");
+}
+
+/// Runs `unum genotype` with `args`, asserting a clean exit. Mirrors
+/// [`run_extract_ok`].
+fn run_genotype_ok(args: &[&str]) {
+    let status =
+        Command::new(env!("CARGO_BIN_EXE_unum")).arg("genotype").args(args).status().unwrap();
+    assert!(status.success(), "`unum genotype` exited non-zero for args {args:?}");
+}
+
+/// Writes a single-sequence reference-sequence FASTA (`>KIR2DL1*0010101\n{seq}\n`, no header
+/// comment) containing exactly [`kir2dl1_sequence`] -- the SAME allele [`build_coordinate_bam`]'s
+/// on-target pair is a substring of. Used as `-f` for BOTH `--bam-mode no-alignment` extraction
+/// (which only needs id+sequence, same as [`coord_fasta_path`]'s multi-gene coord FASTA already
+/// proven to work there) AND `genotype`'s own reference load, which does NOT tolerate the coord
+/// FASTA's `chrom start end strand` header comment: `genotype::load_reference` feeds that comment
+/// to `AlleleRef::new`/`parse_exon_comment` as an exon-interval list, and `chrom start end`'s
+/// digits parse as a nonsensical exon range (`start`..`end`, both far outside the sequence's own
+/// length) that zeroes out every position's exon membership and panics downstream
+/// (`get_seq_missing_base_coverage: allele has zero exon positions`). Omitting the comment
+/// entirely sidesteps this: `AlleleRef::new(seq, None)` falls back to a single whole-sequence
+/// exon, matching every OTHER `genotype`-mode reference fixture in this workspace (`fixtures/
+/// example/ref/kir_rna_seq.fa` uses a real base-offset exon comment instead, which this minimal
+/// fixture does not need since its one on-target pair is an exact, diff-free substring).
+fn write_run_no_alignment_ref_fasta(dir: &Path) -> PathBuf {
+    let path = dir.join("run_ref.fa");
+    std::fs::write(&path, format!(">KIR2DL1*0010101\n{}\n", kir2dl1_sequence())).unwrap();
+    path
+}
+
+#[test]
+fn run_bam_no_alignment_matches_extract_then_genotype() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let tmp = tmp_dir.path();
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp);
+    // 5 duplicate on-target pairs -- see `build_coordinate_bam_replicated`'s doc comment for
+    // why a single pair's abundance falls under the genotyper's default `filter_cov`.
+    let bam = build_coordinate_bam_replicated(tmp, 5);
+
+    // Fused: `unum run -b <bam> --bam-mode no-alignment -f <ref_fa>` -- extract, genotype,
+    // and analyze all in one process.
+    let run_prefix = tmp.join("via_run");
+    run_run_ok(&[
+        "-b",
+        s(&bam),
+        "--bam-mode",
+        "no-alignment",
+        "-f",
+        s(&ref_fa),
+        "-o",
+        s(&run_prefix),
+    ]);
+
+    // Separately: `unum extract -b <bam> --bam-mode no-alignment` writes candidate FASTQs,
+    // then `unum genotype` reads them back from disk -- the pre-Task-5 two-process path.
+    let extract_prefix = tmp.join("via_extract");
+    run_extract_ok(&[
+        "-b",
+        s(&bam),
+        "--bam-mode",
+        "no-alignment",
+        "-f",
+        s(&ref_fa),
+        "-o",
+        s(&extract_prefix),
+    ]);
+    let genotype_prefix = tmp.join("via_genotype");
+    run_genotype_ok(&[
+        "-f",
+        s(&ref_fa),
+        "-1",
+        s(&paired_out_1(&extract_prefix)),
+        "-2",
+        s(&paired_out_2(&extract_prefix)),
+        "-o",
+        s(&genotype_prefix),
+    ]);
+
+    let run_genotype_tsv =
+        std::fs::read_to_string(format!("{}_genotype.tsv", run_prefix.display())).unwrap();
+    let separate_genotype_tsv =
+        std::fs::read_to_string(format!("{}_genotype.tsv", genotype_prefix.display())).unwrap();
+    assert_eq!(
+        run_genotype_tsv, separate_genotype_tsv,
+        "`run -b --bam-mode no-alignment`'s fused _genotype.tsv must match the separate \
+         extract-then-genotype pipeline byte-for-byte"
+    );
+
+    // Teeth: a real genotype call must actually have happened against this fixture, not an
+    // empty/no-call row (`Genotyper::get_allele_description`'s no-call sentinel is a literal
+    // `.`, not an empty string -- see `fixtures/example/oracle_genotype.golden.tsv`'s
+    // zero-`calledCnt` rows). `allele1` reports the "major allele" name (allele-nomenclature
+    // group resolution, e.g. `KIR2DL1*001` for `KIR2DL1*0010101` -- `unum`/T1K report at this
+    // resolution whenever finer-digit alleles aren't distinguished), so check for that prefix
+    // rather than the full allele name the fixture's on-target pair was built from.
+    let kir2dl1_line = run_genotype_tsv
+        .lines()
+        .find(|line| line.starts_with("KIR2DL1\t"))
+        .expect("run_genotype_tsv must contain a KIR2DL1 row");
+    assert!(
+        kir2dl1_line.contains("KIR2DL1*001"),
+        "expected a called KIR2DL1*001 allele, got: {kir2dl1_line}"
+    );
+    assert!(
+        !kir2dl1_line.starts_with("KIR2DL1\t0\t"),
+        "expected calledAlleleCnt > 0 (a real call), got: {kir2dl1_line}"
+    );
+}
+
+/// Same parity check as [`run_bam_no_alignment_matches_extract_then_genotype`], but for the
+/// OTHER Task 5 in-scope route: `run -b --bam-mode alignment` on a coordinate-sorted BAM. Unlike
+/// `no-alignment`, `alignment` reads its gene intervals + k-mer seed reference from `-c` (the
+/// coord FASTA) rather than `-f`; `-f` is still required by `RunArgs` (unlike `ExtractArgs`,
+/// where it is optional and rejected in `alignment` mode) because [`genotype_args_for`] always
+/// builds the genotyper's own reference from `args.ref_seq_fasta` regardless of `--bam-mode`, so
+/// this test supplies both.
+#[test]
+fn run_bam_alignment_matches_extract_then_genotype() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let tmp = tmp_dir.path();
+    let coord_fa = coord_fasta_path();
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp);
+    let bam = build_coordinate_bam_replicated(tmp, 5);
+
+    // Fused: `unum run -b <bam> --bam-mode alignment -c <coord_fa> -f <ref_fa>`.
+    let run_prefix = tmp.join("via_run");
+    run_run_ok(&[
+        "-b",
+        s(&bam),
+        "--bam-mode",
+        "alignment",
+        "-c",
+        s(&coord_fa),
+        "-f",
+        s(&ref_fa),
+        "-o",
+        s(&run_prefix),
+    ]);
+
+    // Separately: `unum extract -b <bam> --bam-mode alignment -c <coord_fa>` then `unum
+    // genotype -f <ref_fa>` on the emitted candidate FASTQs.
+    let extract_prefix = tmp.join("via_extract");
+    run_extract_ok(&[
+        "-b",
+        s(&bam),
+        "--bam-mode",
+        "alignment",
+        "-c",
+        s(&coord_fa),
+        "-o",
+        s(&extract_prefix),
+    ]);
+    let genotype_prefix = tmp.join("via_genotype");
+    run_genotype_ok(&[
+        "-f",
+        s(&ref_fa),
+        "-1",
+        s(&paired_out_1(&extract_prefix)),
+        "-2",
+        s(&paired_out_2(&extract_prefix)),
+        "-o",
+        s(&genotype_prefix),
+    ]);
+
+    let run_genotype_tsv =
+        std::fs::read_to_string(format!("{}_genotype.tsv", run_prefix.display())).unwrap();
+    let separate_genotype_tsv =
+        std::fs::read_to_string(format!("{}_genotype.tsv", genotype_prefix.display())).unwrap();
+    assert_eq!(
+        run_genotype_tsv, separate_genotype_tsv,
+        "`run -b --bam-mode alignment`'s fused _genotype.tsv must match the separate \
+         extract-then-genotype pipeline byte-for-byte"
+    );
+
+    let kir2dl1_line = run_genotype_tsv
+        .lines()
+        .find(|line| line.starts_with("KIR2DL1\t"))
+        .expect("run_genotype_tsv must contain a KIR2DL1 row");
+    assert!(
+        kir2dl1_line.contains("KIR2DL1*001"),
+        "expected a called KIR2DL1*001 allele, got: {kir2dl1_line}"
+    );
+    assert!(
+        !kir2dl1_line.starts_with("KIR2DL1\t0\t"),
+        "expected calledAlleleCnt > 0 (a real call), got: {kir2dl1_line}"
+    );
+}
+
+/// `run -b --bam-mode alignment` on a grouped/name-sorted BAM is explicitly OUT of Task 5's
+/// scope (the grouped-alignment one-pass extractor lands in a later task) -- proves it fails
+/// with a clear deferral message rather than silently misrouting or panicking, mirroring
+/// `alignment_on_name_sorted_bam_errors_with_sort_hint`'s coverage of the same guard on
+/// `extract`.
+#[test]
+fn run_bam_alignment_on_grouped_bam_lands_in_later_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let coord_fa = coord_fasta_path();
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp.path());
+    let bam = build_name_sorted_bam(tmp.path());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_unum"))
+        .arg("run")
+        .args([
+            "-b",
+            s(&bam),
+            "--bam-mode",
+            "alignment",
+            "-c",
+            s(&coord_fa),
+            "-f",
+            s(&ref_fa),
+            "-o",
+            s(&tmp.path().join("o")),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "run -b --bam-mode alignment on a grouped/name-sorted BAM must fail (deferred to a \
+         later task)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("later task") || stderr.contains("grouped-alignment"),
+        "expected a later-task deferral message, got: {stderr}"
+    );
+}
+
+/// `run -b` combined with `-1`/`-2`/`-u` must be rejected outright, mirroring
+/// `extract::resolve_extract_input`'s own `-b` vs. `-1`/`-2`/`-u` mutual-exclusion check --
+/// without this guard, `run`'s early `-b` branch would silently win and discard the FASTQ flags.
+#[test]
+fn run_bam_flag_with_fastq_flags_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp.path());
+    let bam = build_coordinate_bam(tmp.path());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_unum"))
+        .arg("run")
+        .args([
+            "-b",
+            s(&bam),
+            "--bam-mode",
+            "no-alignment",
+            "-f",
+            s(&ref_fa),
+            "-u",
+            "reads.fq",
+            "-o",
+            s(&tmp.path().join("o")),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "-b combined with -u must fail, not silently win");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("mutually exclusive"),
+        "expected a mutual-exclusion error, got: {stderr}"
+    );
+}
+
+/// `-c` (coord FASTA) applies only to `--bam-mode alignment`; `run -b --bam-mode no-alignment`
+/// must reject it, mirroring `extract::require_no_coord_fasta`'s guard on `extract`.
+#[test]
+fn run_bam_no_alignment_with_coord_fasta_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp.path());
+    let coord_fa = coord_fasta_path();
+    let bam = build_coordinate_bam(tmp.path());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_unum"))
+        .arg("run")
+        .args([
+            "-b",
+            s(&bam),
+            "--bam-mode",
+            "no-alignment",
+            "-f",
+            s(&ref_fa),
+            "-c",
+            s(&coord_fa),
+            "-o",
+            s(&tmp.path().join("o")),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "-c under --bam-mode no-alignment must fail, not be ignored");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("-c"), "expected a -c-specific error, got: {stderr}");
+}
+
+// -- `run -b` `RunArgs`-specific guard coverage (Stage 2c Task 5 review fix) -
+//
+// The four tests below cover `run_bam_fused`'s own error-path guards
+// (`require_reference_for_cram_run`/`require_coord_fasta_run`/the
+// `--bam-mode` presence check), which had no e2e coverage: Task 5's own
+// `run_bam_*` tests above only exercise the success paths plus the
+// grouped-alignment deferral and the `-b`/`-c` mutual-exclusion guards.
+// Mirrors the sibling `extract`-side guard tests
+// (`b_flag_without_bam_mode_errors`, `cram_without_reference_errors_naming_cram_and_r`)
+// and reuses this file's BAM/CRAM fixture helpers.
+
+/// `run -b` without `--bam-mode` must fail, naming `--bam-mode`, mirroring `extract`'s own
+/// `b_flag_without_bam_mode_errors` guard test.
+#[test]
+fn run_bam_missing_bam_mode_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp.path());
+    let bam = build_coordinate_bam(tmp.path());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_unum"))
+        .arg("run")
+        .args(["-b", s(&bam), "-f", s(&ref_fa), "-o", s(&tmp.path().join("o"))])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "run -b without --bam-mode must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--bam-mode"), "expected a --bam-mode-specific error, got: {stderr}");
+}
+
+/// `run -b --bam-mode alignment` without `-c` must fail, naming `-c` (the gene coordinate
+/// FASTA), mirroring `require_coord_fasta_run`'s doc-commented error and
+/// `run_bam_no_alignment_with_coord_fasta_is_rejected`'s coverage of the sibling `-c` guard.
+#[test]
+fn run_bam_alignment_missing_coord_fasta_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp.path());
+    let bam = build_coordinate_bam(tmp.path());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_unum"))
+        .arg("run")
+        .args([
+            "-b",
+            s(&bam),
+            "--bam-mode",
+            "alignment",
+            "-f",
+            s(&ref_fa),
+            "-o",
+            s(&tmp.path().join("o")),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "run -b --bam-mode alignment without -c must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("-c"), "expected a -c-specific error, got: {stderr}");
+}
+
+/// `run -b <cram> --bam-mode no-alignment` without `-r` must fail, naming CRAM and `-r`,
+/// mirroring `extract`'s own `cram_without_reference_errors_naming_cram_and_r` guard test.
+#[test]
+fn run_bam_cram_no_alignment_without_reference_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ref_fa, ref_seq) = write_ref_and_fai(tmp.path(), 300);
+    let header = cram_bam_header(300);
+    let cram_path = tmp.path().join("reads.cram");
+    write_cram_bam_reads(&cram_path, &header, bam::Format::Cram, &ref_seq, Some(&ref_fa));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_unum"))
+        .arg("run")
+        .args([
+            "-b",
+            s(&cram_path),
+            "--bam-mode",
+            "no-alignment",
+            "-f",
+            s(&ref_fa),
+            "-o",
+            s(&tmp.path().join("o")),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "run -b <cram> without -r must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("CRAM") && stderr.contains("-r"),
+        "error must name CRAM and -r: {stderr}"
+    );
+}
+
+/// `-r` with a BAM (not CRAM) is accepted-and-ignored:
+/// `require_reference_for_cram_run` "returns `None` unconditionally" whenever `is_cram` is
+/// false, even if `-r` was harmlessly also passed -- so `run -b <bam> --bam-mode no-alignment
+/// -r <ref>` must NOT error on `-r` and must proceed through the full fused
+/// extract -> genotype -> analyze pipeline, exactly as
+/// `run_bam_no_alignment_matches_extract_then_genotype` does without `-r`.
+#[test]
+fn run_bam_no_alignment_reference_with_bam_is_accepted_and_ignored() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let tmp = tmp_dir.path();
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp);
+    let bam = build_coordinate_bam_replicated(tmp, 5);
+    // A plausible-looking CRAM-decode-reference `-r` value (real file + `.fai` sibling) that
+    // must be ignored entirely for BAM input -- irrelevant to the BAM's own contents.
+    let (unused_reference, _ref_seq) = write_ref_and_fai(tmp, 300);
+
+    let out_prefix = tmp.join("o");
+    run_run_ok(&[
+        "-b",
+        s(&bam),
+        "--bam-mode",
+        "no-alignment",
+        "-f",
+        s(&ref_fa),
+        "-r",
+        s(&unused_reference),
+        "-o",
+        s(&out_prefix),
+    ]);
+
+    let genotype_tsv =
+        std::fs::read_to_string(format!("{}_genotype.tsv", out_prefix.display())).unwrap();
+    let kir2dl1_line = genotype_tsv
+        .lines()
+        .find(|line| line.starts_with("KIR2DL1\t"))
+        .expect("genotype_tsv must contain a KIR2DL1 row");
+    assert!(
+        kir2dl1_line.contains("KIR2DL1*001"),
+        "expected a called KIR2DL1*001 allele (proving the run proceeded past extraction \
+         despite -r), got: {kir2dl1_line}"
+    );
+    assert!(
+        !kir2dl1_line.starts_with("KIR2DL1\t0\t"),
+        "expected calledAlleleCnt > 0 (a real call), got: {kir2dl1_line}"
     );
 }

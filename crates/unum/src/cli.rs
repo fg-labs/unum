@@ -47,8 +47,9 @@ pub struct RunArgs {
     #[arg(short = 'u', value_name = "STRING")]
     pub single: Option<String>,
 
-    /// Path to a BAM/CRAM file (mutually exclusive with `-1`/`-2`/`-u`). NOTE: BAM input is not
-    /// yet wired into the native Rust fused path -- see `crate::stages::run`'s doc comment.
+    /// Path to a BAM/CRAM file (mutually exclusive with `-1`/`-2`/`-u`), fused in-memory into
+    /// extract -> genotype -> analyze via `--bam-mode`; see `crate::stages::run`'s doc comment
+    /// for exactly which `--bam-mode`/sort-order combinations are currently supported.
     #[arg(short = 'b', value_name = "STRING")]
     pub bam: Option<String>,
 
@@ -56,7 +57,9 @@ pub struct RunArgs {
     #[arg(short = 'f', value_name = "STRING")]
     pub ref_seq_fasta: String,
 
-    /// Path to the gene coordinate file (only required for BAM input).
+    /// Gene coordinate FASTA (`*_coord.fa`: headers `name chrom start end
+    /// strand` + sequence). REQUIRED for `--bam-mode alignment`; rejected for
+    /// FASTQ / `--bam-mode no-alignment`.
     #[arg(short = 'c', value_name = "STRING")]
     pub ref_coord_fasta: Option<String>,
 
