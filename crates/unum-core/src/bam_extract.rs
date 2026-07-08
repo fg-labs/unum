@@ -700,8 +700,10 @@ struct GroupedRecord {
 /// one) AND `single_end` from that SAME head, via the identical
 /// `has_mate_cnt >= total / 2` majority-vote rule
 /// [`crate::alignments::Alignments::general_info`] uses internally. Returns
-/// `single_end` so a caller (the dispatcher) can pick the output filename
-/// from it directly, without ever calling `general_info`.
+/// `single_end` (alongside the sink `make_sink` was used to create -- see the
+/// "Sink FACTORY" doc section below) so a caller (the dispatcher) can pick
+/// the output filename from it directly, without ever calling
+/// `general_info`.
 ///
 /// # Buffering raw records, not pairs (M2)
 ///
@@ -753,19 +755,37 @@ struct GroupedRecord {
 /// [`run_pass1_with_threads`]'s whole-chunk-wide candidate-decision
 /// parallelism).
 ///
+/// # Sink FACTORY, not a concrete sink (the B2 chicken-and-egg)
+///
+/// A concrete sink (e.g. the CLI's `FastqFileSink`) often needs `single_end`
+/// to pick its own output naming -- but `single_end` here is derived from
+/// this function's OWN buffered head (see "Setup without `general_info`"
+/// above), not knowable before this function runs. So this takes `make_sink`,
+/// a `FnOnce(single_end) -> Result<S>` factory, and calls it itself the
+/// MOMENT `single_end` is known (right after the head is buffered and the
+/// filter is configured, before the group loop emits a single candidate) --
+/// never before, and never via a `general_info` pre-sample (impossible on
+/// stdin). The created sink is returned to the caller (rather than dropped
+/// internally) so it can be flushed and its I/O errors observed, and so
+/// tests can inspect what it collected.
+///
 /// # Errors
 ///
-/// Returns an error if: a QNAME group exceeds 2 primary records; or the
-/// underlying BAM read fails (a genuine parse error, distinct from a clean
-/// EOF).
-pub fn extract_from_bam_no_alignment_grouped(
+/// Returns an error if: `make_sink` itself fails; a QNAME group exceeds 2
+/// primary records; or the underlying BAM read fails (a genuine parse error,
+/// distinct from a clean EOF).
+pub fn extract_from_bam_no_alignment_grouped<S, F>(
     alignments: &mut Alignments,
     filter: &mut RefKmerFilter,
     ref_seq_similarity: f64,
     mate_id_len: i32,
     threads: usize,
-    sink: &mut impl CandidateSink,
-) -> Result<(BamExtractMetrics, bool)> {
+    make_sink: F,
+) -> Result<(BamExtractMetrics, bool, S)>
+where
+    S: CandidateSink,
+    F: FnOnce(bool) -> Result<S>,
+{
     let _ = threads;
     extract_from_bam_no_alignment_grouped_with_head_limit(
         alignments,
@@ -773,7 +793,7 @@ pub fn extract_from_bam_no_alignment_grouped(
         ref_seq_similarity,
         mate_id_len,
         HIT_LEN_SAMPLE_SIZE,
-        sink,
+        make_sink,
     )
 }
 
@@ -784,14 +804,18 @@ pub fn extract_from_bam_no_alignment_grouped(
 /// boundary (see the public wrapper's "Buffering raw records" doc section),
 /// which no fixture small enough for a unit test could otherwise reach at the
 /// real 1000-record bound.
-fn extract_from_bam_no_alignment_grouped_with_head_limit(
+fn extract_from_bam_no_alignment_grouped_with_head_limit<S, F>(
     alignments: &mut Alignments,
     filter: &mut RefKmerFilter,
     ref_seq_similarity: f64,
     mate_id_len: i32,
     head_limit: usize,
-    sink: &mut impl CandidateSink,
-) -> Result<(BamExtractMetrics, bool)> {
+    make_sink: F,
+) -> Result<(BamExtractMetrics, bool, S)>
+where
+    S: CandidateSink,
+    F: FnOnce(bool) -> Result<S>,
+{
     // -- (1) Bounded head of RAW PRIMARY records (no rewind -> stdin-safe).
     let mut head: VecDeque<GroupedRecord> = VecDeque::new();
     let mut read1_len_sum: i64 = 0;
@@ -837,6 +861,13 @@ fn extract_from_bam_no_alignment_grouped_with_head_limit(
         }
     }
 
+    // `single_end` is now known -- create the sink NOW, via the factory, and
+    // BEFORE the group loop below emits a single candidate (the B2 fix: a
+    // concrete sink like `FastqFileSink` needs `single_end` to pick its own
+    // output naming, and that could not have been known any earlier than
+    // this point on a non-seekable stdin source).
+    let mut sink = make_sink(single_end)?;
+
     // -- (3) ONE continuous group-accumulation loop over head ++ live.
     let mut scratch = Scratch::default();
     let mut current_group: Vec<GroupedRecord> = Vec::new();
@@ -857,12 +888,12 @@ fn extract_from_bam_no_alignment_grouped_with_head_limit(
                 current_group.push(record);
                 continue;
             }
-            flush_grouped_candidate(&current_group, filter, &mut scratch, sink, &mut emitted)?;
+            flush_grouped_candidate(&current_group, filter, &mut scratch, &mut sink, &mut emitted)?;
             current_group.clear();
         }
         current_group.push(record);
     }
-    flush_grouped_candidate(&current_group, filter, &mut scratch, sink, &mut emitted)?;
+    flush_grouped_candidate(&current_group, filter, &mut scratch, &mut sink, &mut emitted)?;
 
     let metrics = BamExtractMetrics {
         single_end,
@@ -872,7 +903,7 @@ fn extract_from_bam_no_alignment_grouped_with_head_limit(
         candidates_recorded: 0,
         pass2_emitted: 0,
     };
-    Ok((metrics, single_end))
+    Ok((metrics, single_end, sink))
 }
 
 /// Reads the CURRENT record's [`GroupedRecord`] snapshot. Caller must have
@@ -2229,7 +2260,7 @@ mod tests {
         drop(writer);
     }
 
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct VecSink {
         pairs: Vec<(ReadRecord, Option<ReadRecord>)>,
     }
@@ -3769,15 +3800,14 @@ mod tests {
         let mut filter =
             RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
         let mut alignments = Alignments::open(&bam_path).unwrap();
-        let mut sink = VecSink::default();
 
-        let (metrics, single_end) = extract_from_bam_no_alignment_grouped(
+        let (metrics, single_end, sink) = extract_from_bam_no_alignment_grouped(
             &mut alignments,
             &mut filter,
             0.8,
             -1,
             1,
-            &mut sink,
+            |_single_end| Ok(VecSink::default()),
         )
         .unwrap();
 
@@ -3870,7 +3900,6 @@ mod tests {
         let mut filter =
             RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
         let mut alignments = Alignments::open(&bam_path).unwrap();
-        let mut sink = VecSink::default();
 
         let result = extract_from_bam_no_alignment_grouped(
             &mut alignments,
@@ -3878,7 +3907,7 @@ mod tests {
             0.8,
             -1,
             1,
-            &mut sink,
+            |_single_end| Ok(VecSink::default()),
         );
         let err = result.expect_err("a >2-member QNAME group must abort with an error");
         let message = format!("{err:#}");
@@ -3901,7 +3930,6 @@ mod tests {
         let mut filter =
             RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
         let mut alignments = Alignments::open(&bam_path).unwrap();
-        let mut sink = VecSink::default();
 
         // `head_limit = 1`: only `pair_ok`'s FIRST record (mate1) is
         // buffered into the head before the setup phase stops sampling;
@@ -3911,13 +3939,13 @@ mod tests {
         // (instead of draining head ++ live as one continuous stream), this
         // group would be split into two 1-member flushes instead of being
         // reunited into one 2-member group.
-        let (metrics, _single_end) = extract_from_bam_no_alignment_grouped_with_head_limit(
+        let (metrics, _single_end, sink) = extract_from_bam_no_alignment_grouped_with_head_limit(
             &mut alignments,
             &mut filter,
             0.8,
             -1,
             1,
-            &mut sink,
+            |_single_end| Ok(VecSink::default()),
         )
         .unwrap();
 
@@ -4005,17 +4033,16 @@ mod tests {
         let mut filter =
             RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
         let mut alignments = Alignments::open(&bam_path).unwrap();
-        let mut sink = VecSink::default();
 
         // Default `mate_id_len = -1` (strips a trailing `/1`/`/2` for the
         // grouping compare, but the single-end LONE emit must NOT trim its id).
-        let (metrics, single_end) = extract_from_bam_no_alignment_grouped(
+        let (metrics, single_end, sink) = extract_from_bam_no_alignment_grouped(
             &mut alignments,
             &mut filter,
             0.8,
             -1,
             1,
-            &mut sink,
+            |_single_end| Ok(VecSink::default()),
         )
         .unwrap();
 

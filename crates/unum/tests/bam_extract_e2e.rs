@@ -1,9 +1,10 @@
 //! Binary-level end-to-end tests for `unum extract --bam-mode`: proves that
 //! `-i x.bam --bam-mode alignment` and `-b x.bam --bam-mode alignment` reach
-//! the SAME coordinate-`alignment` extraction path, and that every
-//! reserved/guard combination the Stage 2a dispatcher is supposed to reject
-//! (missing `--bam-mode`, `no-alignment`, a non-coordinate-sorted BAM) errors
-//! with a helpful, on-topic message.
+//! the SAME coordinate-`alignment` extraction path, that `--bam-mode
+//! no-alignment` routes by sort order (coordinate -> 2-pass, name-sorted ->
+//! grouped one-pass) instead of erroring, and that every remaining
+//! reserved/guard combination (missing `--bam-mode`, `alignment` on a
+//! non-coordinate-sorted BAM) errors with a helpful, on-topic message.
 //!
 //! The coordinate `alignment` extraction itself is already byte-golden-gated
 //! at the library level by `unum-core/tests/golden_bam_extract.rs`, so this
@@ -230,11 +231,18 @@ fn b_flag_without_bam_mode_errors() {
 }
 
 #[test]
-fn no_alignment_mode_errors_as_reserved() {
+fn no_alignment_mode_on_coordinate_bam_runs_the_two_pass() {
+    // `--bam-mode no-alignment` is no longer reserved (Stage 2b): on a
+    // coordinate-sorted BAM it routes to the seekable 2-pass name-map
+    // (`bam_extract::extract_from_bam_no_alignment`), same input this file's
+    // `alignment` tests use, reusing the coord FASTA directly as `-f` (
+    // no-alignment builds its `RefKmerFilter` straight from `-f`, same as the
+    // FASTQ path -- no coord-FASTA/gene-interval parsing).
     let tmp = tempfile::tempdir().unwrap();
     let coord_fa = coord_fasta_path();
     let bam = build_coordinate_bam(tmp.path());
-    let out = run_extract_raw(&[
+    let out_prefix = tmp.path().join("o");
+    run_extract_ok(&[
         "-f",
         s(&coord_fa),
         "-i",
@@ -242,10 +250,38 @@ fn no_alignment_mode_errors_as_reserved() {
         "--bam-mode",
         "no-alignment",
         "-o",
-        s(&tmp.path().join("o")),
+        s(&out_prefix),
     ]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("later release"));
+    let out1 = std::fs::read(paired_out_1(&out_prefix)).unwrap();
+    assert!(!out1.is_empty(), "no-alignment 2-pass should emit the on-target candidate pair");
+}
+
+#[test]
+fn no_alignment_mode_on_name_sorted_bam_runs_the_grouped_one_pass() {
+    // The SAME on-target pair, but `@HD SO:queryname` -- no-alignment routes
+    // this to the stdin-capable grouped one-pass
+    // (`bam_extract::extract_from_bam_no_alignment_grouped`) instead of the
+    // 2-pass, unlike `alignment` (which still rejects this input as reserved
+    // for Stage 2c -- see `alignment_on_name_sorted_bam_errors_with_sort_hint`).
+    let tmp = tempfile::tempdir().unwrap();
+    let coord_fa = coord_fasta_path();
+    let bam = build_name_sorted_bam(tmp.path());
+    let out_prefix = tmp.path().join("o");
+    run_extract_ok(&[
+        "-f",
+        s(&coord_fa),
+        "-i",
+        s(&bam),
+        "--bam-mode",
+        "no-alignment",
+        "-o",
+        s(&out_prefix),
+    ]);
+    let out1 = std::fs::read(paired_out_1(&out_prefix)).unwrap();
+    assert!(
+        !out1.is_empty(),
+        "no-alignment grouped one-pass should emit the on-target candidate pair"
+    );
 }
 
 #[test]

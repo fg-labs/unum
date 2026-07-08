@@ -110,8 +110,11 @@ pub struct BuildArgs {
 /// - `no-alignment` (Class A): pure k-mer selection on the read sequences,
 ///   identical to the FASTQ path (BAM as packaged reads).
 ///
-/// (`no-alignment` is not yet implemented; the dispatcher rejects it with a
-/// "later release" message in this stage.)
+/// (`alignment` is only implemented for a coordinate-sorted BAM as of this
+/// stage; grouped/name-sorted or stdin `alignment` input is rejected with a
+/// "later release" message. `no-alignment` is fully routed -- coordinate/
+/// unsorted takes a 2-pass name-map, grouped/name-sorted (including stdin)
+/// takes a one-pass -- see `crate::stages::extract::run_bam_no_alignment`.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum BamMode {
     /// Class B: coordinate/position-based selection (`bam-extractor` parity).
