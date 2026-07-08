@@ -187,11 +187,10 @@ fn compute_effective_len(seq: &[u8]) -> i32 {
 
 /// One read (mate) loaded from a candidate FASTQ, mirroring the fields of
 /// `_genotypeRead` (`Genotyper.cpp:59-81`) this driver actually needs. `id`
-/// is kept (matching `_genotypeRead::id`) even though this port's output
-/// (`_genotype.tsv`/`_allele.tsv`) never reads it -- only `_aligned*.fa`
-/// (`Genotyper.cpp:680-707`, which this port does not yet write) would need
-/// it; kept for fidelity/future use rather than dropped.
-#[allow(dead_code)]
+/// is written (matching `_genotypeRead::id`) to `{prefix}_aligned{,_1,_2}.fa`
+/// for each assigned fragment (`Genotyper.cpp:688-703`); `seq` is used both
+/// for read-end alignment and for that same aligned-FASTA output (emitted in
+/// its original input orientation, never reverse-complemented).
 struct GenotypeRead {
     id: String,
     seq: Vec<u8>,
@@ -410,40 +409,49 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
         .num_threads(threads)
         .build()
         .expect("building rayon thread pool for parallel fragment assembly");
-    let slots: Vec<Vec<ReadAssignment>> = fragment_pool.install(|| {
-        (0..read_cnt)
-            .into_par_iter()
-            .map(|i| {
-                let overlaps1 =
-                    overlaps_by_seq.get(reads1[i].seq.as_slice()).and_then(Option::as_ref);
-                let overlaps2 = if has_mate {
-                    overlaps_by_seq.get(reads2[i].seq.as_slice()).and_then(Option::as_ref)
-                } else {
-                    None
-                };
-                let has_n = reads1[i].has_n || (has_mate && reads2[i].has_n);
-
-                let empty: Vec<ExtendedOverlap> = Vec::new();
-                let assignment = genotyper::read_assignment_to_fragment_assignment(
-                    overlaps1.map_or(empty.as_slice(), Vec::as_slice),
-                    if has_mate {
-                        Some(overlaps2.map_or(empty.as_slice(), Vec::as_slice))
+    // Alongside each read's fragment-assignment slot, capture whether the
+    // fragment was assigned to >= 1 allele (`fragmentAssignment.size() > 0`,
+    // `Genotyper.cpp:564-565`) for the `_aligned*.fa` output below. Like the
+    // slots, `fragment_assigned[i]` is a pure function of read `i`'s inputs
+    // (`!assignment.is_empty()`), so it is collected in the same deterministic
+    // slot order regardless of thread count -- byte-identical to `-t 1`.
+    let (fragment_assigned, slots): (Vec<bool>, Vec<Vec<ReadAssignment>>) =
+        fragment_pool.install(|| {
+            (0..read_cnt)
+                .into_par_iter()
+                .map(|i| {
+                    let overlaps1 =
+                        overlaps_by_seq.get(reads1[i].seq.as_slice()).and_then(Option::as_ref);
+                    let overlaps2 = if has_mate {
+                        overlaps_by_seq.get(reads2[i].seq.as_slice()).and_then(Option::as_ref)
                     } else {
                         None
-                    },
-                    has_n,
-                    hit_len_required,
-                    consensus_len_of,
-                    separator_in_range,
-                );
-                genotyper.compute_read_assignment(
-                    &assignment,
-                    ref_seq_similarity,
-                    separator_lookup_for_set_read_assignments,
-                )
-            })
-            .collect()
-    });
+                    };
+                    let has_n = reads1[i].has_n || (has_mate && reads2[i].has_n);
+
+                    let empty: Vec<ExtendedOverlap> = Vec::new();
+                    let assignment = genotyper::read_assignment_to_fragment_assignment(
+                        overlaps1.map_or(empty.as_slice(), Vec::as_slice),
+                        if has_mate {
+                            Some(overlaps2.map_or(empty.as_slice(), Vec::as_slice))
+                        } else {
+                            None
+                        },
+                        has_n,
+                        hit_len_required,
+                        consensus_len_of,
+                        separator_in_range,
+                    );
+                    let assigned = !assignment.is_empty();
+                    let slot = genotyper.compute_read_assignment(
+                        &assignment,
+                        ref_seq_similarity,
+                        separator_lookup_for_set_read_assignments,
+                    );
+                    (assigned, slot)
+                })
+                .unzip()
+        });
     genotyper.set_all_read_assignments(slots);
 
     genotyper.coalesce_read_assignments(0, i32::try_from(read_cnt.saturating_sub(1)).unwrap_or(0));
@@ -467,12 +475,13 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     genotyper.remove_low_likelihood_allele_in_equivalent_class(|idx| effective_len[idx]);
     genotyper.select_alleles_for_genes(|idx| loaded.weight[idx]);
 
-    // --- Output (Genotyper.cpp:652-679) ---
+    // --- Output (Genotyper.cpp:652-707) ---
     write_genotype_tsv(&genotyper, &args.prefix)?;
     genotyper
         .output_representative_alleles(Path::new(&format!("{}_allele.tsv", args.prefix)), |idx| {
             loaded.names[idx].clone()
         });
+    write_aligned_fastas(&args.prefix, has_mate, &fragment_assigned, &reads1, &reads2)?;
 
     eprintln!(
         "genotyped {read_cnt} read fragments across {allele_cnt} alleles / {} genes (average {:.2} \
@@ -528,6 +537,51 @@ fn write_genotype_tsv(genotyper: &Genotyper, prefix: &str) -> Result<()> {
             genotyper.gene_idx_to_name[i]
         )
         .with_context(|| format!("writing {path}"))?;
+    }
+    Ok(())
+}
+
+/// Ported from `Genotyper.cpp:680-707`: writes each assigned fragment's read
+/// sequence(s) as FASTA so `unum analyze` (and T1K's `analyzer`) can consume
+/// them. Paired input produces `{prefix}_aligned_1.fa` + `{prefix}_aligned_2.fa`;
+/// single-end produces `{prefix}_aligned.fa`.
+///
+/// A fragment is emitted iff it was assigned to at least one allele
+/// (`fragment_assigned[i]`, i.e. its `read_assignment_to_fragment_assignment`
+/// was non-empty -- `Genotyper.cpp:564-565`). The SAME fragment-level flag
+/// gates BOTH mate files (`reads1[i].fragmentAssigned` for mate 1 AND mate 2,
+/// `Genotyper.cpp:688,701`), so mate-1/mate-2 records stay positionally paired.
+fn write_aligned_fastas(
+    prefix: &str,
+    has_mate: bool,
+    fragment_assigned: &[bool],
+    reads1: &[GenotypeRead],
+    reads2: &[GenotypeRead],
+) -> Result<()> {
+    let path1 =
+        if has_mate { format!("{prefix}_aligned_1.fa") } else { format!("{prefix}_aligned.fa") };
+    write_aligned_fasta(&path1, fragment_assigned, reads1)?;
+    if has_mate {
+        write_aligned_fasta(&format!("{prefix}_aligned_2.fa"), fragment_assigned, reads2)?;
+    }
+    Ok(())
+}
+
+/// Writes one aligned-read FASTA: for each `fragment_assigned[i]`, a
+/// `>{id}\n{seq}\n` record (matching `fprintf(fpOutput, ">%s\n%s\n", ...)`,
+/// `Genotyper.cpp:690`), in original input orientation.
+fn write_aligned_fasta(
+    path: &str,
+    fragment_assigned: &[bool],
+    reads: &[GenotypeRead],
+) -> Result<()> {
+    let mut f = std::fs::File::create(path).with_context(|| format!("creating {path}"))?;
+    for (i, &assigned) in fragment_assigned.iter().enumerate() {
+        if assigned {
+            writeln!(f, ">{}", reads[i].id).with_context(|| format!("writing {path}"))?;
+            f.write_all(&reads[i].seq).with_context(|| format!("writing {path}"))?;
+            writeln!(f).with_context(|| format!("writing {path}"))?;
+        }
     }
     Ok(())
 }
