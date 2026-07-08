@@ -478,6 +478,7 @@ pub fn extract_from_bam_with_threads(
         mate_id_len,
         threads,
         sink,
+        Selection::Alignment,
     )?;
 
     alignments.rewind().context("rewinding before pass 2 (or final close for single-end)")?;
@@ -583,6 +584,24 @@ fn handle_unaligned_template_pair(
     Ok(false)
 }
 
+/// Which read-selection SEMANTICS pass 1 uses -- threaded through
+/// [`scan_pass1_chunk`]/[`apply_pass1_chunk`]/[`run_pass1_chunked`]/
+/// [`run_pass1_with_threads`] so both modes share the exact same bounded
+/// scan/evaluate/apply chunk loop.
+///
+/// - `Alignment` is the EXISTING position/gene-interval-driven classification
+///   (`BamExtractor.cpp:632-851`, unchanged by this enum's introduction --
+///   [`extract_from_bam_with_threads`] passes this variant, so its output
+///   stays byte-identical to before this enum existed).
+/// - `NoAlignment` is the Class-A "BAM ~ FASTQ" selection: every PRIMARY read
+///   is k-mer-tested on its own sequence, position/gene-interval/`tag`
+///   entirely bypassed (see [`Pass1Site::KmerCandidate`]'s doc comment).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Selection {
+    Alignment,
+    NoAlignment,
+}
+
 /// One pass-1 site awaiting a candidate-filter DECISION, captured by
 /// [`scan_pass1_chunk`] and resolved by [`evaluate_chunk`] -- see
 /// [`run_pass1_with_threads`]'s doc comment for why splitting pass 1 into
@@ -633,6 +652,18 @@ enum Pass1Site {
     /// doc comment on this variant). Only the trimmed name is needed
     /// (candidates map key; pass 2 re-reads the sequence).
     PairedOnTargetCandidate { trimmed_name: String },
+    /// [`Selection::NoAlignment`]'s Class-A site: one PRIMARY read's raw
+    /// sequence, tested REGARDLESS of alignment position/gene interval --
+    /// evaluated as `!low_complexity(seq) && good(seq)`, the same gate as
+    /// [`Pass1Site::PairedNotAlignedCandidate`]/[`Pass1Site::SingleEndNotAligned`].
+    /// `qual` is only populated (and only needed) for single-end input, which
+    /// emits a lone record directly on a pass; paired input only needs
+    /// `trimmed_name` (the 2-pass name-map key -- pass 2 re-reads seq/qual),
+    /// so it leaves `qual` empty. `is_first_mate` mirrors the record's own
+    /// `0x40` flag for paired input (`true` for single-end, where mate order
+    /// is moot) -- not consumed by [`apply_pass1_chunk`] today, carried for a
+    /// future pass-2 consumer.
+    KmerCandidate { seq: Vec<u8>, qual: Vec<u8>, trimmed_name: String, is_first_mate: bool },
 }
 
 /// Scans the BAM sequentially (BAM-encounter order, exactly as
@@ -661,6 +692,14 @@ enum Pass1Site {
 /// same point in the BAM scan stock would raise them at -- unaffected by
 /// `threads` or `limit`, since no candidate-filter decision is needed to
 /// detect them.
+///
+/// `selection` branches at the TOP of the loop: [`Selection::NoAlignment`]
+/// skips non-primary reads (`!is_primary()`) and pushes every remaining
+/// (primary) read as a [`Pass1Site::KmerCandidate`], entirely bypassing the
+/// `tag`/gene-interval/`template_aligned` classification below --
+/// [`Selection::Alignment`] takes the existing position-based branch,
+/// unchanged.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn scan_pass1_chunk(
     alignments: &mut Alignments,
     genes: &[GeneInterval],
@@ -669,11 +708,47 @@ fn scan_pass1_chunk(
     mate_id_len: i32,
     tag: &mut usize,
     limit: usize,
+    selection: Selection,
 ) -> Result<Vec<Pass1Site>> {
     let gene_cnt = genes.len();
     let mut sites: Vec<Pass1Site> = Vec::with_capacity(limit.min(1024));
 
     while sites.len() < limit && alignments.next().context("pass 1: reading next BAM record")? {
+        if selection == Selection::NoAlignment {
+            // Class A: k-mer-test every PRIMARY read; ignore alignment
+            // position entirely. Unlike the alignment path below (which does
+            // NOT filter `0x900` in pass 1), non-primary (secondary/
+            // supplementary) reads MUST be skipped here: a k-mer match on a
+            // secondary alignment's (identical) sequence would double-count
+            // the QNAME, and `no-alignment == FASTQ` requires each template's
+            // primary read to be tested exactly once, matching the FASTQ
+            // path's one-record-per-read semantics and pass 2's
+            // primary-only fetch.
+            if !alignments.is_primary() {
+                continue;
+            }
+            let seq = alignments.read_seq();
+            if single_end {
+                let qual = alignments.qual();
+                let name = alignments.read_id();
+                sites.push(Pass1Site::KmerCandidate {
+                    seq,
+                    qual,
+                    trimmed_name: name,
+                    is_first_mate: true,
+                });
+            } else {
+                let trimmed_name = trim_name(&alignments.read_id(), mate_id_len);
+                sites.push(Pass1Site::KmerCandidate {
+                    seq,
+                    qual: Vec::new(),
+                    trimmed_name,
+                    is_first_mate: alignments.is_first_mate(),
+                });
+            }
+            continue;
+        }
+
         let template_aligned = alignments.is_template_aligned();
         let chrom_alt = alignments.is_aligned()
             && valid_alternative_chrom(&alignments.chrom_name(alignments.chrom_id()));
@@ -829,7 +904,8 @@ fn evaluate_pass1_site(filter: &RefKmerFilter, site: &Pass1Site, scratch: &mut S
                     || filter.is_good_candidate_with_scratch(seq2, scratch))
         }
         Pass1Site::SingleEndNotAligned { seq, .. }
-        | Pass1Site::PairedNotAlignedCandidate { seq, .. } => {
+        | Pass1Site::PairedNotAlignedCandidate { seq, .. }
+        | Pass1Site::KmerCandidate { seq, .. } => {
             !is_low_complexity(seq) && filter.is_good_candidate_with_scratch(seq, scratch)
         }
         // On-target sites resolve unconditionally to `true`: `BamExtractor.cpp:804-851`
@@ -861,6 +937,14 @@ fn evaluate_pass1_site(filter: &RefKmerFilter, site: &Pass1Site, scratch: &mut S
 /// [`run_pass1_chunked`] rather than recreated per chunk -- so their final
 /// contents/emit order are identical to the original single-loop
 /// implementation regardless of `threads` or chunk boundaries).
+///
+/// `selection` is accepted for signature uniformity across the scan/
+/// evaluate/apply split (mirroring [`evaluate_pass1_site`]'s on-target arm,
+/// which accepts `filter`/`scratch` it doesn't use for the same reason): the
+/// [`Pass1Site::KmerCandidate`] arm below dispatches on `single_end` alone
+/// (its site shape already encodes which [`Selection`] produced it), so this
+/// function does not itself need to branch on `selection`.
+#[allow(clippy::too_many_arguments)]
 fn apply_pass1_chunk(
     sites: Vec<Pass1Site>,
     decisions: &[bool],
@@ -869,7 +953,9 @@ fn apply_pass1_chunk(
     used_name: &mut std::collections::HashSet<String>,
     pass1_emitted: &mut u64,
     sink: &mut impl CandidateSink,
+    selection: Selection,
 ) -> Result<()> {
+    let _ = selection;
     for (site, &good) in sites.into_iter().zip(decisions) {
         match site {
             Pass1Site::UnalignedPair {
@@ -938,6 +1024,24 @@ fn apply_pass1_chunk(
                     candidates.entry(trimmed_name).or_default();
                 }
             }
+            Pass1Site::KmerCandidate { seq, qual, trimmed_name, is_first_mate } => {
+                if single_end {
+                    if good {
+                        let rec = ReadRecord { id: trimmed_name, seq, qual: Some(qual) };
+                        sink.emit_pair(&rec, None)?;
+                        *pass1_emitted += 1;
+                    }
+                } else {
+                    // Paired input only needs the name for the 2-pass
+                    // name-map -- pass 2 re-reads seq/qual; `is_first_mate` is
+                    // carried on the site for a future pass-2 consumer, not
+                    // needed here.
+                    let _ = (qual, is_first_mate);
+                    if good {
+                        candidates.entry(trimmed_name).or_default();
+                    }
+                }
+            }
         }
     }
 
@@ -977,6 +1081,7 @@ fn run_pass1_chunked(
     threads: usize,
     chunk_size: usize,
     sink: &mut impl CandidateSink,
+    selection: Selection,
 ) -> Result<(HashMap<String, PendingCandidate>, u64)> {
     // Build the rayon pool ONCE (not per chunk).
     let pool = if threads > 1 {
@@ -1004,6 +1109,7 @@ fn run_pass1_chunked(
             mate_id_len,
             &mut tag,
             chunk_size,
+            selection,
         )?;
         if sites.is_empty() {
             break; // EOF
@@ -1017,6 +1123,7 @@ fn run_pass1_chunked(
             &mut used_name,
             &mut pass1_emitted,
             sink,
+            selection,
         )?;
     }
 
@@ -1039,6 +1146,7 @@ fn run_pass1_with_threads(
     mate_id_len: i32,
     threads: usize,
     sink: &mut impl CandidateSink,
+    selection: Selection,
 ) -> Result<(HashMap<String, PendingCandidate>, u64)> {
     run_pass1_chunked(
         alignments,
@@ -1050,6 +1158,7 @@ fn run_pass1_with_threads(
         threads,
         PASS1_CHUNK_SIZE,
         sink,
+        selection,
     )
 }
 
@@ -2382,6 +2491,7 @@ mod tests {
         ref_fasta: &std::path::Path,
         threads: usize,
         chunk_size: usize,
+        selection: Selection,
     ) -> (std::collections::HashSet<String>, u64, VecSink) {
         let mut filter =
             RefKmerFilter::from_reference_fasta(ref_fasta, INITIAL_KMER_LENGTH).unwrap();
@@ -2425,6 +2535,7 @@ mod tests {
             threads,
             chunk_size,
             &mut sink,
+            selection,
         )
         .unwrap();
         (candidates.into_keys().collect(), pass1_emitted, sink)
@@ -2448,7 +2559,7 @@ mod tests {
         // parallel (`threads = 4`) evaluate step.
         for threads in [1usize, 4] {
             let (candidates, pass1_emitted, sink) =
-                run_pass1_chunked_test(&bam_path, &ref_fasta, threads, 4);
+                run_pass1_chunked_test(&bam_path, &ref_fasta, threads, 4, Selection::Alignment);
             assert_eq!(
                 candidates, oracle_candidates,
                 "threads={threads}, chunk_size=4: candidates diverged from the oracle across chunk boundaries"
@@ -2545,7 +2656,7 @@ mod tests {
         // extra emitted read -> both asserts below would fail.
         for threads in [1usize, 4] {
             let (candidates, pass1_emitted, sink) =
-                run_pass1_chunked_test(&bam_path, &ref_fasta, threads, 4);
+                run_pass1_chunked_test(&bam_path, &ref_fasta, threads, 4, Selection::Alignment);
             assert_eq!(
                 candidates, oracle_candidates,
                 "threads={threads}, chunk_size=4: single-end candidates diverged from the oracle"
@@ -2558,6 +2669,352 @@ mod tests {
                 sink_signature(&sink),
                 oracle_sig,
                 "threads={threads}, chunk_size=4: emitted reads diverged from the oracle across chunk boundaries"
+            );
+        }
+    }
+
+    // -- `Selection::NoAlignment` (Class-A k-mer selection): every PRIMARY
+    // read is k-mer-tested on its own sequence, position/gene-interval/`tag`
+    // entirely bypassed. `Selection::Alignment` stays byte-identical to its
+    // pre-Task-3 behavior -- every test ABOVE this point exercises it
+    // exclusively (via `run_pass1_chunked_test(..., Selection::Alignment)`),
+    // so those tests double as the byte-identity regression guard.
+
+    /// A 3-pair coordinate BAM for the no-alignment-vs-alignment selection
+    /// differential: `on_target` (aligned inside the gene interval `[1000,
+    /// 5000]`, ref-substring SEQ -- selected by BOTH modes), `off_target_kmer`
+    /// (aligned to chr1 at position 50000, far outside the gene interval, but
+    /// with a ref-substring SEQ that WOULD pass the k-mer candidate filter --
+    /// [`Selection::Alignment`] drops this purely by position, via the
+    /// `tag`/gene-interval-scan `continue` in `scan_pass1_chunk`, BEFORE any
+    /// candidate-filter call; [`Selection::NoAlignment`] selects it via
+    /// k-mer, position-independent), and `unaligned_kmer` (both mates
+    /// unmapped, ref-substring SEQ -- `Selection::Alignment`'s direct-emit
+    /// `UnalignedPair` path vs. `Selection::NoAlignment`'s per-read
+    /// `KmerCandidate`/`candidates`-map path).
+    fn build_kmer_selection_test_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "coordinate");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+        // on_target: inside [1000, 5000], ref-substring SEQ -- selected by
+        // both modes.
+        let ot_seq1 = &ref_bytes[0..90];
+        let ot_seq2 = &ref_bytes[100..190];
+        let mut ot1 = bam::Record::new();
+        ot1.set(b"on_target", Some(&CigarString(vec![Cigar::Match(90)])), ot_seq1, &[30u8; 90]);
+        ot1.set_tid(0);
+        ot1.set_pos(1100);
+        ot1.set_mtid(0);
+        ot1.set_mpos(1300);
+        ot1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
+        writer.write(&ot1).unwrap();
+        let mut ot2 = bam::Record::new();
+        ot2.set(b"on_target", Some(&CigarString(vec![Cigar::Match(90)])), ot_seq2, &[30u8; 90]);
+        ot2.set_tid(0);
+        ot2.set_pos(1300);
+        ot2.set_mtid(0);
+        ot2.set_mpos(1100);
+        ot2.set_flags(0x1 | 0x2 | 0x10 | 0x80);
+        writer.write(&ot2).unwrap();
+
+        // off_target_kmer: aligned to chr1 far outside [1000, 5000] (written
+        // AFTER on_target so the `tag` gene-interval pointer has already
+        // correctly classified on_target before advancing past the only
+        // gene), but a ref-substring SEQ that DOES pass the k-mer filter.
+        let far_seq1 = &ref_bytes[200..280];
+        let far_seq2 = &ref_bytes[300..380];
+        let mut far1 = bam::Record::new();
+        far1.set(
+            b"off_target_kmer",
+            Some(&CigarString(vec![Cigar::Match(80)])),
+            far_seq1,
+            &[30u8; 80],
+        );
+        far1.set_tid(0);
+        far1.set_pos(50_000);
+        far1.set_mtid(0);
+        far1.set_mpos(50_200);
+        far1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
+        writer.write(&far1).unwrap();
+        let mut far2 = bam::Record::new();
+        far2.set(
+            b"off_target_kmer",
+            Some(&CigarString(vec![Cigar::Match(80)])),
+            far_seq2,
+            &[30u8; 80],
+        );
+        far2.set_tid(0);
+        far2.set_pos(50_200);
+        far2.set_mtid(0);
+        far2.set_mpos(50_000);
+        far2.set_flags(0x1 | 0x2 | 0x10 | 0x80);
+        writer.write(&far2).unwrap();
+
+        // unaligned_kmer: two consecutive unmapped records, ref-substring SEQ.
+        let um_seq1 = &ref_bytes[0..70];
+        let um_seq2 = &ref_bytes[100..170];
+        let mut um1 = bam::Record::new();
+        um1.set(b"unaligned_kmer", None, um_seq1, &[25u8; 70]);
+        um1.set_tid(-1);
+        um1.set_pos(-1);
+        um1.set_mtid(-1);
+        um1.set_mpos(-1);
+        um1.set_flags(0x1 | 0x4 | 0x8 | 0x40);
+        writer.write(&um1).unwrap();
+        let mut um2 = bam::Record::new();
+        um2.set(b"unaligned_kmer", None, um_seq2, &[25u8; 70]);
+        um2.set_tid(-1);
+        um2.set_pos(-1);
+        um2.set_mtid(-1);
+        um2.set_mpos(-1);
+        um2.set_flags(0x1 | 0x4 | 0x8 | 0x80);
+        writer.write(&um2).unwrap();
+
+        drop(writer);
+    }
+
+    #[test]
+    fn no_alignment_pass1_selects_by_kmer_not_position() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("kmer_selection.bam");
+        build_kmer_selection_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        // `Selection::NoAlignment`: every primary read is k-mer-tested on its
+        // own sequence, position/gene-interval entirely bypassed -- all
+        // three pairs' k-mer-matching sequences pass, so all three QNAMEs
+        // land in `candidates` (paired input only records the name; nothing
+        // is emitted directly in pass 1).
+        let (no_alignment_candidates, no_alignment_emitted, no_alignment_sink) =
+            run_pass1_chunked_test(&bam_path, &ref_fasta, 1, 1000, Selection::NoAlignment);
+        assert_eq!(
+            no_alignment_candidates,
+            ["on_target", "off_target_kmer", "unaligned_kmer"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            "no-alignment must record every k-mer-passing primary read's QNAME, regardless of \
+             alignment position"
+        );
+        assert_eq!(
+            no_alignment_emitted, 0,
+            "no-alignment (paired input) records names via `candidates`, never emits directly"
+        );
+        assert!(no_alignment_sink.pairs.is_empty(), "no-alignment (paired) must not emit directly");
+
+        // `Selection::Alignment`: unchanged, position-driven classification.
+        // `off_target_kmer` is dropped purely by position (the `tag`/
+        // gene-interval-scan `continue`, BEFORE any candidate-filter call) --
+        // it never becomes a `Pass1Site` at all, k-mer match notwithstanding.
+        let (alignment_candidates, alignment_emitted, alignment_sink) =
+            run_pass1_chunked_test(&bam_path, &ref_fasta, 1, 1000, Selection::Alignment);
+        assert_eq!(
+            alignment_candidates,
+            ["on_target"].into_iter().map(str::to_string).collect(),
+            "alignment mode must record only the on-target pair -- the off-target-by-position \
+             pair must NOT be recorded even though its sequence k-mer-matches"
+        );
+        assert_eq!(
+            alignment_emitted, 1,
+            "alignment mode emits the unaligned-template pair directly (UnalignedPair path)"
+        );
+        assert_eq!(
+            alignment_sink.pairs.len(),
+            1,
+            "alignment mode must emit exactly the unaligned-template pair"
+        );
+        assert_eq!(alignment_sink.pairs[0].0.id, "unaligned_kmer");
+    }
+
+    /// A single-end BAM exercising `Selection::NoAlignment`'s PRIMARY-ONLY
+    /// invariant: `good_read` is a real primary read whose SEQ k-mer-matches
+    /// (must be selected); `primary_noise` is a PRIMARY read whose SEQ is
+    /// non-matching noise (must NOT be selected on its own) immediately
+    /// followed by a SECONDARY alignment (`0x100`) of the SAME QNAME whose
+    /// SEQ DOES k-mer-match; `supp_noise` is likewise a non-matching PRIMARY
+    /// read followed by a SUPPLEMENTARY alignment (`0x800`) of the same
+    /// QNAME whose SEQ k-mer-matches. If `scan_pass1_chunk`'s
+    /// `!is_primary()` skip were missing or wrong, the secondary/
+    /// supplementary records' matching sequences would each independently
+    /// pass the k-mer filter and get emitted under `primary_noise`/
+    /// `supp_noise`'s QNAME -- this fixture gives that regression direct,
+    /// unambiguous teeth.
+    fn build_no_alignment_primary_only_test_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "coordinate");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+        // good_read: primary, k-mer-matching SEQ -- must be selected.
+        let good_seq = &ref_bytes[0..90];
+        let mut good = bam::Record::new();
+        good.set(b"good_read", Some(&CigarString(vec![Cigar::Match(90)])), good_seq, &[30u8; 90]);
+        good.set_tid(0);
+        good.set_pos(1100);
+        good.set_mtid(-1);
+        good.set_mpos(-1);
+        good.set_flags(0);
+        writer.write(&good).unwrap();
+
+        // primary_noise: PRIMARY, non-matching noise SEQ -- must NOT be
+        // selected on its own.
+        let noise_seq1 = noise(80);
+        let mut noise1 = bam::Record::new();
+        noise1.set(
+            b"primary_noise",
+            Some(&CigarString(vec![Cigar::Match(80)])),
+            &noise_seq1,
+            &[30u8; 80],
+        );
+        noise1.set_tid(0);
+        noise1.set_pos(1200);
+        noise1.set_mtid(-1);
+        noise1.set_mpos(-1);
+        noise1.set_flags(0);
+        writer.write(&noise1).unwrap();
+
+        // Same QNAME, SECONDARY (0x100), k-mer-matching SEQ -- must be
+        // SKIPPED entirely (never tested) by the primary-only invariant.
+        let sec_seq = &ref_bytes[100..190];
+        let mut sec = bam::Record::new();
+        sec.set(b"primary_noise", Some(&CigarString(vec![Cigar::Match(90)])), sec_seq, &[30u8; 90]);
+        sec.set_tid(0);
+        sec.set_pos(1210);
+        sec.set_mtid(-1);
+        sec.set_mpos(-1);
+        sec.set_flags(0x100);
+        writer.write(&sec).unwrap();
+
+        // supp_noise: PRIMARY, non-matching noise SEQ -- must NOT be
+        // selected on its own.
+        let noise_seq2 = noise(80);
+        let mut noise2 = bam::Record::new();
+        noise2.set(
+            b"supp_noise",
+            Some(&CigarString(vec![Cigar::Match(80)])),
+            &noise_seq2,
+            &[30u8; 80],
+        );
+        noise2.set_tid(0);
+        noise2.set_pos(1300);
+        noise2.set_mtid(-1);
+        noise2.set_mpos(-1);
+        noise2.set_flags(0);
+        writer.write(&noise2).unwrap();
+
+        // Same QNAME, SUPPLEMENTARY (0x800), k-mer-matching SEQ -- must be
+        // SKIPPED entirely by the primary-only invariant.
+        let supp_seq = &ref_bytes[200..280];
+        let mut supp = bam::Record::new();
+        supp.set(b"supp_noise", Some(&CigarString(vec![Cigar::Match(80)])), supp_seq, &[30u8; 80]);
+        supp.set_tid(0);
+        supp.set_pos(1310);
+        supp.set_mtid(-1);
+        supp.set_mpos(-1);
+        supp.set_flags(0x800);
+        writer.write(&supp).unwrap();
+
+        drop(writer);
+    }
+
+    #[test]
+    fn no_alignment_pass1_skips_secondary_and_supplementary_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("primary_only.bam");
+        build_no_alignment_primary_only_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (candidates, pass1_emitted, sink) =
+            run_pass1_chunked_test(&bam_path, &ref_fasta, 1, 1000, Selection::NoAlignment);
+
+        assert!(candidates.is_empty(), "single-end input must not populate candidates");
+        assert_eq!(
+            pass1_emitted, 1,
+            "only `good_read` may be emitted -- the secondary/supplementary k-mer-matching \
+             records must be skipped entirely, not tested independently of their (non-matching) \
+             primary record"
+        );
+        let ids: Vec<&str> = sink.pairs.iter().map(|(r1, _)| r1.id.as_str()).collect();
+        assert_eq!(ids, vec!["good_read"], "unexpected emitted read set: {ids:?}");
+    }
+
+    // -- No-alignment cross-chunk-boundary regression: Task 1's
+    // cross-boundary tests (above) only exercise `Selection::Alignment`.
+    // `run_pass1_chunked` at a SMALL `chunk_size` under `Selection::
+    // NoAlignment` must match a single-chunk (large `chunk_size`)
+    // `Selection::NoAlignment` run exactly, proving `KmerCandidate` sites and
+    // `candidates`-map accumulation thread correctly across chunks under
+    // this selection mode too.
+
+    #[test]
+    fn no_alignment_pass1_matches_across_chunk_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("no_alignment_chunked.bam");
+        build_small_paired_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        // Single-chunk (large `chunk_size`) `Selection::NoAlignment` run --
+        // the reference this test's chunked runs must match.
+        let (reference_candidates, reference_emitted, reference_sink) =
+            run_pass1_chunked_test(&bam_path, &ref_fasta, 1, 1000, Selection::NoAlignment);
+
+        // Concrete, non-tautological expectation (not just "chunked ==
+        // itself"): every primary read is k-mer-tested regardless of
+        // position, so all 8 on-target QNAMEs AND the unaligned-template
+        // pair's QNAME (a real k-mer match) land in `candidates`. The
+        // off-target pair's `noise(80)` SEQ fails the k-mer filter, so under
+        // NoAlignment it IS tested (unlike under `Selection::Alignment`,
+        // which drops it by position before ever reaching a candidate-filter
+        // call) but not recorded, since it fails.
+        let mut expected_candidates: std::collections::HashSet<String> =
+            (0..8).map(|i| format!("on_target_{i}")).collect();
+        expected_candidates.insert("unaligned".to_string());
+        assert_eq!(reference_candidates, expected_candidates);
+        assert_eq!(reference_emitted, 0, "paired no-alignment never emits directly");
+        assert!(reference_sink.pairs.is_empty());
+
+        // `chunk_size = 4` over this ~20-record fixture crosses several
+        // chunk boundaries (5 chunks); both a sequential (`threads = 1`) and
+        // a parallel (`threads = 4`) evaluate step must reproduce the
+        // single-chunk result exactly.
+        for threads in [1usize, 4] {
+            let (candidates, pass1_emitted, sink) =
+                run_pass1_chunked_test(&bam_path, &ref_fasta, threads, 4, Selection::NoAlignment);
+            assert_eq!(
+                candidates, reference_candidates,
+                "threads={threads}, chunk_size=4: no-alignment candidates diverged from the \
+                 single-chunk reference across chunk boundaries"
+            );
+            assert_eq!(
+                pass1_emitted, reference_emitted,
+                "threads={threads}, chunk_size=4: no-alignment pass1_emitted diverged from the \
+                 single-chunk reference"
+            );
+            assert_eq!(
+                sink_signature(&sink),
+                sink_signature(&reference_sink),
+                "threads={threads}, chunk_size=4: no-alignment emitted output diverged across \
+                 chunk boundaries"
             );
         }
     }
