@@ -91,7 +91,7 @@ use crate::extract::{
 use crate::ref_kmer_filter::{RefKmerFilter, Scratch, is_low_complexity};
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Batch size used by the parallel (`threads > 1`) pass-1 candidate-decision
 /// path -- mirrors [`crate::extract::extract_candidates_with_threads`]'s own
@@ -632,6 +632,385 @@ pub fn extract_from_bam_no_alignment(
         candidates_recorded,
         pass2_emitted,
     })
+}
+
+/// One buffered/live PRIMARY record captured by
+/// [`extract_from_bam_no_alignment_grouped_with_head_limit`]'s head-then-live
+/// group loop: enough of a record's state to re-derive both the setup
+/// statistics (read-1 length sum, `0x1`-set count) and the per-group k-mer/
+/// pairing decision, without holding on to the live [`Alignments`] cursor
+/// itself (which a `VecDeque` of these can outlive across the head/live
+/// boundary -- see [`next_buffered_or_live`]).
+struct GroupedRecord {
+    /// The QNAME with `mate_id_len` trimming already applied ([`trim_name`]),
+    /// applied uniformly to every record regardless of its own `0x1` bit --
+    /// this is the key the group loop compares consecutive records by, so a
+    /// mate pair whose raw QNAMEs differ only by a trailing `/1`/`/2` (or
+    /// whatever `mate_id_len` strips) still groups together. Also the id the
+    /// PAIRED-arm emits (both mates share a QNAME, so the trimmed form is the
+    /// mate-1 id every downstream sink expects -- matching the coordinate
+    /// path's paired 2-pass name-map, which keys on the trimmed name too).
+    trimmed_name: String,
+    /// The RAW, UNtrimmed QNAME ([`Alignments::read_id`]). Emitted verbatim
+    /// as the `ReadRecord.id` of a genuine single-end (0x1-UNSET) lone read,
+    /// to match the coordinate no-alignment path's single-end emits
+    /// (`Pass1Site::KmerCandidate`/`SingleEndNotAligned`/`SingleEndOnTarget`,
+    /// which all carry `read_id()` UNTRIMMED for single-end input): under a
+    /// positive `mate_id_len` or a single-end name bearing a `/1`/`/2`
+    /// suffix, trimming would strip characters the coordinate/FASTQ
+    /// reference keeps, diverging from the very path Task 7 proves this one
+    /// equivalent to. Only the genuine single-end lone emit uses this field
+    /// -- the paired arm and the orphan (`0x1`-SET) lone emit both use
+    /// [`Self::trimmed_name`] (see [`flush_grouped_candidate`]).
+    raw_name: String,
+    seq: Vec<u8>,
+    qual: Vec<u8>,
+    /// The `0x40` FLAG bit ([`Alignments::is_first_mate`]) -- used to order a
+    /// 2-member group's `(mate1, mate2)` emission.
+    is_first_mate: bool,
+    /// The `0x1` FLAG bit ([`Alignments::is_paired`]) -- used only for the
+    /// setup-phase majority-vote (`single_end` derivation); a group's
+    /// pairing-rule dispatch itself is driven entirely by how many members
+    /// it accumulates (0/1/2), not by this bit.
+    is_paired: bool,
+}
+
+/// Runs the grouped/name-sorted (`GO:query`/`SO:queryname`) `--bam-mode
+/// no-alignment` ONE-PASS BAM/CRAM read-extraction driver: unlike
+/// [`extract_from_bam_no_alignment`] (coordinate/unsorted input, two passes
+/// plus a `rewind()` between them), a grouped/name-sorted BAM keeps a
+/// template's mate(s) adjacent in file order, so a SINGLE streaming pass can
+/// both k-mer-test each primary read and reunite its QNAME group --
+/// `O(group + candidates)` memory (never the whole-file `candidates` name
+/// map the coordinate two-pass needs), and critically **stdin-capable**:
+/// this function never calls [`Alignments::rewind`] or
+/// [`Alignments::general_info`], so `alignments` may be backed by
+/// [`Alignments::from_stdin`].
+///
+/// # Setup without `general_info` (B2)
+///
+/// The coordinate/unsorted entry points derive `single_end` from
+/// `alignments.general_info(true).mate_paired`, which requires a `rewind()`
+/// afterward -- impossible on a non-seekable stdin source. Instead, this
+/// function buffers a bounded HEAD of up to [`HIT_LEN_SAMPLE_SIZE`] raw
+/// PRIMARY records (see [`GroupedRecord`]) and derives BOTH the FASTQ-pinned
+/// `hitLenRequired` (read-1 length sum/count -- the same rule
+/// [`crate::alignments::Alignments::sample_read1_len_sum`] uses: read-1 is
+/// the first mate of a paired-flag template, or any record of an unpaired
+/// one) AND `single_end` from that SAME head, via the identical
+/// `has_mate_cnt >= total / 2` majority-vote rule
+/// [`crate::alignments::Alignments::general_info`] uses internally. Returns
+/// `single_end` so a caller (the dispatcher) can pick the output filename
+/// from it directly, without ever calling `general_info`.
+///
+/// # Buffering raw records, not pairs (M2)
+///
+/// The head buffers RAW records, not pre-paired templates -- unlike
+/// `extract::sample_head` (FASTQ positional pairing; private, and typed on a
+/// different reader), a grouped BAM pairs by QNAME ADJACENCY, and a QNAME
+/// group can straddle the boundary between the sampled head and the live
+/// stream that follows it. This function's group-accumulation loop pulls
+/// from the head deque first, then the live [`Alignments`] cursor
+/// ([`next_buffered_or_live`]), as ONE continuous stream -- so a group split
+/// across that boundary (its first member sampled into the head, its second
+/// member read live) is reunited exactly as if no head/live split existed at
+/// all (see `grouped_no_alignment_reunites_group_straddling_head_boundary`).
+///
+/// # Pairing rules
+///
+/// Primary reads only (`!is_primary()` skipped, both while sampling the head
+/// and while reading live -- matching [`extract_from_bam_no_alignment`]'s own
+/// primary-only invariant, so a secondary/supplementary alignment of an
+/// already-grouped QNAME can never masquerade as a second mate or a
+/// duplicate single). Records are grouped by `trim_name`-trimmed QNAME
+/// adjacency; a group is flushed (k-mer-tested and possibly emitted) the
+/// moment a differently-named record is encountered, and once more at EOF
+/// for whatever group is still open ([`flush_grouped_candidate`]):
+/// - A 2-member group emits a PAIR iff EITHER member passes the k-mer gate
+///   (`filter.is_good_candidate_with_scratch`, OR-rescue -- matching
+///   [`Pass1Site::KmerCandidate`]'s own per-read-independent, OR-across-the-
+///   template semantics in the coordinate no-alignment path, NOT
+///   [`Pass1Site::UnalignedPair`]'s stricter "neither read low-complexity"
+///   AND-gate), ordered `(mate1, mate2)` by each member's `is_first_mate` bit.
+/// - A 1-member group with the `0x1` bit UNSET (a genuine single-end record)
+///   emits a LONE read iff it passes, carrying its RAW (untrimmed) id --
+///   matching the coordinate no-alignment path's single-end emits, so a
+///   positive `mate_id_len`/`/1`-suffixed single-end name does not diverge
+///   from the `≡FASTQ`/`≡coordinate` reference (see
+///   [`GroupedRecord::raw_name`]).
+/// - A 1-member group with `0x1` SET (an ORPHAN -- this template's other mate
+///   never arrived, e.g. filtered upstream or genuinely missing from the
+///   file) emits a LONE read iff it passes (the OR-rescue rule degenerates to
+///   "the one read we have"), carrying the TRIMMED id (the coordinate path
+///   emits no orphans at all, so there is no untrimmed reference to match).
+/// - A group that grows past 2 primary members aborts with an error hint (a
+///   QNAME group larger than 2 means the input is not actually
+///   grouped/name-sorted the way this one-pass entry point requires).
+///
+/// `threads` is accepted for signature parity with the sibling
+/// `extract_from_bam_no_alignment*` entry points but unused: a group here has
+/// at most 2 members, so there is no useful unit of parallel work (unlike
+/// [`run_pass1_with_threads`]'s whole-chunk-wide candidate-decision
+/// parallelism).
+///
+/// # Errors
+///
+/// Returns an error if: a QNAME group exceeds 2 primary records; or the
+/// underlying BAM read fails (a genuine parse error, distinct from a clean
+/// EOF).
+pub fn extract_from_bam_no_alignment_grouped(
+    alignments: &mut Alignments,
+    filter: &mut RefKmerFilter,
+    ref_seq_similarity: f64,
+    mate_id_len: i32,
+    threads: usize,
+    sink: &mut impl CandidateSink,
+) -> Result<(BamExtractMetrics, bool)> {
+    let _ = threads;
+    extract_from_bam_no_alignment_grouped_with_head_limit(
+        alignments,
+        filter,
+        ref_seq_similarity,
+        mate_id_len,
+        HIT_LEN_SAMPLE_SIZE,
+        sink,
+    )
+}
+
+/// [`extract_from_bam_no_alignment_grouped`]'s implementation, with the
+/// sampled-head bound taken as an explicit parameter rather than the fixed
+/// [`HIT_LEN_SAMPLE_SIZE`] constant -- so `#[cfg(test)]` can force a tiny head
+/// (e.g. `1`) to directly exercise a QNAME group straddling the head/live
+/// boundary (see the public wrapper's "Buffering raw records" doc section),
+/// which no fixture small enough for a unit test could otherwise reach at the
+/// real 1000-record bound.
+fn extract_from_bam_no_alignment_grouped_with_head_limit(
+    alignments: &mut Alignments,
+    filter: &mut RefKmerFilter,
+    ref_seq_similarity: f64,
+    mate_id_len: i32,
+    head_limit: usize,
+    sink: &mut impl CandidateSink,
+) -> Result<(BamExtractMetrics, bool)> {
+    // -- (1) Bounded head of RAW PRIMARY records (no rewind -> stdin-safe).
+    let mut head: VecDeque<GroupedRecord> = VecDeque::new();
+    let mut read1_len_sum: i64 = 0;
+    let mut read1_count: usize = 0;
+    let mut has_mate_cnt: u64 = 0;
+    let mut head_primary_cnt: u64 = 0;
+
+    while head.len() < head_limit
+        && alignments.next().context("reading BAM head (grouped no-alignment)")?
+    {
+        if !alignments.is_primary() {
+            continue;
+        }
+        let record = read_grouped_record(alignments, mate_id_len);
+        head_primary_cnt += 1;
+        if record.is_paired {
+            has_mate_cnt += 1;
+        }
+        let is_read1 = !record.is_paired || record.is_first_mate;
+        if is_read1 {
+            read1_len_sum += i64::try_from(record.seq.len()).unwrap_or(i64::MAX);
+            read1_count += 1;
+        }
+        head.push_back(record);
+    }
+
+    // -- (2) Setup from the head alone (B2: never general_info).
+    // `!(has_mate_cnt >= total / 2)`, simplified per clippy::nonminimal_bool
+    // (equivalent for these integer counts): `single_end` is the negation of
+    // `Alignments::general_info`'s own `mate_paired` majority-vote rule.
+    let single_end = has_mate_cnt < head_primary_cnt / 2;
+    let mut hit_len_required =
+        compute_hit_len_required_no_alignment(read1_len_sum, read1_count, !single_end);
+    filter.set_hit_len_required(hit_len_required);
+    filter.set_ref_seq_similarity(ref_seq_similarity); // M1: required for ≡FASTQ.
+
+    let inferred = filter.infer_kmer_length();
+    if inferred > filter.kmer_length() {
+        filter.update_kmer_length(inferred);
+        if inferred > usize::try_from(hit_len_required).unwrap_or(0) {
+            hit_len_required = i32::try_from(inferred).unwrap_or(i32::MAX);
+            filter.set_hit_len_required(hit_len_required);
+        }
+    }
+
+    // -- (3) ONE continuous group-accumulation loop over head ++ live.
+    let mut scratch = Scratch::default();
+    let mut current_group: Vec<GroupedRecord> = Vec::new();
+    let mut emitted: u64 = 0;
+
+    while let Some(record) = next_buffered_or_live(&mut head, alignments, mate_id_len)? {
+        if let Some(first) = current_group.first() {
+            if first.trimmed_name == record.trimmed_name {
+                if current_group.len() >= 2 {
+                    bail!(
+                        "more than two primary records share QNAME {:?} in grouped/name-sorted \
+                         no-alignment mode; hint: the input's @HD GO:query/SO:queryname claim may \
+                         not hold (mates are not actually adjacent) -- unum's grouped one-pass \
+                         requires a genuinely grouped/name-sorted BAM",
+                        record.trimmed_name
+                    );
+                }
+                current_group.push(record);
+                continue;
+            }
+            flush_grouped_candidate(&current_group, filter, &mut scratch, sink, &mut emitted)?;
+            current_group.clear();
+        }
+        current_group.push(record);
+    }
+    flush_grouped_candidate(&current_group, filter, &mut scratch, sink, &mut emitted)?;
+
+    let metrics = BamExtractMetrics {
+        single_end,
+        hit_len_required,
+        kmer_length: filter.kmer_length(),
+        pass1_emitted: emitted,
+        candidates_recorded: 0,
+        pass2_emitted: 0,
+    };
+    Ok((metrics, single_end))
+}
+
+/// Reads the CURRENT record's [`GroupedRecord`] snapshot. Caller must have
+/// already called `alignments.next()` and confirmed `is_primary()`.
+fn read_grouped_record(alignments: &Alignments, mate_id_len: i32) -> GroupedRecord {
+    let raw_name = alignments.read_id();
+    GroupedRecord {
+        trimmed_name: trim_name(&raw_name, mate_id_len),
+        raw_name,
+        seq: alignments.read_seq(),
+        qual: alignments.qual(),
+        is_first_mate: alignments.is_first_mate(),
+        is_paired: alignments.is_paired(),
+    }
+}
+
+/// Pulls the next PRIMARY record for
+/// [`extract_from_bam_no_alignment_grouped_with_head_limit`]'s group loop:
+/// drains `head` first (in original encounter order), then reads live from
+/// `alignments` -- skipping non-primary records exactly as the head-buffering
+/// loop does -- once `head` is empty. Returns `None` at EOF. This is what
+/// makes a QNAME group split across the head/live boundary transparent to the
+/// caller: from the group loop's point of view, the head is just a pushback
+/// buffer in front of the live cursor, not a separately-paired structure (see
+/// [`extract_from_bam_no_alignment_grouped_with_head_limit`]'s "Buffering raw
+/// records" doc section).
+///
+/// # Errors
+///
+/// Returns an error if the underlying BAM read fails (a genuine parse error,
+/// distinct from a clean EOF).
+fn next_buffered_or_live(
+    head: &mut VecDeque<GroupedRecord>,
+    alignments: &mut Alignments,
+    mate_id_len: i32,
+) -> Result<Option<GroupedRecord>> {
+    if let Some(record) = head.pop_front() {
+        return Ok(Some(record));
+    }
+    while alignments.next().context("reading next BAM record (grouped no-alignment)")? {
+        if !alignments.is_primary() {
+            continue;
+        }
+        return Ok(Some(read_grouped_record(alignments, mate_id_len)));
+    }
+    Ok(None)
+}
+
+/// Resolves and emits (if it passes) one flushed QNAME group -- see
+/// [`extract_from_bam_no_alignment_grouped`]'s "Pairing rules" doc section.
+/// `group` is expected to have length 0 (a no-op, e.g. the very first call
+/// before any record has been accumulated), 1, or 2; the caller's own
+/// larger-than-2-member abort check in the group loop guarantees a 3rd
+/// member is never pushed, so the `_` arm below is unreachable in practice
+/// and exists only as a defensive fallback.
+///
+/// # Errors
+///
+/// Returns an error if `sink.emit_pair` fails, or (defensively) if `group`
+/// somehow has more than 2 members.
+fn flush_grouped_candidate(
+    group: &[GroupedRecord],
+    filter: &RefKmerFilter,
+    scratch: &mut Scratch,
+    sink: &mut impl CandidateSink,
+    emitted: &mut u64,
+) -> Result<()> {
+    match group {
+        [] => Ok(()),
+        [lone] => {
+            if filter.is_good_candidate_with_scratch(&lone.seq, scratch) {
+                // A GENUINE single-end record (0x1 UNSET) emits with its RAW,
+                // untrimmed id, matching the coordinate no-alignment path's
+                // single-end emits (which carry `read_id()` untrimmed -- see
+                // `GroupedRecord::raw_name`'s doc comment); this is the
+                // `≡FASTQ`/`≡coordinate` (Task 7) requirement. An ORPHAN
+                // (0x1 SET, mate absent) keeps the trimmed name: the
+                // coordinate path never emits orphans (a paired candidate
+                // whose mate never arrives is simply dropped in pass 2), so
+                // there is no untrimmed single-end reference to match here,
+                // and the trimmed form is what a paired template's id would
+                // otherwise have been.
+                let id = if lone.is_paired { &lone.trimmed_name } else { &lone.raw_name };
+                let read = ReadRecord {
+                    id: id.clone(),
+                    seq: lone.seq.clone(),
+                    qual: Some(lone.qual.clone()),
+                };
+                sink.emit_pair(&read, None)?;
+                *emitted += 1;
+            }
+            Ok(())
+        }
+        [a, b] => {
+            // Order by `is_first_mate`; if the group is malformed (neither
+            // or both members carry `0x40`), fall back to encounter order --
+            // an arbitrary but deterministic choice for input that does not
+            // actually distinguish its two mates.
+            let (mate1, mate2) = if a.is_first_mate && !b.is_first_mate {
+                (a, b)
+            } else if b.is_first_mate && !a.is_first_mate {
+                (b, a)
+            } else {
+                (a, b)
+            };
+            // OR-rescue: either mate passing the k-mer gate independently is
+            // enough (matches `Pass1Site::KmerCandidate`'s per-read decision,
+            // OR-combined via `candidates`-map insertion in the coordinate
+            // no-alignment path -- see this function's caller's doc comment).
+            let passes = filter.is_good_candidate_with_scratch(&mate1.seq, scratch)
+                || filter.is_good_candidate_with_scratch(&mate2.seq, scratch);
+            if passes {
+                // Both output records carry mate1's id, matching every other
+                // pair-emission site in this module (e.g.
+                // `Pass1Site::UnalignedPair`'s apply arm) and
+                // `InMemoryCandidateSink`'s documented byte-identity
+                // requirement with the file-writing sink.
+                let r1 = ReadRecord {
+                    id: mate1.trimmed_name.clone(),
+                    seq: mate1.seq.clone(),
+                    qual: Some(mate1.qual.clone()),
+                };
+                let r2 = ReadRecord {
+                    id: mate1.trimmed_name.clone(),
+                    seq: mate2.seq.clone(),
+                    qual: Some(mate2.qual.clone()),
+                };
+                sink.emit_pair(&r1, Some(&r2))?;
+                *emitted += 1;
+            }
+            Ok(())
+        }
+        _ => bail!(
+            "internal error: grouped no-alignment flush called with a {}-member group (expected \
+             0, 1, or 2 -- the caller's >2-member abort check should have already fired)",
+            group.len()
+        ),
+    }
 }
 
 /// Handles one unaligned-template pair within pass 1
@@ -3277,5 +3656,398 @@ mod tests {
              candidate incomplete"
         );
         assert!(alignment_sink.pairs.is_empty());
+    }
+
+    // -- Grouped/name-sorted no-alignment one-pass
+    // (`extract_from_bam_no_alignment_grouped`): stdin-capable single-pass
+    // extraction that k-mer-tests each primary read and reunites its QNAME
+    // group by adjacency instead of a coordinate two-pass name map.
+
+    /// Builds a name-sorted (`SO:queryname`) BAM exercising every grouped
+    /// no-alignment pairing rule:
+    /// - `pair_ok`: 2 adjacent primary records (mate1's SEQ k-mer-matches;
+    ///   mate2's is `noise` and fails on its own) -- must be emitted as a
+    ///   PAIR via OR-rescue (mate1 alone passing is enough).
+    /// - `single_ok`: 1 primary record, `0x1` UNSET, k-mer-matching SEQ --
+    ///   must be emitted LONE.
+    /// - `orphan_ok`: 1 primary record, `0x1` SET (this template's other
+    ///   mate never shows up in the file), k-mer-matching SEQ -- must be
+    ///   emitted LONE (orphan OR-rescue degenerates to the single read).
+    /// - `pair_fail`: 2 adjacent primary records, BOTH `noise` (fail
+    ///   individually, so OR-rescue has nothing to rescue with) -- must NOT
+    ///   be emitted at all.
+    fn build_grouped_no_alignment_test_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "queryname");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+        // pair_ok: mate1 passes on its own; mate2 is noise and fails on its
+        // own -- OR-rescue must still emit the pair.
+        let mut m1 = bam::Record::new();
+        m1.set(b"pair_ok", None, &ref_bytes[0..90], &[30u8; 90]);
+        m1.set_tid(-1);
+        m1.set_pos(-1);
+        m1.set_mtid(-1);
+        m1.set_mpos(-1);
+        m1.set_flags(0x1 | 0x40);
+        writer.write(&m1).unwrap();
+
+        let pair_ok_mate2_seq = noise(90);
+        let mut m2 = bam::Record::new();
+        m2.set(b"pair_ok", None, &pair_ok_mate2_seq, &[30u8; 90]);
+        m2.set_tid(-1);
+        m2.set_pos(-1);
+        m2.set_mtid(-1);
+        m2.set_mpos(-1);
+        m2.set_flags(0x1 | 0x80);
+        writer.write(&m2).unwrap();
+
+        // single_ok: 0x1 UNSET, k-mer-matching SEQ -- lone emit.
+        let mut single = bam::Record::new();
+        single.set(b"single_ok", None, &ref_bytes[100..190], &[30u8; 90]);
+        single.set_tid(-1);
+        single.set_pos(-1);
+        single.set_mtid(-1);
+        single.set_mpos(-1);
+        single.set_flags(0);
+        writer.write(&single).unwrap();
+
+        // orphan_ok: 0x1 SET, mate never shows up in the file,
+        // k-mer-matching SEQ -- lone emit (orphan OR-rescue).
+        let mut orphan = bam::Record::new();
+        orphan.set(b"orphan_ok", None, &ref_bytes[200..290], &[30u8; 90]);
+        orphan.set_tid(-1);
+        orphan.set_pos(-1);
+        orphan.set_mtid(-1);
+        orphan.set_mpos(-1);
+        orphan.set_flags(0x1 | 0x40);
+        writer.write(&orphan).unwrap();
+
+        // pair_fail: both mates are noise -- neither passes, so OR-rescue
+        // has nothing to rescue with; must not be emitted.
+        let pair_fail_mate1_seq = noise(90);
+        let mut f1 = bam::Record::new();
+        f1.set(b"pair_fail", None, &pair_fail_mate1_seq, &[30u8; 90]);
+        f1.set_tid(-1);
+        f1.set_pos(-1);
+        f1.set_mtid(-1);
+        f1.set_mpos(-1);
+        f1.set_flags(0x1 | 0x40);
+        writer.write(&f1).unwrap();
+
+        let pair_fail_mate2_seq = noise(90);
+        let mut f2 = bam::Record::new();
+        f2.set(b"pair_fail", None, &pair_fail_mate2_seq, &[30u8; 90]);
+        f2.set_tid(-1);
+        f2.set_pos(-1);
+        f2.set_mtid(-1);
+        f2.set_mpos(-1);
+        f2.set_flags(0x1 | 0x80);
+        writer.write(&f2).unwrap();
+
+        drop(writer);
+    }
+
+    #[test]
+    fn grouped_no_alignment_pairs_orphans_and_singles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("grouped_no_alignment.bam");
+        build_grouped_no_alignment_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+
+        let mut filter =
+            RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
+        let mut alignments = Alignments::open(&bam_path).unwrap();
+        let mut sink = VecSink::default();
+
+        let (metrics, single_end) = extract_from_bam_no_alignment_grouped(
+            &mut alignments,
+            &mut filter,
+            0.8,
+            -1,
+            1,
+            &mut sink,
+        )
+        .unwrap();
+
+        // 6 primary records total; 5 of them (pair_ok x2, orphan_ok,
+        // pair_fail x2) carry the 0x1 (paired) FLAG bit -- the majority-vote
+        // rule must classify this fixture as paired, not single-end.
+        assert!(!single_end, "majority-paired fixture must not be classified single-end");
+        assert_eq!(metrics.single_end, single_end, "returned tuple and metrics field must agree");
+        assert_eq!(
+            metrics.pass1_emitted, 3,
+            "pair_ok + single_ok + orphan_ok must be emitted; pair_fail must not"
+        );
+        assert_eq!(
+            metrics.candidates_recorded, 0,
+            "the one-pass path never populates a candidates map"
+        );
+        assert_eq!(metrics.pass2_emitted, 0, "the one-pass path has no pass 2");
+
+        let mut by_id: HashMap<String, (ReadRecord, Option<ReadRecord>)> = HashMap::new();
+        for (r1, r2) in &sink.pairs {
+            by_id.insert(r1.id.clone(), (r1.clone(), r2.clone()));
+        }
+        assert_eq!(
+            by_id.len(),
+            3,
+            "exactly 3 QNAMEs must be emitted, got {:?}",
+            by_id.keys().collect::<Vec<_>>()
+        );
+
+        let (pair_r1, pair_r2) = by_id.get("pair_ok").expect("pair_ok must be emitted as a pair");
+        let pair_r2 =
+            pair_r2.as_ref().expect("pair_ok must be emitted WITH its mate2 (a pair, not lone)");
+        assert_eq!(pair_r1.seq, ref_bytes[0..90], "mate1 (is_first_mate) must come first");
+        assert_eq!(pair_r2.seq, noise(90), "mate2 (noise, the failing member) must come second");
+        assert_eq!(pair_r2.id, "pair_ok", "mate2's emitted id must be mate1's id, not its own");
+
+        let (single_r1, single_r2) = by_id.get("single_ok").expect("single_ok must be emitted");
+        assert!(single_r2.is_none(), "single_ok (0x1 unset) must be emitted LONE, not as a pair");
+        assert_eq!(single_r1.seq, ref_bytes[100..190]);
+
+        let (orphan_r1, orphan_r2) =
+            by_id.get("orphan_ok").expect("orphan_ok must be emitted (orphan OR-rescue)");
+        assert!(orphan_r2.is_none(), "orphan_ok (mate absent) must be emitted LONE, not as a pair");
+        assert_eq!(orphan_r1.seq, ref_bytes[200..290]);
+
+        assert!(
+            !by_id.contains_key("pair_fail"),
+            "pair_fail (both mates noise) must not be emitted"
+        );
+    }
+
+    /// Builds a name-sorted BAM with 3 primary records sharing one QNAME --
+    /// a malformed "grouped/name-sorted" claim the one-pass entry point must
+    /// reject rather than silently mis-grouping reads.
+    fn build_grouped_no_alignment_three_primaries_test_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "queryname");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+        for i in 0..3usize {
+            let seq = &ref_bytes[i * 90..i * 90 + 90];
+            let mut r = bam::Record::new();
+            r.set(b"triple", None, seq, &[30u8; 90]);
+            r.set_tid(-1);
+            r.set_pos(-1);
+            r.set_mtid(-1);
+            r.set_mpos(-1);
+            r.set_flags(0x1);
+            writer.write(&r).unwrap();
+        }
+        drop(writer);
+    }
+
+    #[test]
+    fn grouped_no_alignment_more_than_two_primaries_aborts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("triple_qname.bam");
+        build_grouped_no_alignment_three_primaries_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let mut filter =
+            RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
+        let mut alignments = Alignments::open(&bam_path).unwrap();
+        let mut sink = VecSink::default();
+
+        let result = extract_from_bam_no_alignment_grouped(
+            &mut alignments,
+            &mut filter,
+            0.8,
+            -1,
+            1,
+            &mut sink,
+        );
+        let err = result.expect_err("a >2-member QNAME group must abort with an error");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("triple") && message.contains("two"),
+            "error should hint at the offending QNAME and the >2-member rule, got: {message}"
+        );
+    }
+
+    #[test]
+    fn grouped_no_alignment_reunites_group_straddling_head_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("boundary_straddle.bam");
+        // Reuses the same fixture as `grouped_no_alignment_pairs_orphans_and_singles`:
+        // `pair_ok`'s two records are the FIRST two primary records in the
+        // file.
+        build_grouped_no_alignment_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let mut filter =
+            RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
+        let mut alignments = Alignments::open(&bam_path).unwrap();
+        let mut sink = VecSink::default();
+
+        // `head_limit = 1`: only `pair_ok`'s FIRST record (mate1) is
+        // buffered into the head before the setup phase stops sampling;
+        // mate2 is therefore read LIVE via `next_buffered_or_live`, in a
+        // DIFFERENT sub-phase from mate1 despite sharing `pair_ok`'s QNAME.
+        // If the group loop treated the head as a separately-paired buffer
+        // (instead of draining head ++ live as one continuous stream), this
+        // group would be split into two 1-member flushes instead of being
+        // reunited into one 2-member group.
+        let (metrics, _single_end) = extract_from_bam_no_alignment_grouped_with_head_limit(
+            &mut alignments,
+            &mut filter,
+            0.8,
+            -1,
+            1,
+            &mut sink,
+        )
+        .unwrap();
+
+        assert_eq!(
+            metrics.pass1_emitted, 3,
+            "boundary-straddled pair_ok must still merge into one 2-member group and emit \
+             correctly, exactly like the unbounded-head run (grouped_no_alignment_pairs_orphans_and_singles)"
+        );
+        let pair_entry = sink
+            .pairs
+            .iter()
+            .find(|(r1, _)| r1.id == "pair_ok")
+            .expect("pair_ok must be emitted despite straddling the head/live boundary");
+        assert!(
+            pair_entry.1.is_some(),
+            "pair_ok must be emitted as a PAIR (both members reunited), not split into two \
+             independent lone emissions"
+        );
+    }
+
+    /// Builds a single-end (all `0x1` UNSET) name-sorted BAM. The read under
+    /// test, `se_read/1`, carries a trailing `/1` suffix and a k-mer-matching
+    /// SEQ; under the default `mate_id_len = -1`, `trim_name("se_read/1", -1)`
+    /// strips the `/1` to `"se_read"` -- so an emit that (wrongly) used the
+    /// TRIMMED name would drop the suffix, whereas the coordinate
+    /// no-alignment path's single-end emit keeps the raw `read_id()` verbatim.
+    /// Two additional plain single-end reads (`se_pad_a`/`se_pad_b`, distinct
+    /// QNAMEs) are included so the `0x1`-FLAG majority vote clearly classifies
+    /// the file single-end (`has_mate_cnt = 0 >= total/2` fails for
+    /// `total = 3` -- the identical majority rule `general_info` uses; a
+    /// single lone read would land in the `0 >= 0` degenerate tie that
+    /// `general_info` itself treats as paired).
+    fn build_grouped_no_alignment_single_end_suffix_test_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "queryname");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+        // Name-sorted order: "se_pad_a", "se_pad_b", "se_read/1".
+        let mut pad_a = bam::Record::new();
+        pad_a.set(b"se_pad_a", None, &ref_bytes[100..190], &[30u8; 90]);
+        pad_a.set_tid(-1);
+        pad_a.set_pos(-1);
+        pad_a.set_mtid(-1);
+        pad_a.set_mpos(-1);
+        pad_a.set_flags(0);
+        writer.write(&pad_a).unwrap();
+
+        let mut pad_b = bam::Record::new();
+        pad_b.set(b"se_pad_b", None, &ref_bytes[200..290], &[30u8; 90]);
+        pad_b.set_tid(-1);
+        pad_b.set_pos(-1);
+        pad_b.set_mtid(-1);
+        pad_b.set_mpos(-1);
+        pad_b.set_flags(0);
+        writer.write(&pad_b).unwrap();
+
+        let mut r = bam::Record::new();
+        r.set(b"se_read/1", None, &ref_bytes[0..90], &[30u8; 90]);
+        r.set_tid(-1);
+        r.set_pos(-1);
+        r.set_mtid(-1);
+        r.set_mpos(-1);
+        r.set_flags(0); // 0x1 UNSET -> genuine single-end.
+        writer.write(&r).unwrap();
+        drop(writer);
+    }
+
+    #[test]
+    fn grouped_no_alignment_single_end_lone_emit_keeps_untrimmed_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("single_end_suffix.bam");
+        build_grouped_no_alignment_single_end_suffix_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let mut filter =
+            RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
+        let mut alignments = Alignments::open(&bam_path).unwrap();
+        let mut sink = VecSink::default();
+
+        // Default `mate_id_len = -1` (strips a trailing `/1`/`/2` for the
+        // grouping compare, but the single-end LONE emit must NOT trim its id).
+        let (metrics, single_end) = extract_from_bam_no_alignment_grouped(
+            &mut alignments,
+            &mut filter,
+            0.8,
+            -1,
+            1,
+            &mut sink,
+        )
+        .unwrap();
+
+        assert!(single_end, "an all-0x1-unset fixture must be classified single-end");
+        assert_eq!(metrics.pass1_emitted, 3, "all three single-end reads must be emitted lone");
+        // Every single-end read is emitted lone (r2 == None).
+        assert!(
+            sink.pairs.iter().all(|(_, r2)| r2.is_none()),
+            "single-end reads must be emitted LONE"
+        );
+        let suffix_read = sink
+            .pairs
+            .iter()
+            .find(|(r1, _)| r1.seq == ref_bytes_first_90())
+            .expect("the se_read/1 read (seq == ref[0..90]) must be emitted")
+            .0
+            .clone();
+        // The load-bearing assertion: the emitted id is the RAW, untrimmed
+        // name. Under the old (trimmed-name) behavior this would be
+        // "se_read" and the assertion would FAIL -- matching the coordinate
+        // no-alignment path, whose single-end emit keeps `read_id()` verbatim.
+        assert_eq!(
+            suffix_read.id, "se_read/1",
+            "single-end lone emit must carry the UNTRIMMED read id (the coordinate no-alignment \
+             path keeps read_id() verbatim for single-end); got the trimmed form instead"
+        );
+    }
+
+    /// The first 90 bytes of [`PARALLEL_TEST_REF`] -- the `se_read/1`
+    /// fixture read's SEQ, used to locate it among the emitted single-end
+    /// reads without relying on emit order.
+    fn ref_bytes_first_90() -> Vec<u8> {
+        PARALLEL_TEST_REF.as_bytes()[0..90].to_vec()
     }
 }

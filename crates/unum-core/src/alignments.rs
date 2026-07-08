@@ -125,7 +125,12 @@ pub struct GeneralInfo {
 /// reproduce exactly: `GetReadSeq`/`GetQual` orientation, and the
 /// `GetGeneralInfo` sampling formula.
 pub struct Alignments {
-    path: PathBuf,
+    /// `Some(path)` for a file-backed reader (rewindable via reopen);
+    /// `None` for a stdin-backed reader ([`Alignments::from_stdin`]), which
+    /// has no path to reopen -- [`Alignments::rewind`] checks this and
+    /// returns a clear error rather than attempting anything stdin cannot
+    /// support (stdin is a non-seekable, single-consumption stream).
+    path: Option<PathBuf>,
     reader: bam::Reader,
     header: bam::HeaderView,
     current: Option<CurrentRecord>,
@@ -152,7 +157,39 @@ impl Alignments {
         let reader = bam::Reader::from_path(&path)
             .with_context(|| format!("opening alignment file {}", path.display()))?;
         let header = bam::HeaderView::from_header(&bam::Header::from_template(reader.header()));
-        Ok(Self { path, reader, header, current: None, total_read_cnt: 0 })
+        Ok(Self { path: Some(path), reader, header, current: None, total_read_cnt: 0 })
+    }
+
+    /// Opens standard input as a BAM/CRAM stream, for a pipe-fed source
+    /// (`-` on the CLI). Uses `rust_htslib::bam::Reader::from_stdin()`
+    /// directly -- **not** [`Alignments::open`]`("-")`, which would call
+    /// rust-htslib's `bam::Reader::from_path` and therefore
+    /// `path_as_bytes(path, must_exist=true)`; `Path::new("-").exists()` is
+    /// `false` (there is no file literally named `-`), so that call fails
+    /// with a `FileNotFound` error instead of reading the pipe.
+    ///
+    /// The returned reader is **not rewindable**: [`Alignments::rewind`]
+    /// returns an error rather than silently reopening a real file, since
+    /// stdin is a non-seekable, single-consumption stream -- there is
+    /// nothing to reopen. This also means [`Alignments::general_info`] is
+    /// effectively unusable here in practice: every caller of it in this
+    /// crate immediately calls `rewind()` afterward (mirroring
+    /// `BamExtractor.cpp:573-574`'s `GetGeneralInfo(true); Rewind();`
+    /// pattern), and that follow-up `rewind()` call fails on a stdin-backed
+    /// reader -- so a stdin source must instead go through a one-pass entry
+    /// point that derives its setup statistics from a bounded, non-rewound
+    /// head buffer (e.g.
+    /// [`crate::bam_extract::extract_from_bam_no_alignment_grouped`]) rather
+    /// than `general_info`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stdin cannot be opened as a BAM/CRAM stream or its
+    /// header cannot be parsed.
+    pub fn from_stdin() -> Result<Self> {
+        let reader = bam::Reader::from_stdin().context("opening alignment stream from stdin")?;
+        let header = bam::HeaderView::from_header(&bam::Header::from_template(reader.header()));
+        Ok(Self { path: None, reader, header, current: None, total_read_cnt: 0 })
     }
 
     /// Returns the BAM/CRAM's declared sort/group order from its `@HD` line.
@@ -209,10 +246,19 @@ impl Alignments {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be reopened.
+    /// Returns an error if the file cannot be reopened, or if this reader
+    /// was constructed via [`Alignments::from_stdin`] (stdin is not
+    /// seekable/reopenable -- see that method's doc comment).
     pub fn rewind(&mut self) -> Result<()> {
-        let reader = bam::Reader::from_path(&self.path)
-            .with_context(|| format!("rewinding alignment file {}", self.path.display()))?;
+        let Some(path) = self.path.clone() else {
+            bail!(
+                "cannot rewind: this Alignments reader was opened from stdin (Alignments::from_stdin), \
+                 which is not seekable/reopenable; use a one-pass entry point that never rewinds for \
+                 a stdin source"
+            );
+        };
+        let reader = bam::Reader::from_path(&path)
+            .with_context(|| format!("rewinding alignment file {}", path.display()))?;
         self.header = bam::HeaderView::from_header(&bam::Header::from_template(reader.header()));
         self.reader = reader;
         self.current = None;
@@ -408,6 +454,21 @@ impl Alignments {
     #[must_use]
     pub fn is_primary(&self) -> bool {
         (self.current().record.flags() & 0x900) == 0
+    }
+
+    /// The `0x1` (paired) FLAG bit of the current record: whether it is part
+    /// of a template with an expected mate. Not a direct port of a named
+    /// T1K `Alignments` accessor (T1K reads this bit inline off the raw
+    /// `bam1_t` where needed); exposed here for
+    /// [`crate::bam_extract::extract_from_bam_no_alignment_grouped`], which
+    /// -- unable to call [`Alignments::general_info`] on a non-rewindable
+    /// (possibly stdin) reader -- derives `single_end` and its per-group
+    /// pairing rule directly from this bit, sampled over a bounded head,
+    /// using the same `has_mate_cnt >= total / 2` majority-vote rule
+    /// [`Alignments::general_info`] uses internally.
+    #[must_use]
+    pub fn is_paired(&self) -> bool {
+        (self.current().record.flags() & 0x1) != 0
     }
 
     /// Mirrors `Alignments::GetReadId` (`alignments.hpp:441-444`): the QNAME.
