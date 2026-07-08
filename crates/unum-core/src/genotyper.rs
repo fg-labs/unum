@@ -2673,13 +2673,14 @@ impl Genotyper {
                         if src.start < self.read_assignments[add_to_usize][j].start {
                             self.read_assignments[add_to_usize][j].start = src.start;
                         }
-                        // Ported verbatim from `Genotyper.hpp:893-894`: the
-                        // C++ compares `.end < .end` but then assigns
-                        // `.end = allReadAssignments[i][j].start` (NOT
-                        // `.end`) -- a real quirk in stock T1K, not a typo
-                        // in this port. Preserved for byte-identical output.
+                        // DIVERGENCE from T1K (see docs/DIVERGENCES.md): T1K
+                        // compares `.end < .end` but then assigns
+                        // `.end = allReadAssignments[i][j].start` (NOT `.end`,
+                        // `Genotyper.hpp:893-894`) -- a copy-paste typo from the
+                        // `.start` merge just above. `unum` assigns the incoming
+                        // `.end`, so the merge correctly keeps the minimum end.
                         if src.end < self.read_assignments[add_to_usize][j].end {
-                            self.read_assignments[add_to_usize][j].end = src.start;
+                            self.read_assignments[add_to_usize][j].end = src.end;
                         }
                     }
                     self.read_assignments[add_to_usize][j].weight += src.weight;
@@ -4959,6 +4960,52 @@ mod tests {
         assert!(g.all_read_assignments[0].is_empty());
         assert!(g.all_read_assignments[1].is_empty());
         assert!(g.all_read_assignments[2].is_empty());
+    }
+
+    #[test]
+    fn coalesce_merge_takes_incoming_end_not_start() {
+        // DIVERGENCE from T1K (see docs/DIVERGENCES.md): when two same-
+        // fingerprint reads coalesce, the merge keeps the MIN `.end`. T1K
+        // compares `.end < .end` but then assigns the incoming `.start`
+        // (`Genotyper.hpp:893-894`) -- a typo. `unum` assigns the incoming
+        // `.end`. Read 1's end (50) is smaller than read 0's (100) and its
+        // start (10) differs, so the merged end must be 50, not 10.
+        let mut g = small_genotyper();
+        g.init_read_assignments(2, 2000);
+        set_raw_assignment(
+            &mut g,
+            0,
+            vec![ReadAssignment {
+                allele_idx: 0,
+                start: 0,
+                end: 100,
+                weight: 1.0,
+                qual: 1.0,
+                adjust_weight: 1.0,
+            }],
+        );
+        set_raw_assignment(
+            &mut g,
+            1,
+            vec![ReadAssignment {
+                allele_idx: 0,
+                start: 10,
+                end: 50,
+                weight: 1.0,
+                qual: 1.0,
+                adjust_weight: 1.0,
+            }],
+        );
+
+        g.coalesce_read_assignments(0, 1);
+
+        assert_eq!(g.read_cnt, 1, "reads 0 and 1 share allele 0 and coalesce into one group");
+        let merged = &g.read_assignments[0][0];
+        assert_eq!(merged.start, 0, "min start preserved");
+        assert_eq!(
+            merged.end, 50,
+            "merged end must be the incoming .end (50), not its .start (10)"
+        );
     }
 
     #[test]
