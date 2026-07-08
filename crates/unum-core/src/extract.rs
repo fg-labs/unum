@@ -253,6 +253,8 @@ pub enum ReadSource {
     Single(FastqReader),
     /// Paired: two FASTQ files (mate 1, mate 2).
     Paired(FastqReader, FastqReader),
+    /// Interleaved: one FASTQ file where records alternate mate1, mate2.
+    Interleaved(FastqReader),
 }
 
 /// Extraction run summary, returned by [`extract_candidates`] for caller
@@ -339,7 +341,7 @@ pub fn extract_candidates_with_threads(
     threads: usize,
     sink: &mut impl CandidateSink,
 ) -> Result<ExtractMetrics> {
-    let has_mate = matches!(source, ReadSource::Paired(_, _));
+    let has_mate = matches!(source, ReadSource::Paired(_, _) | ReadSource::Interleaved(_));
 
     // Step 2: base hitLenRequired (FastqExtractor.cpp:390-392).
     let mut hit_len_required =
@@ -428,6 +430,23 @@ pub fn extract_candidates_with_threads(
 /// front-end never needs to re-read its input (pipe/stdin-capable).
 type PairHead = std::collections::VecDeque<(FastqRecord, Option<FastqRecord>)>;
 
+/// Aborts if two mates' (suffix-stripped) ids differ -- a robustness check
+/// beyond stock T1K, which trusts input order silently. Names are already
+/// mate-suffix-stripped by [`FastqReader::next_record`], so a genuine pair
+/// has equal ids.
+///
+/// # Errors
+///
+/// Returns an error naming both ids if `id1 != id2`.
+fn check_mate_names(id1: &str, id2: &str) -> Result<()> {
+    ensure!(
+        id1 == id2,
+        "mate reads out of order or unpaired: read-1 id {id1:?} != read-2 id {id2:?}; \
+         re-pair the inputs (e.g. samtools collate / sort -n, or fix the FASTQ order)"
+    );
+    Ok(())
+}
+
 /// Reads one pair/read directly from the live source (no head buffer).
 /// This is the former `read_next_pair`; see its doc for the mate-count
 /// error semantics.
@@ -435,7 +454,8 @@ type PairHead = std::collections::VecDeque<(FastqRecord, Option<FastqRecord>)>;
 /// `Ok(None)` means mate-1 (or the single-end source) is exhausted -- the
 /// caller should stop. An error is returned if mate-2 is exhausted before
 /// mate-1 (matching `FastqExtractor.cpp:451-455`'s "different number of
-/// reads" error).
+/// reads" error), or if mate ids disagree after suffix-stripping (see
+/// [`check_mate_names`]).
 fn read_next_pair_live(
     source: &mut ReadSource,
 ) -> Result<Option<(FastqRecord, Option<FastqRecord>)>> {
@@ -453,6 +473,20 @@ fn read_next_pair_live(
             let Some(rec2_val) = r2.next_record().context("reading mate-2 read")? else {
                 bail!("The two mate-pair read files have different number of reads.");
             };
+            check_mate_names(&rec1.id, &rec2_val.id)?;
+            Ok(Some((rec1, Some(rec2_val))))
+        }
+        ReadSource::Interleaved(r) => {
+            let Some(rec1) = r.next_record().context("reading interleaved mate-1")? else {
+                return Ok(None);
+            };
+            let Some(rec2_val) = r.next_record().context("reading interleaved mate-2")? else {
+                bail!(
+                    "interleaved input has an odd number of reads (dangling mate for {})",
+                    rec1.id
+                );
+            };
+            check_mate_names(&rec1.id, &rec2_val.id)?;
             Ok(Some((rec1, Some(rec2_val))))
         }
     }
@@ -1082,11 +1116,19 @@ mod tests {
     }
 
     #[test]
-    fn both_output_mates_use_read1_id() {
-        // FastqExtractor.cpp:471-473: OutputSeq is called with `reads.id`
-        // for BOTH fp1 AND fp2 -- mate2's own kseq-parsed id is never used
-        // for output, even though it was read from mate2's own file (which
-        // may have a different id string).
+    fn paired_mate_id_mismatch_from_real_files_is_rejected() {
+        // Historically (pre-`check_mate_names`) FastqExtractor.cpp:471-473's
+        // `OutputSeq` is called with `reads.id` for BOTH fp1 AND fp2 --
+        // mate2's own kseq-parsed id was never used for output, even if it
+        // came from mate2's own file with a genuinely different id string --
+        // and stock T1K trusted that silently. This port is deliberately
+        // stricter (module docs / `check_mate_names`): a real `Paired`
+        // source with disagreeing mate ids must now abort loudly rather than
+        // silently mis-pairing reads. (The still-true, narrower claim that a
+        // sink -- not the library -- is what forces r1's id onto both output
+        // records is covered directly by
+        // `in_memory_sink_uses_mate1_id_for_both_reads`, which bypasses this
+        // guard by constructing `ReadRecord`s by hand.)
         let tmp = tempfile::tempdir().unwrap();
         let ref_path = tmp.path().join("ref.fa");
         write_ref_fasta(&ref_path, &[("only", REF_SEQ)]);
@@ -1102,19 +1144,13 @@ mod tests {
         let mut filter = RefKmerFilter::from_reference_fasta(&ref_path, 9).unwrap();
         let mut source = open_source(&r1_path, Some(&r2_path)).unwrap();
         let mut sink = VecSink { pairs: Vec::new() };
-        extract_candidates(&mut source, &mut filter, DEFAULT_REF_SEQ_SIMILARITY, &mut sink)
-            .unwrap();
+        let result =
+            extract_candidates(&mut source, &mut filter, DEFAULT_REF_SEQ_SIMILARITY, &mut sink);
 
-        assert_eq!(sink.pairs.len(), 1);
-        let (r1, r2) = &sink.pairs[0];
-        assert_eq!(r1.id, "mate1_id");
-        // The sink receives the raw records (mate2's own id intact); it is
-        // the CALLER's (CLI's FASTQ-writing sink's) responsibility to use
-        // r1.id for BOTH output files -- verified by the CLI-level
-        // differential test and the CLI sink's own unit test, not here
-        // (this test only proves the library hands both records through
-        // unmodified so the sink can make that choice).
-        assert_eq!(r2.as_ref().unwrap().id, "totally_different_mate2_id");
+        let err = result.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("mate1_id"), "message should name the mates: {msg}");
+        assert!(msg.contains("totally_different_mate2_id"), "message should name the mates: {msg}");
     }
 
     #[test]
@@ -1171,5 +1207,36 @@ mod tests {
         let mut buf = Vec::new();
         output_seq(&mut buf, "r1", b"ACGTACGT", None, 1, 3).unwrap();
         assert_eq!(std::str::from_utf8(&buf).unwrap(), ">r1\nCGT\n");
+    }
+
+    #[test]
+    fn interleaved_source_pairs_adjacent_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let ref_path = dir.path().join("ref.fa");
+        write_ref_fasta(&ref_path, &[("ref1", REF_SEQ)]);
+        let inter = dir.path().join("inter.fq");
+        let good = &REF_SEQ[0..60];
+        let q = "I".repeat(60);
+        // p0 mate1, p0 mate2, p1 mate1, p1 mate2 (mate suffixes stripped on read).
+        write_fastq(
+            &inter,
+            &[("p0/1", good, &q), ("p0/2", good, &q), ("p1/1", good, &q), ("p1/2", good, &q)],
+        );
+        let mut filter = RefKmerFilter::from_reference_fasta(&ref_path, 9).unwrap();
+        let reader = crate::fastq::FastqReader::open(&inter).unwrap();
+        let mut source = ReadSource::Interleaved(reader);
+        let mut sink = VecSink::default();
+        let m = extract_candidates(&mut source, &mut filter, DEFAULT_REF_SEQ_SIMILARITY, &mut sink)
+            .unwrap();
+        assert_eq!(m.total_reads, 2); // two pairs
+        assert_eq!(sink.pairs.len(), 2);
+        assert!(sink.pairs.iter().all(|(_, r2)| r2.is_some()));
+    }
+
+    #[test]
+    fn mate_name_mismatch_is_an_error() {
+        assert!(check_mate_names("readA", "readA").is_ok());
+        let err = check_mate_names("readA", "readB").unwrap_err().to_string();
+        assert!(err.contains("readA"), "message should name the mates: {err}");
     }
 }
