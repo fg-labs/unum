@@ -84,7 +84,10 @@
 //! `candidates` map-insertion order.
 
 use crate::alignments::Alignments;
-use crate::extract::{CandidateSink, HIT_LEN_REQUIRED_PAIRED, HIT_LEN_REQUIRED_SINGLE, ReadRecord};
+use crate::extract::{
+    CandidateSink, HIT_LEN_REQUIRED_PAIRED, HIT_LEN_REQUIRED_SINGLE, HIT_LEN_SAMPLE_SIZE,
+    ReadRecord,
+};
 use crate::ref_kmer_filter::{RefKmerFilter, Scratch, is_low_complexity};
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
@@ -320,9 +323,8 @@ pub fn compute_hit_len_required(frag_stdev: i32, read_len: i32) -> i32 {
 /// BAM. `sampled_count == 0` (an empty/no-read-1 sample) returns the base
 /// value unchanged, guarding the division against a zero divisor.
 ///
-/// Setup-only for now: no `no-alignment` driver wires this in yet (a later
-/// task does), hence `#[allow(dead_code)]`.
-#[allow(dead_code)]
+/// Wired into [`extract_from_bam_no_alignment`], the coordinate no-alignment
+/// 2-pass entry point.
 fn compute_hit_len_required_no_alignment(
     sampled_read1_len_sum: i64,
     sampled_count: usize,
@@ -496,8 +498,131 @@ pub fn extract_from_bam_with_threads(
         });
     }
 
+    let pass2_emitted = run_pass2(
+        alignments,
+        candidates,
+        abnormal_unaligned_flag,
+        mate_id_len,
+        Selection::Alignment,
+        sink,
+    )?;
+
+    Ok(BamExtractMetrics {
+        single_end: false,
+        hit_len_required,
+        kmer_length: filter.kmer_length(),
+        pass1_emitted,
+        candidates_recorded,
+        pass2_emitted,
+    })
+}
+
+/// Runs the coordinate/unsorted `--bam-mode no-alignment` two-pass BAM/CRAM
+/// read-extraction driver: the FASTQ-pinned `hitLenRequired` setup
+/// ([`compute_hit_len_required_no_alignment`], matching
+/// [`crate::extract::extract_candidates_with_threads`]'s own formula so
+/// `no-alignment ≡ FASTQ`), a [`Selection::NoAlignment`] pass 1 (every
+/// PRIMARY read k-mer-tested on its own sequence, position/gene-interval/
+/// `tag` entirely bypassed -- see [`Selection`]'s doc comment), and a
+/// gate-bypassed pass 2 ([`run_pass2`] never applies its
+/// `!is_template_aligned()` gate under [`Selection::NoAlignment`], so every
+/// recorded candidate's mates are fetched regardless of alignment position).
+///
+/// Unlike [`extract_from_bam_with_threads`], no `genes`/coordinate FASTA is
+/// needed here -- selection is purely sequence-driven. `ref_seq_similarity`
+/// (the `-s` CLI flag) is REQUIRED so the filter's similarity matches the
+/// FASTQ path's value: `is_good_candidate_with_scratch` gates on
+/// `filter.ref_seq_similarity`, and the FASTQ path sets it from
+/// `args.similarity` (`extract.rs:373`) -- omitting this call here would
+/// silently break the `no-alignment ≡ FASTQ` equivalence for any non-default
+/// `-s`.
+///
+/// Same seekable-file assumption as [`extract_from_bam_with_threads`]:
+/// `alignments` must be freshly opened when this is called. This function
+/// rewinds `alignments` itself: once after `general_info` (mirroring
+/// `BamExtractor.cpp:573-574`'s `GetGeneralInfo(true); Rewind();` pattern)
+/// and again after [`crate::alignments::Alignments::sample_read1_len_sum`]
+/// (whose doc comment notes it does NOT rewind, and which itself advances
+/// the shared `total_read_cnt` counter via `next()` -- rewinding here keeps
+/// that counter clean for any future caller, rather than leaving it
+/// contaminated by the sample).
+///
+/// Single-end input skips pass 2 entirely (mirroring
+/// [`extract_from_bam_with_threads`]): pass 1's
+/// [`Pass1Site::KmerCandidate`] emits single-end reads directly, so
+/// `candidates` is never populated for single-end input.
+///
+/// # Errors
+///
+/// See [`extract_from_bam_with_threads`].
+pub fn extract_from_bam_no_alignment(
+    alignments: &mut Alignments,
+    filter: &mut RefKmerFilter,
+    ref_seq_similarity: f64,
+    mate_id_len: i32,
+    threads: usize,
+    sink: &mut impl CandidateSink,
+) -> Result<BamExtractMetrics> {
+    // Setup: general_info -> rewind -> sample_read1_len_sum -> rewind, to
+    // keep `total_read_cnt` clean before pass 1 (see doc comment above).
+    let info = alignments.general_info(true).context("computing general_info (no-alignment)")?;
+    alignments.rewind().context("rewinding after general_info (no-alignment)")?;
+
+    let single_end = !info.mate_paired;
+    let has_mate = info.mate_paired;
+
+    let (len_sum, count) = alignments
+        .sample_read1_len_sum(HIT_LEN_SAMPLE_SIZE)
+        .context("sampling read-1 lengths (no-alignment)")?;
+    alignments.rewind().context("rewinding after sampling read-1 lengths (no-alignment)")?;
+
+    // FASTQ-pinned hitLenRequired + similarity (the equivalence
+    // prerequisites), then InferKmerLength / conditional UpdateKmerLength --
+    // mirrors the FASTQ setup (extract.rs ~370-386) exactly.
+    let mut hit_len_required = compute_hit_len_required_no_alignment(len_sum, count, has_mate);
+    filter.set_hit_len_required(hit_len_required);
+    filter.set_ref_seq_similarity(ref_seq_similarity);
+
+    let inferred = filter.infer_kmer_length();
+    if inferred > filter.kmer_length() {
+        filter.update_kmer_length(inferred);
+        if inferred > usize::try_from(hit_len_required).unwrap_or(0) {
+            hit_len_required = i32::try_from(inferred).unwrap_or(i32::MAX);
+            filter.set_hit_len_required(hit_len_required);
+        }
+    }
+
+    let (candidates, pass1_emitted) = run_pass1_with_threads(
+        alignments,
+        filter,
+        &[],
+        single_end,
+        // `abnormal_unaligned_flag` is dead under `Selection::NoAlignment`
+        // (the unaligned-pair path is alignment-only), hence `false`.
+        false,
+        mate_id_len,
+        threads,
+        sink,
+        Selection::NoAlignment,
+    )?;
+
+    let candidates_recorded = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
+    if single_end {
+        // Single-end emits directly in pass 1; skip pass 2 entirely, same as
+        // `extract_from_bam_with_threads`.
+        return Ok(BamExtractMetrics {
+            single_end: true,
+            hit_len_required,
+            kmer_length: filter.kmer_length(),
+            pass1_emitted,
+            candidates_recorded: 0,
+            pass2_emitted: 0,
+        });
+    }
+
+    alignments.rewind().context("rewinding before pass 2 (no-alignment)")?;
     let pass2_emitted =
-        run_pass2(alignments, candidates, abnormal_unaligned_flag, mate_id_len, sink)?;
+        run_pass2(alignments, candidates, false, mate_id_len, Selection::NoAlignment, sink)?;
 
     Ok(BamExtractMetrics {
         single_end: false,
@@ -1305,11 +1430,22 @@ fn run_pass1(
 /// filling in both mates of every `candidates` entry and emitting each pair
 /// the moment BOTH mates have been seen. Returns the number of pairs
 /// emitted.
+///
+/// `selection` gates the alignment-position check below:
+/// [`Selection::Alignment`] applies it unchanged (a template that is not
+/// template-aligned, and `-u` was not given, is skipped -- it can never
+/// complete a `candidates` entry recorded by the alignment-driven pass 1);
+/// [`Selection::NoAlignment`] bypasses it entirely, since every recorded
+/// candidate was selected purely by k-mer match on its own sequence
+/// (pass 1's [`Pass1Site::KmerCandidate`]), independent of alignment
+/// position -- an UNALIGNED mate of such a candidate must still be fetched
+/// here.
 fn run_pass2(
     alignments: &mut Alignments,
     mut candidates: HashMap<String, PendingCandidate>,
     abnormal_unaligned_flag: bool,
     mate_id_len: i32,
+    selection: Selection,
     sink: &mut impl CandidateSink,
 ) -> Result<u64> {
     let candidate_cnt = candidates.len();
@@ -1323,8 +1459,11 @@ fn run_pass2(
         if !alignments.is_primary() {
             continue;
         }
-        if !alignments.is_template_aligned() && !abnormal_unaligned_flag {
-            continue;
+        if selection == Selection::Alignment
+            && !alignments.is_template_aligned()
+            && !abnormal_unaligned_flag
+        {
+            continue; // alignment gate -- bypassed under Selection::NoAlignment
         }
 
         let name = trim_name(&alignments.read_id(), mate_id_len);
@@ -1763,7 +1902,8 @@ mod tests {
                 .unwrap();
         alignments.rewind().unwrap();
         if !single_end {
-            run_pass2(&mut alignments, candidates, false, -1, &mut sink).unwrap();
+            run_pass2(&mut alignments, candidates, false, -1, Selection::Alignment, &mut sink)
+                .unwrap();
         }
         sink
     }
@@ -3017,5 +3157,125 @@ mod tests {
                  chunk boundaries"
             );
         }
+    }
+
+    // -- Pass-2 alignment-gate bypass + `extract_from_bam_no_alignment`
+    // entry point: proves both that `run_pass2`'s gate is only active under
+    // `Selection::Alignment`, and that the coordinate no-alignment 2-pass
+    // wires FASTQ-pinned setup + k-mer pass 1 + gate-bypassed pass 2
+    // end-to-end.
+
+    /// A 1-pair coordinate BAM for the pass-2 alignment-gate-bypass
+    /// regression: mate1 is UNALIGNED (`0x4`, `tid == -1`) but its sequence
+    /// k-mer-matches (the same `ref_bytes[0..70]` substring
+    /// `build_kmer_selection_test_bam`'s `unaligned_kmer` uses, already
+    /// proven to pass the default-similarity k-mer filter); mate2 is
+    /// ALIGNED, off-target (position is irrelevant under no-alignment, which
+    /// never consults gene intervals). Per `Alignments::is_template_aligned`'s
+    /// doc comment, `tid < 0` alone fails template-alignment for mate1, so
+    /// pass 2's `!is_template_aligned()` gate would drop it under
+    /// `Selection::Alignment` -- only `Selection::NoAlignment`'s bypass lets
+    /// both mates be fetched and the pair complete.
+    fn build_no_alignment_gate_bypass_test_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "coordinate");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+        // mate1: UNALIGNED (tid = -1), k-mer-matching SEQ.
+        let seq1 = &ref_bytes[0..70];
+        let mut r1 = bam::Record::new();
+        r1.set(b"gate_pair", None, seq1, &[25u8; 70]);
+        r1.set_tid(-1);
+        r1.set_pos(-1);
+        r1.set_mtid(-1);
+        r1.set_mpos(-1);
+        r1.set_flags(0x1 | 0x4 | 0x40);
+        writer.write(&r1).unwrap();
+
+        // mate2: ALIGNED, off-target, k-mer-matching SEQ.
+        let seq2 = &ref_bytes[100..170];
+        let mut r2 = bam::Record::new();
+        r2.set(b"gate_pair", Some(&CigarString(vec![Cigar::Match(70)])), seq2, &[25u8; 70]);
+        r2.set_tid(0);
+        r2.set_pos(50_000);
+        r2.set_mtid(-1);
+        r2.set_mpos(-1);
+        r2.set_flags(0x1 | 0x8 | 0x80);
+        writer.write(&r2).unwrap();
+
+        drop(writer);
+    }
+
+    #[test]
+    fn no_alignment_pass2_fetches_kmer_passing_unaligned_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("no_alignment_gate_bypass.bam");
+        build_no_alignment_gate_bypass_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        // Full no-alignment pipeline: FASTQ-pinned setup + k-mer pass 1 +
+        // gate-bypassed pass 2.
+        let mut filter =
+            RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
+        let mut alignments = Alignments::open(&bam_path).unwrap();
+        let mut sink = VecSink::default();
+        let metrics =
+            extract_from_bam_no_alignment(&mut alignments, &mut filter, 0.8, -1, 1, &mut sink)
+                .unwrap();
+
+        assert!(!metrics.single_end, "fixture is paired -- must take the pass-2 path");
+        assert_eq!(
+            metrics.pass1_emitted, 0,
+            "no-alignment (paired input) never emits directly in pass 1"
+        );
+        assert_eq!(metrics.candidates_recorded, 1, "the one QNAME must be recorded as a candidate");
+        assert_eq!(
+            metrics.pass2_emitted, 1,
+            "the pair must be completed in pass 2 despite mate1 being UNALIGNED -- proves the \
+             alignment gate was bypassed"
+        );
+
+        assert_eq!(sink.pairs.len(), 1);
+        let (r1, r2) = &sink.pairs[0];
+        assert_eq!(r1.id, "gate_pair");
+        let r2 = r2.as_ref().expect("mate2 (the ALIGNED, off-target mate) must be present");
+        assert_eq!(r2.id, "gate_pair");
+
+        // Differential: replaying the SAME candidate through `run_pass2`
+        // under `Selection::Alignment` must NOT complete the pair -- mate1's
+        // `!is_template_aligned()` (tid < 0) trips the (still-active)
+        // alignment gate, so `entry.mate1` never fills and the candidate is
+        // left incomplete. This is the concrete "the alignment gate would
+        // drop it" check: without the `selection`-guarded bypass, this exact
+        // fixture would silently lose mate1 forever.
+        let mut alignment_candidates = HashMap::new();
+        alignment_candidates.insert("gate_pair".to_string(), PendingCandidate::default());
+        let mut reopened = Alignments::open(&bam_path).unwrap();
+        let mut alignment_sink = VecSink::default();
+        let alignment_emitted = run_pass2(
+            &mut reopened,
+            alignment_candidates,
+            false,
+            -1,
+            Selection::Alignment,
+            &mut alignment_sink,
+        )
+        .unwrap();
+        assert_eq!(
+            alignment_emitted, 0,
+            "under Selection::Alignment the gate must drop the UNALIGNED mate1, leaving the \
+             candidate incomplete"
+        );
+        assert!(alignment_sink.pairs.is_empty());
     }
 }
