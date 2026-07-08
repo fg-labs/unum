@@ -483,6 +483,13 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
         });
     write_aligned_fastas(&args.prefix, has_mate, &fragment_assigned, &reads1, &reads2)?;
 
+    // Purely additive opt-in QC + discriminative-quality panel (issues #19/#30).
+    // Reads only already-computed genotyper state + `allele_refs` coverage;
+    // never touches the byte-frozen `_genotype.tsv`/`_allele.tsv` above.
+    if args.emit_metrics {
+        write_metrics_tsv(&genotyper, &allele_refs, &loaded.names, &args.prefix)?;
+    }
+
     eprintln!(
         "genotyped {read_cnt} read fragments across {allele_cnt} alleles / {} genes (average {:.2} \
          alleles/read)",
@@ -537,6 +544,139 @@ fn write_genotype_tsv(genotyper: &Genotyper, prefix: &str) -> Result<()> {
             genotyper.gene_idx_to_name[i]
         )
         .with_context(|| format!("writing {path}"))?;
+    }
+    Ok(())
+}
+
+/// Writes the opt-in `{prefix}_metrics.tsv` per-call QC + discriminative-quality
+/// panel (issues #19/#30 -- a unum extension, NOT part of T1K). One header
+/// line plus one row per CALLED allele: the representative allele of rank 0 and
+/// (for a heterozygous call) rank 1 of each called gene, matching the
+/// representative-per-rank selection [`Genotyper::output_representative_alleles`]
+/// uses for `_allele.tsv` (highest `ec_abundance` member of the rank, ties
+/// broken by the LOWER allele index). A homozygous, rank-0-only call emits a
+/// single row. Columns (tab-separated, in order):
+///
+/// `gene`, `allele_rank`, `allele`, `abundance`, `balance_ratio`, `cov_min`,
+/// `cov_p10`, `cov_median`, `frac_bases_covered`, `missing_cov`, `gt_quality`,
+/// `runnerup_abundance`, `q_gap`, `q_min`, `locus_gq_min`.
+///
+/// Every value is read from ALREADY-COMPUTED genotyper state or derived from
+/// `allele_refs`' retained per-base coverage ([`genotyper::allele_coverage_stats`]);
+/// nothing here is recomputed and nothing touches the byte-frozen
+/// `_genotype.tsv`/`_allele.tsv`. `balance_ratio`, `runnerup_abundance`, and
+/// `locus_gq_min` are per-GENE and repeated on each of the gene's rows.
+/// `balance_ratio`/`runnerup_abundance` use the per-rank SUMMED abundances (the
+/// same rank grouping as `select_alleles_for_genes_quality_scores`); the
+/// `abundance` column is the representative allele's own abundance, formatted
+/// with the same `%.6` precision as [`Genotyper::get_allele_description`].
+fn write_metrics_tsv(
+    genotyper: &Genotyper,
+    allele_refs: &[AlleleRef],
+    names: &[String],
+    prefix: &str,
+) -> Result<()> {
+    let path = format!("{prefix}_metrics.tsv");
+    let mut out = std::fs::File::create(&path).with_context(|| format!("creating {path}"))?;
+    writeln!(
+        out,
+        "gene\tallele_rank\tallele\tabundance\tbalance_ratio\tcov_min\tcov_p10\tcov_median\t\
+         frac_bases_covered\tmissing_cov\tgt_quality\trunnerup_abundance\tq_gap\tq_min\t\
+         locus_gq_min"
+    )
+    .with_context(|| format!("writing {path}"))?;
+
+    let gene_cnt = usize::try_from(genotyper.gene_cnt).unwrap_or(0);
+    for gene_idx in 0..gene_cnt {
+        let selected = &genotyper.selected_alleles[gene_idx];
+
+        // Per-gene aggregates over the selected alleles (same rank grouping as
+        // `select_alleles_for_genes_quality_scores`'s `allele_rank_abund`):
+        // rank-0/1 summed abundances (allele balance), rank-2 summed abundance
+        // (the `a_second` runner-up used by `q_gap`). Also pick each rank's
+        // REPRESENTATIVE allele (highest `ec_abundance`, ties -> lower allele
+        // index), mirroring `output_representative_alleles`.
+        let mut abund_r0 = 0.0f64;
+        let mut abund_r1 = 0.0f64;
+        let mut abund_r2 = 0.0f64;
+        let mut has_r1 = false;
+        let mut reps: [Option<i32>; 2] = [None, None];
+        for &(allele_idx, rank) in selected {
+            let info = &genotyper.allele_info[usize::try_from(allele_idx).unwrap()];
+            match rank {
+                0 => abund_r0 += info.abundance,
+                1 => {
+                    abund_r1 += info.abundance;
+                    has_r1 = true;
+                }
+                2 => abund_r2 += info.abundance,
+                _ => {}
+            }
+            if rank == 0 || rank == 1 {
+                let slot = usize::try_from(rank).unwrap();
+                // Exact `==` on `ec_abundance` mirrors `output_representative_alleles`'s
+                // own exact tie-break (same representative-per-rank selection), not a
+                // fuzzy float comparison.
+                #[allow(clippy::float_cmp)]
+                let better = match reps[slot] {
+                    None => true,
+                    Some(cur) => {
+                        let cur_ec =
+                            genotyper.allele_info[usize::try_from(cur).unwrap()].ec_abundance;
+                        info.ec_abundance > cur_ec
+                            || (info.ec_abundance == cur_ec && allele_idx < cur)
+                    }
+                };
+                if better {
+                    reps[slot] = Some(allele_idx);
+                }
+            }
+        }
+
+        // Het balance = min/max of the two rank abundances, in (0,1];
+        // homozygous / single-rank call = 1.0.
+        let balance_ratio = if has_r1 {
+            let (lo, hi) =
+                if abund_r0 <= abund_r1 { (abund_r0, abund_r1) } else { (abund_r1, abund_r0) };
+            if hi > 0.0 { lo / hi } else { 1.0 }
+        } else {
+            1.0
+        };
+        let runnerup_abundance = abund_r2;
+
+        // Per-locus minimum null-model quality across the present rank reps.
+        let locus_gq = [reps[0], reps[1]]
+            .into_iter()
+            .flatten()
+            .map(|idx| genotyper.allele_info[usize::try_from(idx).unwrap()].genotype_quality)
+            .min()
+            .unwrap_or(-1);
+
+        for (rank, rep) in reps.iter().enumerate() {
+            let Some(allele_idx) = *rep else { continue };
+            let idx = usize::try_from(allele_idx).unwrap();
+            let info = &genotyper.allele_info[idx];
+            let stats = genotyper::allele_coverage_stats(&allele_refs[idx]);
+            let q_gap = info.discriminative_quality;
+            let q_min = info.genotype_quality.min(q_gap);
+            writeln!(
+                out,
+                "{gene}\t{rank}\t{allele}\t{abundance:.6}\t{balance_ratio:.6}\t{cov_min}\t\
+                 {cov_p10}\t{cov_median}\t{frac:.6}\t{missing}\t{gt}\t{runnerup:.6}\t{q_gap}\t\
+                 {q_min}\t{locus_gq}",
+                gene = genotyper.gene_idx_to_name[gene_idx],
+                allele = names[idx],
+                abundance = info.abundance,
+                cov_min = stats.cov_min,
+                cov_p10 = stats.cov_p10,
+                cov_median = stats.cov_median,
+                frac = stats.frac_covered,
+                missing = info.missing_coverage,
+                gt = info.genotype_quality,
+                runnerup = runnerup_abundance,
+            )
+            .with_context(|| format!("writing {path}"))?;
+        }
     }
     Ok(())
 }
