@@ -106,8 +106,10 @@ pub struct BuildArgs {
 /// candidate-extraction path (the default, when `-b` is absent), OR `bam-extractor`'s flag names
 /// (`BamExtractor.cpp:16-26`'s `usage[]`) for the BAM/CRAM-plus-coord-FASTA path (when `-b` is
 /// given -- see `crate::stages::extract`'s module docs for how the two modes are dispatched).
-/// Barcode/single-cell (`--barcode*`/`--UMI`) and interleaved (`-i`) input are deliberately not
-/// exposed here in either mode -- see that module's docs.
+/// Barcode/single-cell (`--barcode*`/`--UMI`) input is deliberately not exposed here in either
+/// mode -- see that module's docs. `-i/--input` (unified single/interleaved/paired FASTQ input,
+/// with content-based format detection and `-` for stdin) is mutually exclusive with
+/// `-1`/`-2`/`-u`/`-b`.
 #[derive(Args, Debug)]
 pub struct ExtractArgs {
     /// Path to the reference sequence FASTA file (FASTQ mode) or the `_coord.fa` gene-coordinate
@@ -126,6 +128,13 @@ pub struct ExtractArgs {
     /// Path to a single-end read file (FASTQ mode; mutually exclusive with `-1`/`-2` and `-b`).
     #[arg(short = 'u', value_name = "STRING")]
     pub single: Option<String>,
+
+    /// Unified input: 1 or 2 paths (`-` = stdin). Two paths = paired FASTQ;
+    /// one path = single-end or interleaved FASTQ (auto-detected by content).
+    /// Format is detected from content, not the file extension. Mutually
+    /// exclusive with -1/-2/-u/-b.
+    #[arg(short = 'i', long = "input", value_name = "PATH", num_args = 1..=2)]
+    pub input: Vec<String>,
 
     /// Path to a BAM/CRAM file (switches to BAM mode; mutually exclusive with `-1`/`-2`/`-u`).
     #[arg(short = 'b', value_name = "STRING")]

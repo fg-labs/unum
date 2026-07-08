@@ -4,11 +4,14 @@
 //! `BamExtractor.cpp`). All extraction logic (data-dependent
 //! setup, per-pair/per-pass filtering, `OutputSeq` formatting) lives in
 //! `unum-core`; this module only:
-//! 1. Dispatches on `-b`: BAM mode ([`run_bam`]) if given, else FASTQ mode
-//!    ([`run_fastq`]).
+//! 1. Dispatches on `-i`: unified-input FASTQ mode ([`run_fastq_from_input`])
+//!    if given, else on `-b`: BAM mode ([`run_bam`]) if given, else legacy
+//!    FASTQ mode ([`run_fastq`]). `-i` is mutually exclusive with
+//!    `-1`/`-2`/`-u`/`-b`.
 //! 2. FASTQ mode: constructs the initial `k=9`
 //!    [`unum_core::ref_kmer_filter::RefKmerFilter`] from `-f`, the
-//!    paired/single-end read source from `-1`/`-2` or `-u`, and calls
+//!    paired/single-end/interleaved read source from `-1`/`-2`/`-u` (legacy)
+//!    or `-i` (unified, via [`resolve_fastq_input`]), and calls
 //!    [`unum_core::extract::extract_candidates_with_threads`] with `-t`.
 //! 3. BAM mode: parses `-f` as a `_coord.fa` (via
 //!    [`unum_core::bam_extract::parse_coord_fa`]), builds the
@@ -32,7 +35,9 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use unum_core::alignments::Alignments;
 use unum_core::bam_extract;
-use unum_core::extract::{self, CandidateSink, ReadRecord};
+use unum_core::extract::{self, CandidateSink, ReadRecord, ReadSource, classify_single_input};
+use unum_core::fastq::FastqReader;
+use unum_core::read_input::{InputSpec, open_fastq_reader};
 use unum_core::ref_kmer_filter::RefKmerFilter;
 
 /// `FastqExtractor.cpp:272` / `BamExtractor.cpp:480`: the literal initial
@@ -51,13 +56,26 @@ fn resolve_threads(threads: u32) -> usize {
     usize::try_from(threads).unwrap_or(usize::MAX).max(1)
 }
 
-/// Runs the `extract` subcommand for `args`: dispatches to [`run_bam`] if
-/// `-b` was given, else [`run_fastq`].
+/// Runs the `extract` subcommand for `args`: dispatches to
+/// [`run_fastq_from_input`] if `-i` was given, else [`run_bam`] if `-b` was
+/// given, else [`run_fastq`] (the legacy `-1`/`-2`/`-u` path).
 ///
 /// # Errors
 ///
-/// See [`run_bam`]/[`run_fastq`].
+/// Returns an error if `-i` is combined with any of `-1`/`-2`/`-u`/`-b` (they
+/// are mutually exclusive). See [`run_fastq_from_input`]/[`run_bam`]/
+/// [`run_fastq`] for their own error conditions.
 pub fn run(args: &ExtractArgs) -> Result<()> {
+    if !args.input.is_empty() {
+        ensure!(
+            args.mate1.is_none()
+                && args.mate2.is_none()
+                && args.single.is_none()
+                && args.bam.is_none(),
+            "-i/--input is mutually exclusive with -1/-2/-u/-b"
+        );
+        return run_fastq_from_input(args);
+    }
     if let Some(bam_path) = args.bam.as_deref() {
         ensure!(
             args.mate1.is_none() && args.mate2.is_none() && args.single.is_none(),
@@ -124,6 +142,95 @@ fn run_fastq(args: &ExtractArgs) -> Result<()> {
         metrics.candidates_emitted,
         metrics.total_reads,
         if mate2_path.is_some() { "pairs" } else { "reads" },
+        metrics.kmer_length,
+        metrics.hit_len_required,
+    );
+
+    sink.flush()?;
+    Ok(())
+}
+
+/// Resolves 1-2 `-i` inputs into a [`ReadSource`]. `-` selects stdin. Two
+/// inputs = paired; one input = single-end or interleaved (auto-detected via
+/// [`classify_single_input`]).
+///
+/// # Errors
+///
+/// Returns an error if: `inputs` has zero or more than two entries; both
+/// paired inputs are `-` (stdin can't be split into two streams); any input
+/// cannot be opened; or the detected format is BAM/CRAM (that needs
+/// `--bam-mode`, a later stage -- see [`open_fastq_reader`]).
+fn resolve_fastq_input(inputs: &[String]) -> Result<ReadSource> {
+    match inputs {
+        [a, b] => {
+            // Two inputs: paired. stdin allowed for at most one; both-stdin is
+            // impossible to split, so reject it.
+            ensure!(
+                !(a == "-" && b == "-"),
+                "both paired inputs are stdin ('-'); use a single interleaved '-i -' instead"
+            );
+            let r1 = open_one_fastq(a)?;
+            let r2 = open_one_fastq(b)?;
+            Ok(ReadSource::Paired(r1, r2))
+        }
+        [a] => {
+            let reader = open_one_fastq(a)?;
+            classify_single_input(reader)
+        }
+        _ => bail!("-i/--input takes 1 or 2 paths, got {}", inputs.len()),
+    }
+}
+
+/// Opens one FASTQ/FASTA input (path or `-` for stdin) with content-based
+/// format detection and niffler decompression, erroring on BAM/CRAM.
+fn open_one_fastq(spec: &str) -> Result<FastqReader> {
+    let input = if spec == "-" {
+        InputSpec::Stdin
+    } else {
+        InputSpec::Path(std::path::PathBuf::from(spec))
+    };
+    let (reader, _fmt) =
+        open_fastq_reader(&input).with_context(|| format!("opening input {spec}"))?;
+    Ok(reader)
+}
+
+/// Runs FASTQ-mode extraction driven by `-i/--input` (single/interleaved/
+/// paired, auto-detected by [`resolve_fastq_input`]). Mirrors [`run_fastq`]'s
+/// body (reference-filter load, sink creation, extraction call, logging,
+/// flush) but builds its [`ReadSource`] from `-i` instead of `-1`/`-2`/`-u`.
+///
+/// # Errors
+///
+/// Returns an error if [`resolve_fastq_input`] fails, the reference FASTA
+/// cannot be opened/parsed, or [`unum_core::extract::extract_candidates`]
+/// itself fails (e.g. an empty read-1 file or mismatched mate-pair counts --
+/// see that function's doc comment).
+fn run_fastq_from_input(args: &ExtractArgs) -> Result<()> {
+    let mut filter =
+        RefKmerFilter::from_reference_fasta(Path::new(&args.ref_seq_fasta), INITIAL_KMER_LENGTH)
+            .with_context(|| format!("loading reference FASTA {}", args.ref_seq_fasta))?;
+
+    let mut source = resolve_fastq_input(&args.input).context("resolving -i/--input")?;
+    let paired = matches!(source, ReadSource::Paired(_, _) | ReadSource::Interleaved(_));
+
+    let mut sink =
+        FastqFileSink::create(&args.prefix, paired).context("creating output FASTQ file(s)")?;
+
+    let threads = resolve_threads(args.threads);
+    let metrics = extract::extract_candidates_with_threads(
+        &mut source,
+        &mut filter,
+        args.similarity,
+        threads,
+        &mut sink,
+    )
+    .context("extracting candidate reads")?;
+
+    eprintln!(
+        "extracted {} / {} candidate {} (kmer_length={}, hit_len_required={})",
+        metrics.candidates_emitted,
+        metrics.total_reads,
+        if paired { "pairs" } else { "reads" },
         metrics.kmer_length,
         metrics.hit_len_required,
     );
