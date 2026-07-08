@@ -12,6 +12,7 @@ pub mod kmer;
 pub mod kmer_count;
 pub mod kmer_index;
 pub mod overlap;
+pub mod read_input;
 pub mod ref_kmer_filter;
 pub mod refbuild;
 pub mod variant_caller;
