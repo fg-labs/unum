@@ -345,14 +345,15 @@ pub fn extract_candidates_with_threads(
     let mut hit_len_required =
         if has_mate { HIT_LEN_REQUIRED_PAIRED } else { HIT_LEN_REQUIRED_SINGLE };
 
-    // Step 3: sample the first HIT_LEN_SAMPLE_SIZE read-1 records
-    // (FastqExtractor.cpp:394-399) -- READ-1 ONLY, never read-2, even when
-    // paired.
-    let read1 = match source {
-        ReadSource::Single(r) => r,
-        ReadSource::Paired(r1, _) => r1,
-    };
-    let (sampled_count, sampled_len) = sample_hit_len_required_stats(read1)?;
+    // Step 3: sample the first HIT_LEN_SAMPLE_SIZE PAIRS into a bounded
+    // buffer (FastqExtractor.cpp:394-399), summing read-1 lengths only. No
+    // rewind: the buffer is drained before the live source in the main
+    // pass. Note: a mate-count mismatch within the first HIT_LEN_SAMPLE_SIZE
+    // pairs can now surface here (during sampling) rather than mid-main-pass
+    // -- an earlier but equally fatal error, so no successful run's output
+    // changes.
+    let (mut head, sampled_len) = sample_head(source)?;
+    let sampled_count = head.len();
     ensure!(sampled_count > 0, "Read file is empty.");
 
     // Step 4: integer-division bump (FastqExtractor.cpp:405-406).
@@ -364,15 +365,10 @@ pub fn extract_candidates_with_threads(
         hit_len_required = i32::try_from(candidate).unwrap_or(i32::MAX);
     }
 
-    // Step 5: apply to the filter, then rewind read-1
-    // (FastqExtractor.cpp:407-409).
+    // Step 5: apply to the filter. NO rewind (FastqExtractor.cpp:407-409's
+    // rewind is obviated by the buffered head).
     filter.set_hit_len_required(hit_len_required);
     filter.set_ref_seq_similarity(ref_seq_similarity);
-    let read1 = match source {
-        ReadSource::Single(r) => r,
-        ReadSource::Paired(r1, _) => r1,
-    };
-    read1.rewind().context("rewinding read-1 source after hitLenRequired sampling")?;
 
     // Step 6: InferKmerLength / conditional UpdateKmerLength
     // (FastqExtractor.cpp:411-418). Dead branch for every reference this
@@ -395,13 +391,13 @@ pub fn extract_candidates_with_threads(
     // parallelizes only the decision (see `run_batch_parallel`'s doc
     // comment).
     let (total_reads, candidates_emitted) = if threads <= 1 {
-        run_sequential(source, filter, sink)?
+        run_sequential(source, &mut head, filter, sink)?
     } else {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .context("building rayon thread pool for parallel extraction")?;
-        run_batch_parallel(source, filter, &pool, threads, sink)?
+        run_batch_parallel(source, &mut head, filter, &pool, threads, sink)?
     };
 
     // DIVERGENCE from T1K (see docs/DIVERGENCES.md): stock loops on mate-1
@@ -426,11 +422,23 @@ pub fn extract_candidates_with_threads(
     })
 }
 
-/// Reads one pair/read from `source`. `Ok(None)` means mate-1 (or the
-/// single-end source) is exhausted -- the caller should stop. An error is
-/// returned if mate-2 is exhausted before mate-1 (matching
-/// `FastqExtractor.cpp:451-455`'s "different number of reads" error).
-fn read_next_pair(source: &mut ReadSource) -> Result<Option<(FastqRecord, Option<FastqRecord>)>> {
+/// A bounded buffer of already-read pairs (the `hitLenRequired` sampling
+/// head), drained by [`read_next_pair`] before it pulls from the live
+/// source. Replaces the previous sample-then-`rewind()` approach so the
+/// front-end never needs to re-read its input (pipe/stdin-capable).
+type PairHead = std::collections::VecDeque<(FastqRecord, Option<FastqRecord>)>;
+
+/// Reads one pair/read directly from the live source (no head buffer).
+/// This is the former `read_next_pair`; see its doc for the mate-count
+/// error semantics.
+///
+/// `Ok(None)` means mate-1 (or the single-end source) is exhausted -- the
+/// caller should stop. An error is returned if mate-2 is exhausted before
+/// mate-1 (matching `FastqExtractor.cpp:451-455`'s "different number of
+/// reads" error).
+fn read_next_pair_live(
+    source: &mut ReadSource,
+) -> Result<Option<(FastqRecord, Option<FastqRecord>)>> {
     match source {
         ReadSource::Single(r) => {
             let Some(rec1) = r.next_record().context("reading single-end read")? else {
@@ -448,6 +456,40 @@ fn read_next_pair(source: &mut ReadSource) -> Result<Option<(FastqRecord, Option
             Ok(Some((rec1, Some(rec2_val))))
         }
     }
+}
+
+/// Pops a buffered pair from `head` if any remain, otherwise reads the next
+/// pair from the live source. The concatenation `head ++ live` is exactly
+/// the original input order, so draining then streaming is byte-identical
+/// to reading the whole source once.
+fn read_next_pair(
+    source: &mut ReadSource,
+    head: &mut PairHead,
+) -> Result<Option<(FastqRecord, Option<FastqRecord>)>> {
+    if let Some(pair) = head.pop_front() {
+        return Ok(Some(pair));
+    }
+    read_next_pair_live(source)
+}
+
+/// Reads up to [`HIT_LEN_SAMPLE_SIZE`] whole pairs into a buffer, returning
+/// the buffer and the sum of the **read-1** sequence lengths (only read-1
+/// feeds `hitLenRequired`, matching `FastqExtractor.cpp:394-399`). Buffering
+/// whole pairs — rather than read-1 only — keeps the mate streams in
+/// lock-step and lets the main pass replay them without any rewind. Stops
+/// early if the source is exhausted (`read_next_pair_live` returns `None`).
+fn sample_head(source: &mut ReadSource) -> Result<(PairHead, i64)> {
+    let mut head: PairHead = PairHead::with_capacity(HIT_LEN_SAMPLE_SIZE);
+    let mut total_len: i64 = 0;
+    for _ in 0..HIT_LEN_SAMPLE_SIZE {
+        let Some(pair) = read_next_pair_live(source).context("sampling pair for hitLenRequired")?
+        else {
+            break;
+        };
+        total_len += i64::try_from(pair.0.seq.len()).unwrap_or(i64::MAX);
+        head.push_back(pair);
+    }
+    Ok((head, total_len))
 }
 
 /// Evaluates the per-pair candidate decision for a single pair/read,
@@ -470,6 +512,7 @@ fn is_good_pair(
 /// `(total_reads, candidates_emitted)`.
 fn run_sequential(
     source: &mut ReadSource,
+    head: &mut PairHead,
     filter: &RefKmerFilter,
     sink: &mut impl CandidateSink,
 ) -> Result<(u64, u64)> {
@@ -477,7 +520,7 @@ fn run_sequential(
     let mut total_reads: u64 = 0;
     let mut candidates_emitted: u64 = 0;
 
-    while let Some((rec1, rec2)) = read_next_pair(source)? {
+    while let Some((rec1, rec2)) = read_next_pair(source, head)? {
         total_reads += 1;
         if is_good_pair(filter, &rec1, rec2.as_ref(), &mut scratch) {
             sink.emit_pair(&rec1, rec2.as_ref())?;
@@ -500,6 +543,7 @@ fn run_sequential(
 /// `(total_reads, candidates_emitted)`.
 fn run_batch_parallel(
     source: &mut ReadSource,
+    head: &mut PairHead,
     filter: &RefKmerFilter,
     pool: &rayon::ThreadPool,
     threads: usize,
@@ -514,7 +558,7 @@ fn run_batch_parallel(
         // below is parallelized).
         let mut batch: Vec<(FastqRecord, Option<FastqRecord>)> = Vec::with_capacity(batch_capacity);
         while batch.len() < batch_capacity {
-            match read_next_pair(source)? {
+            match read_next_pair(source, head)? {
                 Some(pair) => batch.push(pair),
                 None => break,
             }
@@ -544,24 +588,6 @@ fn run_batch_parallel(
     }
 
     Ok((total_reads, candidates_emitted))
-}
-
-/// Samples up to [`HIT_LEN_SAMPLE_SIZE`] records from `read1`, returning
-/// `(count actually read, sum of sequence lengths)` -- ports
-/// `FastqExtractor.cpp:394-399`'s sampling loop exactly (including stopping
-/// early if the file has fewer than 1000 records, via `reads.Next()`
-/// returning false).
-fn sample_hit_len_required_stats(read1: &mut FastqReader) -> Result<(usize, i64)> {
-    let mut count = 0usize;
-    let mut total_len: i64 = 0;
-    for _ in 0..HIT_LEN_SAMPLE_SIZE {
-        let Some(rec) = read1.next_record().context("sampling read-1 for hitLenRequired")? else {
-            break;
-        };
-        total_len += i64::try_from(rec.seq.len()).unwrap_or(i64::MAX);
-        count += 1;
-    }
-    Ok((count, total_len))
 }
 
 /// Writes a candidate pair/read to a paired or single-end pair of FASTQ
@@ -678,6 +704,7 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct VecSink {
         pairs: Vec<(ReadRecord, Option<ReadRecord>)>,
     }
@@ -770,9 +797,9 @@ mod tests {
 
     #[test]
     fn hit_len_required_sampling_uses_integer_division_and_base_by_pairing() {
-        // Directly exercises sample_hit_len_required_stats plus the
-        // integer-division bump math, without going through a full
-        // extract_candidates run (keeps this test fast and focused).
+        // Directly exercises sample_head plus the integer-division bump
+        // math, without going through a full extract_candidates run (keeps
+        // this test fast and focused).
         let tmp = tempfile::tempdir().unwrap();
         let r1_path = tmp.path().join("r1.fq");
         // 10 reads of length 50 each: len=500, i=10 -> 500/(10*5)=500/50=10.
@@ -783,8 +810,9 @@ mod tests {
             records.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str())).collect();
         write_fastq(&r1_path, &record_refs);
 
-        let mut r1 = FastqReader::open(&r1_path).unwrap();
-        let (count, len) = sample_hit_len_required_stats(&mut r1).unwrap();
+        let mut source = open_source(&r1_path, None).unwrap();
+        let (head, len) = sample_head(&mut source).unwrap();
+        let count = head.len();
         assert_eq!(count, 10);
         assert_eq!(len, 500);
         let candidate = len / (i64::try_from(count).unwrap() * 5);
@@ -804,8 +832,9 @@ mod tests {
             records.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str())).collect();
         write_fastq(&r1_path, &record_refs);
 
-        let mut r1 = FastqReader::open(&r1_path).unwrap();
-        let (count, len) = sample_hit_len_required_stats(&mut r1).unwrap();
+        let mut source = open_source(&r1_path, None).unwrap();
+        let (head, len) = sample_head(&mut source).unwrap();
+        let count = head.len();
         let candidate = len / (i64::try_from(count).unwrap() * 5);
         assert_eq!(candidate, 40);
         assert!(candidate > i64::from(HIT_LEN_REQUIRED_PAIRED));
@@ -820,9 +849,9 @@ mod tests {
             [("r0", "ACGT", "IIII"), ("r1", "ACGT", "IIII"), ("r2", "ACGT", "IIII")];
         write_fastq(&r1_path, &records);
 
-        let mut r1 = FastqReader::open(&r1_path).unwrap();
-        let (count, len) = sample_hit_len_required_stats(&mut r1).unwrap();
-        assert_eq!(count, 3, "must stop at actual EOF, not require 1000 reads");
+        let mut source = open_source(&r1_path, None).unwrap();
+        let (head, len) = sample_head(&mut source).unwrap();
+        assert_eq!(head.len(), 3, "must stop at actual EOF, not require 1000 reads");
         assert_eq!(len, 12);
     }
 
@@ -841,6 +870,76 @@ mod tests {
             extract_candidates(&mut source, &mut filter, DEFAULT_REF_SEQ_SIMILARITY, &mut sink);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Read file is empty."));
+    }
+
+    #[test]
+    fn streaming_sample_drain_preserves_pairs_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let ref_path = dir.path().join("ref.fa");
+        // REF_SEQ (module const) is a known HLA-like reference the other tests use.
+        write_ref_fasta(&ref_path, &[("ref1", REF_SEQ)]);
+
+        let r1 = dir.path().join("r1.fq");
+        let r2 = dir.path().join("r2.fq");
+        // Three pairs: 0 and 2 are on-reference (candidates), 1 is off (noise).
+        let good = &REF_SEQ[0..60];
+        let bad = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let q = "I".repeat(60);
+        write_fastq(&r1, &[("p0", good, &q), ("p1", bad, &q), ("p2", good, &q)]);
+        write_fastq(&r2, &[("p0", good, &q), ("p1", bad, &q), ("p2", good, &q)]);
+
+        let mut filter = RefKmerFilter::from_reference_fasta(&ref_path, 9).unwrap();
+        let mut source = open_source(&r1, Some(&r2)).unwrap();
+        let mut sink = VecSink::default();
+        let m = extract_candidates(&mut source, &mut filter, DEFAULT_REF_SEQ_SIMILARITY, &mut sink)
+            .unwrap();
+
+        assert_eq!(m.total_reads, 3);
+        // The two on-reference pairs pass, in input order.
+        let ids: Vec<&str> = sink.pairs.iter().map(|(a, _)| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["p0", "p2"]);
+    }
+
+    #[test]
+    fn streaming_drains_head_then_continues_from_live_source_in_order() {
+        // Exercises the head-buffer-exhausted -> live-source-continues
+        // transition: with more than HIT_LEN_SAMPLE_SIZE (1000) pairs,
+        // sample_head buffers the first 1000 and the main pass must drain
+        // that head and THEN keep reading the tail from the live readers,
+        // preserving `head ++ live == original input order` across the
+        // boundary. A <=1000-pair fixture never calls read_next_pair_live
+        // during the main pass, so this is the only coverage of that seam.
+        let dir = tempfile::tempdir().unwrap();
+        let ref_path = dir.path().join("ref.fa");
+        write_ref_fasta(&ref_path, &[("ref1", REF_SEQ)]);
+
+        // 1005 pairs = 1000-pair head + 5 tail pairs from the live source.
+        let n_pairs = HIT_LEN_SAMPLE_SIZE + 5;
+        let good = REF_SEQ[0..60].to_string();
+        let q = "I".repeat(60);
+        // Zero-padded ids (p0001..p1005) so the emitted-vs-input order
+        // assertion is unambiguous. Every read is on-reference, so every
+        // pair is a candidate and the emitted id sequence is dense.
+        let ids: Vec<String> = (1..=n_pairs).map(|i| format!("p{i:04}")).collect();
+        let records: Vec<(&str, &str, &str)> =
+            ids.iter().map(|id| (id.as_str(), good.as_str(), q.as_str())).collect();
+
+        let r1 = dir.path().join("r1.fq");
+        let r2 = dir.path().join("r2.fq");
+        write_fastq(&r1, &records);
+        write_fastq(&r2, &records);
+
+        let mut filter = RefKmerFilter::from_reference_fasta(&ref_path, 9).unwrap();
+        let mut source = open_source(&r1, Some(&r2)).unwrap();
+        let mut sink = VecSink::default();
+        let m = extract_candidates(&mut source, &mut filter, DEFAULT_REF_SEQ_SIMILARITY, &mut sink)
+            .unwrap();
+
+        assert_eq!(m.total_reads, u64::try_from(n_pairs).unwrap());
+        // Every pair emitted, in exact input order across the head/live seam.
+        let emitted_ids: Vec<&str> = sink.pairs.iter().map(|(a, _)| a.id.as_str()).collect();
+        let expected_ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(emitted_ids, expected_ids);
     }
 
     #[test]
@@ -869,7 +968,12 @@ mod tests {
         let result =
             extract_candidates(&mut source, &mut filter, DEFAULT_REF_SEQ_SIMILARITY, &mut sink);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("different number of reads"));
+        // With only 5/3 records (far fewer than HIT_LEN_SAMPLE_SIZE), the
+        // mismatch now surfaces during sample_head's sampling pass rather
+        // than the main pass, so it's wrapped in an extra `Context` layer --
+        // check the full chain (`{:#}`), not just the top-level message.
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("different number of reads"));
     }
 
     #[test]
