@@ -298,6 +298,36 @@ pub fn parse_allele_name(
     }
 }
 
+/// True iff `name` carries an IMGT expression suffix -- one of `N` (null),
+/// `L` (low surface expression), `S` (secreted/soluble), `C` (cytoplasm only),
+/// `A` (aberrant), `Q` (questionable) -- immediately following a digit at the
+/// end of the FULL allele name (e.g. `A*01:01:01:02N`). A unum extension used
+/// only by the opt-in `--allele-freq-null-penalty` selection penalty.
+///
+/// Two guards keep this from misfiring on names that merely END in one of these
+/// letters:
+/// 1. The suffix must immediately follow a DIGIT (`\d[NLSCAQ]$`). Canonical full
+///    IMGT allele names end in a digit unless they carry an expression suffix.
+/// 2. The name must contain a `*` (a gene/allele separator), i.e. be an actual
+///    allele designation. This excludes bare GENE names whose last character is
+///    a copy/locus letter -- `HLA-A`, `HLA-C`, and crucially `KIR2DL5A`
+///    (`…5A`, a digit-preceded `A` that is a KIR gene-copy designator, not an
+///    expression suffix). Real allele names always carry a `*`; gene names do
+///    not.
+///
+/// A genuine null KIR/HLA allele (e.g. `KIR2DL5A*0010101N`, `A*01:01:01:02N`)
+/// satisfies both guards and is correctly flagged.
+#[must_use]
+pub fn is_null_expression_name(name: &str) -> bool {
+    let trimmed = name.trim_end();
+    let bytes = trimmed.as_bytes();
+    let n = bytes.len();
+    trimmed.contains('*')
+        && n >= 2
+        && matches!(bytes[n - 1], b'N' | b'L' | b'S' | b'C' | b'A' | b'Q')
+        && bytes[n - 2].is_ascii_digit()
+}
+
 /// Ported from `Genotyper::alnorm` (`Genotyper.hpp:252-370`): Algorithm AS66
 /// (Hill 1973), the polynomial approximation to the standard normal
 /// cumulative distribution used by [`Genotyper::select_alleles_for_genes`]'s
@@ -426,6 +456,14 @@ pub struct AlleleInfo {
     /// `alleleInfo[i].whitelist = true` unconditional initialization,
     /// `Genotyper.hpp:593`).
     pub whitelist: bool,
+    /// `true` iff this allele's FULL reference name carries an IMGT expression
+    /// suffix (`N`/`L`/`S`/`C`/`A`/`Q` immediately following a digit) -- a
+    /// null / low / non-surface-expression variant. A unum extension, NOT part
+    /// of T1K's `_alleleInfo`; computed once in [`Genotyper::init_allele_info`]
+    /// from the full `seq_names[i]`, and consumed ONLY by the opt-in
+    /// `--allele-freq-null-penalty` selection penalty (inert when that penalty
+    /// is `0.0`). Defaults to `false`.
+    pub is_null_expression: bool,
 }
 
 impl Default for AlleleInfo {
@@ -441,6 +479,7 @@ impl Default for AlleleInfo {
             ec_abundance: 0.0,
             missing_coverage: 0,
             whitelist: true,
+            is_null_expression: false,
         }
     }
 }
@@ -2122,6 +2161,17 @@ pub struct Genotyper {
     /// (`--allele-freq-weight`). At `w = 0` the prior span is 0 and the prior
     /// is inactive everywhere. Set via [`Genotyper::set_allele_freq_weight`].
     pub allele_freq_weight: f64,
+    /// A fixed, coverage-independent log-penalty subtracted from the selection
+    /// objective for each haplotype that would call a null/low-expression
+    /// allele (IMGT `N`/`L`/`S`/`C`/`A`/`Q` suffix, see
+    /// [`AlleleInfo::is_null_expression`]). Default `0.0` (inert, byte-identical
+    /// to the oracle). Biases the caller away from asserting a non-expressed
+    /// allele on marginal evidence; bounded by [`Genotyper::NULL_PENALTY_MAX`]
+    /// so it can never override a coverage margin beyond the prior's
+    /// no-override span. Set via [`Genotyper::set_allele_freq_null_penalty`].
+    /// Unlike the HWE term, this penalty is name-driven and does NOT require the
+    /// frequency table to be present or the gene's prior to be "active".
+    pub allele_freq_null_penalty: f64,
 
     /// Debug-only counter of the number of `(j, k)` candidate genotype pairs
     /// enumerated by the most recent
@@ -2187,6 +2237,7 @@ impl Genotyper {
             selected_alleles: Vec::new(),
             allele_freq: None,
             allele_freq_weight: 2.0,
+            allele_freq_null_penalty: 0.0,
             #[cfg(any(test, debug_assertions))]
             haplotype_pair_enumeration_count: 0,
         }
@@ -2234,6 +2285,50 @@ impl Genotyper {
     /// At `w = 0` the prior span is 0 and the prior is inactive everywhere.
     pub fn set_allele_freq_weight(&mut self, w: f64) {
         self.allele_freq_weight = w;
+    }
+
+    /// The maximum accepted `--allele-freq-null-penalty`, in the same
+    /// weighted-read units as the coverage objective. A candidate genotype
+    /// involves two haplotypes, so the largest per-candidate null penalty is
+    /// `2 * p` (a homozygous-null call, or a two-null heterozygote). Bounding
+    /// `2 * p` by the prior's no-override span (~32 weighted reads at `w = 2`,
+    /// the largest plausible HWE span) preserves the guarantee that a coverage
+    /// margin beyond that span can never be flipped by the null penalty alone --
+    /// hence `p <= 32 / 2 = 16`.
+    pub const NULL_PENALTY_MAX: f64 = 16.0;
+
+    /// Sets the fixed null/expression-variant selection penalty
+    /// (`--allele-freq-null-penalty`, default `0.0` = inert). Defensively
+    /// clamped to `[0, NULL_PENALTY_MAX]`; the CLI validates the same range up
+    /// front, so a caller normally never trips the clamp.
+    pub fn set_allele_freq_null_penalty(&mut self, p: f64) {
+        // `f64::clamp` passes NaN through, so guard it explicitly (a NaN penalty
+        // would poison every objective it touches). The CLI already rejects
+        // non-finite values; this only hardens direct programmatic callers.
+        self.allele_freq_null_penalty =
+            if p.is_nan() { 0.0 } else { p.clamp(0.0, Self::NULL_PENALTY_MAX) };
+    }
+
+    /// The fixed null/expression penalty subtracted from a candidate genotype's
+    /// selection objective: `p` for each of the candidate's two haplotypes that
+    /// would call a null/expression allele. A homozygous candidate `(A, A)`
+    /// counts allele `A` twice (both haplotypes are that allele), mirroring the
+    /// HWE hom term's `2 ln f_A`; a heterozygote counts each null rank once.
+    /// Returns the literal `0.0` when the penalty is `0.0`, so `objective - 0.0`
+    /// is bit-identical to the un-penalized objective (and preserves signed
+    /// zero) -- what keeps the default path byte-identical to the oracle.
+    #[must_use]
+    #[allow(clippy::float_cmp)]
+    fn null_penalty_term(&self, null_j: bool, null_k: bool, homozygous: bool) -> f64 {
+        if self.allele_freq_null_penalty == 0.0 {
+            return 0.0;
+        }
+        let count = if homozygous {
+            f64::from(u8::from(null_j)) * 2.0
+        } else {
+            f64::from(u8::from(null_j) + u8::from(null_k))
+        };
+        self.allele_freq_null_penalty * count
     }
 
     /// True iff the #29 population-frequency prior can act on a gene whose
@@ -2400,8 +2495,15 @@ impl Genotyper {
                     idx
                 });
 
-            self.allele_info[i] =
-                AlleleInfo { major_allele_idx, gene_idx, ..AlleleInfo::default() };
+            self.allele_info[i] = AlleleInfo {
+                major_allele_idx,
+                gene_idx,
+                // #null-penalty: detect the IMGT expression suffix on the FULL
+                // allele name (the series `major_allele` above has it truncated
+                // away). Inert unless `--allele-freq-null-penalty > 0`.
+                is_null_expression: is_null_expression_name(name),
+                ..AlleleInfo::default()
+            };
             let major_allele_idx_usize =
                 usize::try_from(major_allele_idx).expect("major_allele_idx is non-negative");
             self.major_allele_size[major_allele_idx_usize] += seq_weight[i];
@@ -4071,9 +4173,14 @@ impl Genotyper {
     /// greedy result is never mutated.
     #[allow(clippy::needless_range_loop, clippy::too_many_lines)]
     fn reconcile_zygosity_with_prior(&mut self, seq_weight_of: &impl Fn(usize) -> i32) {
-        // Fast, allocation-free NO-OP when the flag is off: no table => the prior
-        // can never be active for any gene, so skip the whole pass.
-        if self.allele_freq.is_none() || self.allele_freq_weight == 0.0 {
+        // Fast, allocation-free NO-OP when BOTH knobs are off: no usable HWE
+        // prior (no table, or `w == 0`) AND no null penalty => nothing here can
+        // ever fire, so skip the whole pass. (#null-penalty scope-full: a
+        // non-zero penalty runs Path B even with no frequency table, driving a
+        // null-het -> hom flip on name evidence alone.)
+        if (self.allele_freq.is_none() || self.allele_freq_weight == 0.0)
+            && self.allele_freq_null_penalty == 0.0
+        {
             return;
         }
         let gene_cnt_usize = usize::try_from(self.gene_cnt).expect("gene_cnt is non-negative");
@@ -4091,28 +4198,43 @@ impl Genotyper {
             // frequency key), the same way Path A does.
             let mut series0: Option<String> = None;
             let mut series1: Option<String> = None;
+            // #null-penalty: null/expression flag of the first-seen
+            // representative at ranks 0 and 1 (the same reps `series0`/`series1`
+            // resolve).
+            let mut is_null_0 = false;
+            let mut is_null_1 = false;
             for &(allele_idx, rank) in &self.selected_alleles[i] {
-                let target = match rank {
-                    0 => &mut series0,
-                    1 => &mut series1,
-                    _ => continue,
-                };
-                if target.is_some() {
-                    continue;
+                let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                let major_idx =
+                    usize::try_from(self.allele_info[allele_idx_usize].major_allele_idx).unwrap();
+                let is_null = self.allele_info[allele_idx_usize].is_null_expression;
+                match rank {
+                    0 if series0.is_none() => {
+                        series0 = Some(self.major_allele_idx_to_name[major_idx].clone());
+                        is_null_0 = is_null;
+                    }
+                    1 if series1.is_none() => {
+                        series1 = Some(self.major_allele_idx_to_name[major_idx].clone());
+                        is_null_1 = is_null;
+                    }
+                    _ => {}
                 }
-                let major_idx = usize::try_from(
-                    self.allele_info[usize::try_from(allele_idx).unwrap()].major_allele_idx,
-                )
-                .unwrap();
-                *target = Some(self.major_allele_idx_to_name[major_idx].clone());
             }
             let (Some(series0), Some(series1)) = (series0, series1) else {
                 continue;
             };
 
-            // Gate: the prior must be active for this gene. When inactive this is
-            // a NO-OP -- the greedy call stands byte-identically.
-            if !self.prior_active_for_gene(&[series0.as_str(), series1.as_str()]) {
+            // Gate: run only when the HWE prior is active for this gene OR
+            // (#null-penalty scope-full) a null penalty applies to it (a null
+            // rank-0/1 with `penalty > 0`). When neither holds this is a NO-OP
+            // and the greedy call stands byte-identically (at `penalty == 0` the
+            // gate reduces to the original `prior_active` check). `prior_active`
+            // is computed once here and reused for the `delta_hwe` gate below
+            // (mirrors Path A's single `prior_active` binding).
+            let prior_active = self.prior_active_for_gene(&[series0.as_str(), series1.as_str()]);
+            let null_penalty_active =
+                self.allele_freq_null_penalty > 0.0 && (is_null_0 || is_null_1);
+            if !prior_active && !null_penalty_active {
                 continue;
             }
 
@@ -4195,25 +4317,50 @@ impl Genotyper {
                 seq_weight_of,
             );
 
-            // The HWE margin het - hom (in nats): ln2 + ln f_B - ln f_A. Both
-            // series resolve to Some (the prior-active gate proved the locus is
-            // present); a defensive fallback leaves the greedy call otherwise.
-            let table = self.allele_freq.as_ref().expect("prior active => table present");
-            let (Some(f_a), Some(f_b)) = (table.frequency(&series0), table.frequency(&series1))
-            else {
-                continue;
+            // The HWE margin het - hom (in nats): ln2 + ln f_B - ln f_A. It
+            // contributes ONLY when the frequency prior is active for this gene
+            // (`prior_active_for_gene`: table present, `w > 0`, and the two
+            // series map to DISTINCT frequencies) -- the same inactive/tie test
+            // `covered_prior_bonus` uses, which returns 0.0 for an equal-
+            // frequency het. Suppressing the term here keeps the null penalty as
+            // the only signal in the #null-penalty-only mode: with no table, a
+            // missing locus, or an equal-frequency tie the HWE term is 0 (an
+            // equal-frequency series would otherwise leak an `ln2` het pull). On
+            // the prior-active path the gate is true and both series resolve to
+            // distinct Some values, so this is bit-identical to before.
+            // `> 0 favors het, < 0 favors hom`.
+            let delta_hwe = if prior_active {
+                match self.allele_freq.as_ref() {
+                    Some(table) => match (table.frequency(&series0), table.frequency(&series1)) {
+                        (Some(f_a), Some(f_b)) => {
+                            hwe_log_prior(f_a, f_b, false) - hwe_log_prior(f_a, f_a, true)
+                        }
+                        _ => 0.0,
+                    },
+                    None => 0.0,
+                }
+            } else {
+                0.0
             };
-            let hwe_het = hwe_log_prior(f_a, f_b, false);
-            let hwe_hom = hwe_log_prior(f_a, f_a, true);
-            let delta_hwe = hwe_het - hwe_hom; // > 0 favors het, < 0 favors hom.
 
             // Greedy called het (rank-1 present). Overturn to hom only when the
-            // prior favors the hom AND the het's coverage advantage is within the
-            // prior span. `w = 0` => span 0 => never overrides (byte-identity).
-            let span = self.allele_freq_weight * delta_hwe.abs();
+            // combined prior (HWE + the #null-penalty) favors the hom AND the
+            // het's coverage advantage is within the combined prior margin.
+            //
+            // `prior_hom_minus_het` is how much the prior prefers HOM over HET,
+            // in read-count units: HWE contributes `-w * delta_hwe` (delta_hwe>0
+            // favors het), and the null penalty makes het worse than hom by
+            // `null_het - null_hom` (calling a null allele on the het's rank-1,
+            // or twice for a null hom). When the null penalty is 0 this reduces
+            // to `-w * delta_hwe` and the guard `> 0.0` / `delta_cov <= ...` is
+            // bit-identical to the old `prior_favors_hom && delta_cov <=
+            // w*|delta_hwe|` (Path B only runs when `prior_active`, i.e. w > 0).
+            let p = self.allele_freq_null_penalty;
+            let null_het = p * f64::from(u8::from(is_null_0) + u8::from(is_null_1));
+            let null_hom = p * 2.0 * f64::from(u8::from(is_null_0));
+            let prior_hom_minus_het = -self.allele_freq_weight * delta_hwe + (null_het - null_hom);
             let delta_cov = cov_het - cov_hom; // >= 0: het is a coverage superset.
-            let prior_favors_hom = delta_hwe < 0.0;
-            if prior_favors_hom && delta_cov <= span {
+            if prior_hom_minus_het > 0.0 && delta_cov <= prior_hom_minus_het {
                 // Remove the rank-1 alleles so the gene becomes a genuine 1-type
                 // (homozygous) gene -- identical in shape to a naturally
                 // homozygous gene: `get_gene_allele_types` then returns 1, and
@@ -4339,6 +4486,11 @@ impl Genotyper {
                 // default path.
                 let allele_type_cnt_usize = usize::try_from(allele_type_cnt).unwrap_or(0);
                 let mut rank_series: Vec<Option<String>> = vec![None; allele_type_cnt_usize];
+                // #null-penalty: null/expression flag of each rank's FIRST-SEEN
+                // representative allele -- the SAME representative `rank_series`
+                // resolves, so detection and series resolution stay on one
+                // consistent notion of "the allele at rank r".
+                let mut rank_is_null: Vec<bool> = vec![false; allele_type_cnt_usize];
                 for &(allele_idx, rank) in &selected {
                     let rank_usize = usize::try_from(rank).unwrap_or(usize::MAX);
                     if rank_usize >= rank_series.len() || rank_series[rank_usize].is_some() {
@@ -4350,10 +4502,19 @@ impl Genotyper {
                             .unwrap();
                     rank_series[rank_usize] =
                         Some(self.major_allele_idx_to_name[major_idx].clone());
+                    rank_is_null[rank_usize] =
+                        self.allele_info[allele_idx_usize].is_null_expression;
                 }
                 let candidate_series: Vec<&str> =
                     rank_series.iter().filter_map(|s| s.as_deref()).collect();
                 let prior_active = self.prior_active_for_gene(&candidate_series);
+                // #null-penalty (scope-full): a non-zero penalty on a gene that
+                // has a null/expression rank also enables the hom candidate, so
+                // the penalty can drive an expressed HOM over a null-containing
+                // het even with no frequency table. Gated on `penalty > 0`, so
+                // `penalty == 0` never changes the candidate set (byte-identity).
+                let null_penalty_active = self.allele_freq_null_penalty > 0.0
+                    && rank_is_null.iter().any(|&is_null| is_null);
 
                 // Remove the effects of the current gene.
                 used_ec.clear();
@@ -4406,12 +4567,14 @@ impl Genotyper {
                         allele_j = l;
                     }
 
-                    // #29: when the prior is active for this gene, extend the
-                    // inner loop to include the `k == j` HOMOZYGOUS candidate
-                    // `(A, A)`; when inactive the bound stays `(j + 1)..` so the
+                    // #29: when the prior is active for this gene -- or (#null-
+                    // penalty scope-full) a null penalty applies to it -- extend
+                    // the inner loop to include the `k == j` HOMOZYGOUS candidate
+                    // `(A, A)`; otherwise the bound stays `(j + 1)..` so the
                     // enumerated candidate SET is byte-identical to the default
-                    // path (the candidate-set invariant).
-                    let k_start = if prior_active { j } else { j + 1 };
+                    // path (the candidate-set invariant holds whenever both the
+                    // HWE prior is inactive and the null penalty is 0).
+                    let k_start = if prior_active || null_penalty_active { j } else { j + 1 };
                     for k in k_start..allele_type_cnt {
                         let homozygous = k == j;
                         let mut covered_reads = covered_from_a.clone();
@@ -4564,15 +4727,29 @@ impl Genotyper {
                         // as the strictly-lower-priority tiebreak.
                         let series_j = rank_series[usize::try_from(j).unwrap()].as_deref();
                         let series_k = rank_series[usize::try_from(k).unwrap()].as_deref();
+                        // #null-penalty: subtract the fixed name-driven penalty
+                        // for each null/expression rank the candidate would call.
+                        // Applied to EVERY candidate's objective regardless of
+                        // `prior_active` (null-ness is a property of the allele
+                        // name, not the frequency table) but WITHOUT adding any
+                        // candidate -- the `k == j` hom candidate is still gated
+                        // on `prior_active`, so the candidate SET is unchanged
+                        // and `penalty == 0` stays byte-identical. Literal `0.0`
+                        // when the penalty is off (see `null_penalty_term`).
+                        let null_term = self.null_penalty_term(
+                            rank_is_null[usize::try_from(j).unwrap()],
+                            rank_is_null[usize::try_from(k).unwrap()],
+                            homozygous,
+                        );
                         let objective = match (series_j, series_k) {
                             (Some(sj), Some(sk)) => {
                                 covered_read_cnt + self.covered_prior_bonus(sj, sk, homozygous)
+                                    - null_term
                             }
-                            // A rank with no representative series cannot be
-                            // active (it would have failed `prior_active_for_gene`
-                            // via a `None` frequency); fall back to the literal
-                            // coverage objective (adds nothing).
-                            _ => covered_read_cnt,
+                            // A rank with no representative series carries no HWE
+                            // bonus, but the name-driven null penalty still
+                            // applies (it does not depend on the frequency table).
+                            _ => covered_read_cnt - null_term,
                         };
 
                         // #29 debug candidate-set invariant: count every scored
@@ -4614,8 +4791,10 @@ impl Genotyper {
                     // to `ITER_MAX` and leaving a mis-shaped (still-het) call.
                     // Mirrors Path B's retain-based hom collapse
                     // (`reconcile_zygosity_with_prior`). Reachable only when the
-                    // prior is active (the `k == j` candidate is gated on
-                    // `prior_active`), so the default path is untouched.
+                    // `k == j` candidate is enumerated, i.e. the prior is active
+                    // OR (#null-penalty scope-full) the null penalty applies to
+                    // this gene (`prior_active || null_penalty_active`); both are
+                    // opt-in, so the default path is untouched.
                     let win = best_type.0;
                     updated_gene_cnt += 1;
                     self.selected_alleles[i].retain(|&(_, rank)| rank == win);
@@ -7058,6 +7237,234 @@ mod tests {
         // Sanity: the inactive path enumerates only the het pairs
         // (0,1),(0,2),(1,2) for a 3-type gene -> exactly 3.
         assert_eq!(off_count, 3, "3-type gene should enumerate 3 het pairs on the inactive path");
+    }
+
+    // --- null/expression-variant selection penalty ---
+
+    #[test]
+    fn is_null_expression_name_requires_a_digit_before_the_suffix() {
+        for suffix in ["N", "L", "S", "C", "A", "Q"] {
+            assert!(
+                is_null_expression_name(&format!("A*01:01:01:02{suffix}")),
+                "digit-preceded {suffix} suffix is a null/expression variant"
+            );
+        }
+        // Expressed / plain allele names end in a digit -> not flagged.
+        assert!(!is_null_expression_name("A*01:01:01:01"));
+        assert!(!is_null_expression_name("A*24:02"));
+        assert!(!is_null_expression_name("KIR2DL1*0010101"));
+        // Locus-level / bare-letter names whose last char is a suffix letter but
+        // is NOT digit-preceded must not false-positive (the whole point of the
+        // digit-preceded rule).
+        assert!(!is_null_expression_name("HLA-A"));
+        assert!(!is_null_expression_name("HLA-C"));
+        assert!(!is_null_expression_name("KIR2DL5A"));
+        // Trailing whitespace is tolerated; degenerate inputs are false.
+        assert!(is_null_expression_name("A*01:01N  "));
+        assert!(!is_null_expression_name(""));
+        assert!(!is_null_expression_name("N"));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact integer-multiple values (0/p/2p), not a fuzzy comparison.
+    fn null_penalty_term_counts_per_null_haplotype() {
+        let mut g = Genotyper::new();
+        // Penalty 0 -> literal 0.0 in every configuration.
+        assert_eq!(g.null_penalty_term(true, true, false), 0.0);
+        assert_eq!(g.null_penalty_term(true, false, true), 0.0);
+
+        g.set_allele_freq_null_penalty(3.0);
+        // Het: each null rank counts once.
+        assert_eq!(g.null_penalty_term(false, false, false), 0.0);
+        assert_eq!(g.null_penalty_term(true, false, false), 3.0);
+        assert_eq!(g.null_penalty_term(false, true, false), 3.0);
+        assert_eq!(g.null_penalty_term(true, true, false), 6.0);
+        // Hom: allele j counted twice iff null (null_k is irrelevant, k == j).
+        assert_eq!(g.null_penalty_term(true, false, true), 6.0);
+        assert_eq!(g.null_penalty_term(false, true, true), 0.0);
+
+        // The setter defensively clamps to [0, NULL_PENALTY_MAX].
+        g.set_allele_freq_null_penalty(1000.0);
+        assert_eq!(g.allele_freq_null_penalty, Genotyper::NULL_PENALTY_MAX);
+        g.set_allele_freq_null_penalty(-5.0);
+        assert_eq!(g.allele_freq_null_penalty, 0.0);
+        // NaN is neutralized to 0.0 (f64::clamp would pass it through).
+        g.set_allele_freq_null_penalty(f64::NAN);
+        assert_eq!(g.allele_freq_null_penalty, 0.0);
+    }
+
+    /// Path A, name-driven gate: with NO frequency table (prior inactive, no hom
+    /// candidate), a null rank-0 still gets penalized. rank 0 (null) covers 3
+    /// reads, ranks 1/2 (expressed) 2 each, so coverage prefers a rank-0 pair
+    /// (5 vs 4). A penalty above the 1-read margin demotes the null pair below
+    /// the expressed `(1, 2)` pair.
+    #[test]
+    fn path_a_null_penalty_demotes_null_rank_below_expressed_pair() {
+        let ranks: [(&str, f64, &[i32]); 3] =
+            [("A*01:01", 5.0, &[0, 1, 2]), ("A*02:01", 2.0, &[3, 4]), ("A*03:01", 1.0, &[5, 6])];
+
+        // Penalty 0 (but rank 0 marked null): coverage wins -> the null pair.
+        let mut g_off = build_pair_search_genotyper(&ranks);
+        g_off.allele_info[0].is_null_expression = true;
+        let (o0, o1) = run_pair_search(&mut g_off);
+        assert_eq!(
+            (o0.as_str(), o1.as_str()),
+            ("A*01:01", "A*02:01"),
+            "penalty 0 with a null allele present is byte-identical to no penalty"
+        );
+
+        // Penalty 2 (> the 1-read coverage margin): the expressed (1,2) pair wins.
+        let mut g = build_pair_search_genotyper(&ranks);
+        g.allele_info[0].is_null_expression = true;
+        g.set_allele_freq_null_penalty(2.0);
+        let (r0, r1) = run_pair_search(&mut g);
+        assert_eq!(
+            (r0.as_str(), r1.as_str()),
+            ("A*02:01", "A*03:01"),
+            "the null penalty demotes the null rank-0 below the expressed pair"
+        );
+    }
+
+    /// Path A, bounded: a null allele whose coverage advantage far exceeds the
+    /// penalty bound is NOT demoted (the penalty can only tip within-span calls).
+    #[test]
+    fn path_a_null_penalty_bounded_no_override_of_large_margin() {
+        let r0_reads: Vec<i32> = (0..30).collect(); // null allele, 30 reads
+        let ranks: [(&str, f64, &[i32]); 3] = [
+            ("A*01:01", 5.0, &r0_reads),
+            ("A*02:01", 2.0, &[100, 101]),
+            ("A*03:01", 1.0, &[102, 103]),
+        ];
+        let mut g = build_pair_search_genotyper(&ranks);
+        g.allele_info[0].is_null_expression = true;
+        g.set_allele_freq_null_penalty(Genotyper::NULL_PENALTY_MAX);
+        let (r0, _r1) = run_pair_search(&mut g);
+        assert_eq!(
+            r0.as_str(),
+            "A*01:01",
+            "a null allele with a coverage margin far above the penalty bound is not demoted"
+        );
+    }
+
+    /// Path B: a null rank-1 (a spurious non-expressed second allele) is
+    /// overturned to a homozygous call when the penalty exceeds the (het-favoring)
+    /// HWE pull plus the coverage margin. Without the penalty the het stands.
+    #[test]
+    fn path_b_null_penalty_overturns_null_het_to_hom() {
+        let ranks: [(&str, f64, &[i32]); 2] =
+            [("A*01:01", 5.0, &[0, 1, 2]), ("A*03:01", 1.0, &[10])];
+        // Distinct frequencies (prior active); slightly het-favoring HWE.
+        let table = "A*01:01\t0.5\t500\nA*03:01\t0.45\t450\n";
+
+        // No null penalty: the het call stands.
+        let mut g0 = build_pair_search_genotyper(&ranks);
+        g0.allele_info[1].is_null_expression = true;
+        g0.set_allele_freq(freq_table_from_rows(table));
+        g0.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(is_heterozygous(&g0), "without a null penalty the spurious null-het stands");
+
+        // Null penalty 4 (> ~1.18-nat HWE het pull + 1-read margin): hom wins.
+        let mut g = build_pair_search_genotyper(&ranks);
+        g.allele_info[1].is_null_expression = true;
+        g.set_allele_freq(freq_table_from_rows(table));
+        g.set_allele_freq_null_penalty(4.0);
+        g.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(
+            !is_heterozygous(&g),
+            "the null penalty overturns the spurious null-het to a homozygous call"
+        );
+    }
+
+    /// Scope-full, Path A: with NO frequency table, a null penalty enables the
+    /// hom candidate so an expressed hom can beat null-containing hets. rank 0 is
+    /// expressed (5 reads); ranks 1 and 2 are BOTH null (1 read each), so every
+    /// het that adds coverage eats a penalty. At `p = 2` the expressed hom
+    /// `(0, 0)` (obj 5) beats the best null het (obj `6 - 2 = 4`), and the gene
+    /// collapses to a 1-type homozygous call -- something scope-min could not do
+    /// without a frequency prior.
+    #[test]
+    fn path_a_null_penalty_scope_full_drives_expressed_hom_without_table() {
+        let ranks: [(&str, f64, &[i32]); 3] =
+            [("A*01:01", 5.0, &[0, 1, 2, 3, 4]), ("A*02:01", 1.0, &[5]), ("A*03:01", 1.0, &[6])];
+        let mut g = build_pair_search_genotyper(&ranks);
+        g.allele_info[1].is_null_expression = true;
+        g.allele_info[2].is_null_expression = true;
+        g.set_allele_freq_null_penalty(2.0); // no set_allele_freq -> no table
+        let (r0, r1) = run_pair_search(&mut g);
+        assert_eq!(g.get_gene_allele_types(0), 1, "expressed hom collapses the gene to 1 type");
+        assert_eq!(r0, "A*01:01", "the homozygous call is the expressed rank-0 allele");
+        assert_eq!(r1, "", "no null rank-1 survives");
+    }
+
+    /// Scope-full, Path B: with NO frequency table, a null penalty runs Path B
+    /// and overturns a spurious null-het (rank 1 null) to a hom, driven by the
+    /// penalty alone (`delta_hwe = 0`, `prior_hom_minus_het = p = 2 >= delta_cov
+    /// = 1`). Scope-min would early-return Path B without a table.
+    #[test]
+    fn path_b_null_penalty_scope_full_overturns_null_het_without_table() {
+        let ranks: [(&str, f64, &[i32]); 2] =
+            [("A*01:01", 5.0, &[0, 1, 2]), ("A*02:01", 1.0, &[10])];
+        let mut g = build_pair_search_genotyper(&ranks);
+        g.allele_info[1].is_null_expression = true;
+        g.set_allele_freq_null_penalty(2.0); // no table
+        g.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(
+            !is_heterozygous(&g),
+            "the null penalty overturns the null-het to hom even with no frequency table"
+        );
+
+        // Control: same gene, penalty 0 -> Path B is a no-op (het stands).
+        let mut g0 = build_pair_search_genotyper(&ranks);
+        g0.allele_info[1].is_null_expression = true;
+        g0.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(
+            is_heterozygous(&g0),
+            "penalty 0 with no table leaves the greedy het (byte-identical)"
+        );
+    }
+
+    /// Scope-full, Path B: an EQUAL-frequency table (prior inactive for the
+    /// gene) must contribute no HWE margin, leaving the null penalty as the only
+    /// signal. `prior_active_for_gene` and `covered_prior_bonus` already treat a
+    /// same-frequency series as inactive/tie, so `delta_hwe` must match: when the
+    /// two series map to the identical frequency the HWE term is 0, not the `ln2`
+    /// het pull it would otherwise be. Fixture: rank-1 null, `delta_cov = 1`,
+    /// equal freq 0.5/0.5, `w = 2` (default), penalty `p = 2`. With the HWE term
+    /// correctly suppressed, `prior_hom_minus_het = p = 2 >= delta_cov = 1` and
+    /// the null-het is overturned to hom; the leaked `-w * ln2 = -1.386` margin
+    /// would instead drop it to `0.614 < 1` and spuriously leave the het.
+    #[test]
+    fn path_b_null_penalty_equal_freq_table_suppresses_hwe() {
+        let ranks: [(&str, f64, &[i32]); 2] =
+            [("A*01:01", 5.0, &[0, 1, 2]), ("A*02:01", 1.0, &[10])];
+        // Equal frequencies -> prior inactive for this gene (no HWE signal).
+        let table = "A*01:01\t0.5\t500\nA*02:01\t0.5\t500\n";
+
+        let mut g = build_pair_search_genotyper(&ranks);
+        g.allele_info[1].is_null_expression = true;
+        g.set_allele_freq(freq_table_from_rows(table));
+        g.set_allele_freq_null_penalty(2.0);
+        assert!(
+            !g.prior_active_for_gene(&["A*01:01", "A*02:01"]),
+            "equal-frequency series must leave the prior inactive for the gene",
+        );
+        g.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(
+            !is_heterozygous(&g),
+            "an equal-frequency table contributes no HWE margin, so the null penalty \
+             overturns the null-het to hom",
+        );
+
+        // Control: penalty 0 with an equal-frequency table -> Path B is a no-op
+        // (prior inactive AND no penalty), so the greedy het stands byte-identically.
+        let mut g0 = build_pair_search_genotyper(&ranks);
+        g0.allele_info[1].is_null_expression = true;
+        g0.set_allele_freq(freq_table_from_rows(table));
+        g0.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(
+            is_heterozygous(&g0),
+            "penalty 0 with an inactive prior leaves the greedy het (byte-identical)",
+        );
     }
 
     // --- #29 Path-B span-gated hom-vs-het reconciliation ---

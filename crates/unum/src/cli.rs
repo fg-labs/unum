@@ -202,6 +202,33 @@ pub struct GenotypeArgs {
         value_parser = parse_finite_non_negative_f64
     )]
     pub allele_freq_weight: f64,
+
+    /// Fixed penalty (weighted-read units) biasing the caller away from asserting a
+    /// null/low-expression allele (IMGT `N`/`L`/`S`/`C`/`A`/`Q` suffix) on marginal evidence. Unlike
+    /// the HWE term this penalty is name-driven (it does not need `--allele-freq`) and does not vanish
+    /// with coverage, so it is bounded: accepted range `[0, 16]` (half the ~32-weighted-read
+    /// no-override span, since a homozygous-null call is penalized twice), so the null penalty ALONE
+    /// can never flip a coverage margin beyond that span (the HWE term stacks on top of it). Default
+    /// `0.0` (inert, byte-identical to off).
+    #[arg(
+        long = "allele-freq-null-penalty",
+        default_value_t = 0.0,
+        value_parser = parse_allele_freq_null_penalty
+    )]
+    pub allele_freq_null_penalty: f64,
+}
+
+/// Parses and range-validates `--allele-freq-null-penalty`: a finite value in
+/// `[0, Genotyper::NULL_PENALTY_MAX]`. Rejecting out-of-range values up front
+/// (rather than silently clamping) makes a mis-set penalty a hard, visible error.
+fn parse_allele_freq_null_penalty(s: &str) -> Result<f64, String> {
+    let p: f64 = s.parse().map_err(|_| format!("`{s}` is not a valid number"))?;
+    let max = unum_core::genotyper::Genotyper::NULL_PENALTY_MAX;
+    if p.is_finite() && (0.0..=max).contains(&p) {
+        Ok(p)
+    } else {
+        Err(format!("must be a finite value in [0, {max}] (the prior no-override bound); got {p}"))
+    }
 }
 
 /// Parses a `--allele-freq-weight` value, rejecting negatives and non-finite inputs.
