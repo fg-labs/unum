@@ -107,7 +107,10 @@ enum ResolvedExtractInput {
 /// arms, so a resolved BAM is always a real BAM.
 ///
 /// - `-b <path>` → BAM (requires `--bam-mode`); content-sniffed to reject
-///   CRAM (reserved) and a mistaken FASTQ/FASTA `-b`.
+///   CRAM (reserved) and a mistaken FASTQ/FASTA `-b`. `-b -` (stdin) is
+///   special-cased to `BamInputSpec::Stdin` without sniffing (a pipe can't be
+///   opened as a file), reaching the same curated stdin-reserved error as
+///   `-i - --bam-mode`.
 /// - `-i` with 2 paths → paired FASTQ (rejects `--bam-mode`).
 /// - `-i` with 1 path: `-` (stdin) routes by `--bam-mode` presence
 ///   (present → BAM stdin; absent → FASTQ stdin); a file is content-sniffed
@@ -131,6 +134,15 @@ fn resolve_extract_input(args: &ExtractArgs) -> Result<ResolvedExtractInput> {
             "-b (BAM mode) is mutually exclusive with -i and -1/-2/-u"
         );
         let mode = require_bam_mode(args)?;
+        // `-b -` (BAM via stdin on the legacy flag): route directly to
+        // BamInputSpec::Stdin, same as `-i - --bam-mode`, so it reaches
+        // run_bam_mode's curated stdin-reserved error. A pipe can't be
+        // content-sniffed as a file, so this must happen BEFORE the
+        // open_input sniff below (which does `File::open` and would fail
+        // with a confusing filesystem error for "-").
+        if bam_path == "-" {
+            return Ok(ResolvedExtractInput::Bam { spec: BamInputSpec::Stdin, mode });
+        }
         // Content-sniff (cheap magic-byte peek) to reject CRAM (reserved) and
         // a mistaken FASTQ/FASTA `-b` before `Alignments::open` is reached; a
         // `BamInputSpec::Path` must only ever denote a real BAM.
@@ -596,6 +608,26 @@ mod tests {
         a.bam_mode = Some(BamMode::Alignment);
         let resolved = resolve_extract_input(&a).unwrap();
         assert!(matches!(resolved, ResolvedExtractInput::Bam { mode: BamMode::Alignment, .. }));
+    }
+
+    #[test]
+    fn b_flag_dash_with_alignment_routes_to_bam_stdin() {
+        // `-b -` (BAM via stdin on the legacy flag) must NOT be
+        // content-sniffed as a file path (a pipe can't be `File::open`ed);
+        // it should route directly to BamInputSpec::Stdin, same as
+        // `-i - --bam-mode`, so it reaches run_bam_mode's curated
+        // stdin-reserved error rather than a confusing filesystem open error.
+        let mut a = args();
+        a.bam = Some("-".into());
+        a.bam_mode = Some(BamMode::Alignment);
+        let resolved = resolve_extract_input(&a).unwrap();
+        assert!(
+            matches!(
+                resolved,
+                ResolvedExtractInput::Bam { spec: BamInputSpec::Stdin, mode: BamMode::Alignment }
+            ),
+            "-b - must resolve to BamInputSpec::Stdin"
+        );
     }
 
     #[test]
