@@ -55,6 +55,22 @@ use anyhow::{Context, Result, bail};
 use rust_htslib::bam::{self, Read as _, record::Cigar};
 use std::path::{Path, PathBuf};
 
+/// The `@HD` sort/group order of a BAM/CRAM, as it bears on extraction
+/// strategy: `Coordinate` needs a 2-pass name-map (seekable file);
+/// `QueryName`/`QueryGrouped` keep mates adjacent (1-pass, pipe-able);
+/// `Unsorted` (or a missing `@HD SO`/`GO`) guarantees nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortOrder {
+    /// `@HD SO:coordinate`.
+    Coordinate,
+    /// `@HD SO:queryname` (fully name-sorted).
+    QueryName,
+    /// `@HD GO:query` (grouped by QNAME but not fully sorted).
+    QueryGrouped,
+    /// `SO:unsorted`/`SO:unknown`, or no `@HD`/`SO`/`GO` at all.
+    Unsorted,
+}
+
 /// A single reference-coordinate span of an alignment block, mirroring T1K's
 /// `_pair64` (`defs.h:23-26`, fields `a`/`b`) as used for `Alignments::segments`.
 /// Both bounds are inclusive 0-based reference coordinates (`b == a + len -
@@ -137,6 +153,38 @@ impl Alignments {
             .with_context(|| format!("opening alignment file {}", path.display()))?;
         let header = bam::HeaderView::from_header(&bam::Header::from_template(reader.header()));
         Ok(Self { path, reader, header, current: None, total_read_cnt: 0 })
+    }
+
+    /// Returns the BAM/CRAM's declared sort/group order from its `@HD` line.
+    /// `SO:coordinate`/`SO:queryname` take precedence; else `GO:query` →
+    /// [`SortOrder::QueryGrouped`]; else [`SortOrder::Unsorted`]. Never does
+    /// I/O — reads the already-parsed header text.
+    #[must_use]
+    pub fn sort_order(&self) -> SortOrder {
+        let text = self.header.as_bytes();
+        for line in text.split(|&b| b == b'\n') {
+            if !line.starts_with(b"@HD") {
+                continue;
+            }
+            let mut so: Option<&[u8]> = None;
+            let mut go: Option<&[u8]> = None;
+            for field in line.split(|&b| b == b'\t') {
+                if let Some(v) = field.strip_prefix(b"SO:") {
+                    so = Some(v);
+                } else if let Some(v) = field.strip_prefix(b"GO:") {
+                    go = Some(v);
+                }
+            }
+            return match so {
+                Some(b"coordinate") => SortOrder::Coordinate,
+                Some(b"queryname") => SortOrder::QueryName,
+                _ => match go {
+                    Some(b"query") => SortOrder::QueryGrouped,
+                    _ => SortOrder::Unsorted,
+                },
+            };
+        }
+        SortOrder::Unsorted
     }
 
     /// Mirrors `Alignments::IsOpened`. Always `true` for a live [`Alignments`]
@@ -904,5 +952,47 @@ mod tests {
                 "nt16 code {code} should RC-decode to N"
             );
         }
+    }
+
+    #[test]
+    fn sort_order_reads_hd_so_and_go() {
+        use rust_htslib::bam::header::HeaderRecord;
+        use rust_htslib::bam::{Format, Header, Writer};
+
+        fn write_header_bam(dir: &std::path::Path, hd_tags: &[(&str, &str)]) -> std::path::PathBuf {
+            let path = dir.join("hdr.bam");
+            let mut header = Header::new();
+            let mut hd = HeaderRecord::new(b"HD");
+            hd.push_tag(b"VN", "1.6");
+            for (k, v) in hd_tags {
+                hd.push_tag(k.as_bytes(), v);
+            }
+            header.push_record(&hd);
+            let mut sq = HeaderRecord::new(b"SQ");
+            sq.push_tag(b"SN", "chr1");
+            sq.push_tag(b"LN", 1000);
+            header.push_record(&sq);
+            // Writer with no records: header-only BAM is enough for sort_order.
+            let _writer = Writer::from_path(&path, &header, Format::Bam).unwrap();
+            path
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let coord = write_header_bam(dir.path(), &[("SO", "coordinate")]);
+        assert_eq!(Alignments::open(&coord).unwrap().sort_order(), SortOrder::Coordinate);
+
+        let qname = write_header_bam(dir.path(), &[("SO", "queryname")]);
+        assert_eq!(Alignments::open(&qname).unwrap().sort_order(), SortOrder::QueryName);
+
+        let grouped = write_header_bam(dir.path(), &[("GO", "query")]);
+        assert_eq!(Alignments::open(&grouped).unwrap().sort_order(), SortOrder::QueryGrouped);
+
+        let unsorted = write_header_bam(dir.path(), &[("SO", "unsorted")]);
+        assert_eq!(Alignments::open(&unsorted).unwrap().sort_order(), SortOrder::Unsorted);
+
+        // No SO/GO tag at all → Unsorted.
+        let bare = write_header_bam(dir.path(), &[]);
+        assert_eq!(Alignments::open(&bare).unwrap().sort_order(), SortOrder::Unsorted);
     }
 }
