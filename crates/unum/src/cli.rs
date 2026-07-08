@@ -177,6 +177,46 @@ pub struct GenotypeArgs {
     /// alter `{prefix}_genotype.tsv` or `{prefix}_allele.tsv`.
     #[arg(long = "emit-metrics", default_value_t = false)]
     pub emit_metrics: bool,
+
+    /// Path to an AFND-style allele-frequency TSV (`allele<TAB>frequency<TAB>count`, optional
+    /// header) enabling the opt-in Hardy-Weinberg population-frequency prior on allele selection (a
+    /// unum extension, NOT part of T1K). Default off: when this flag is absent -- or present but
+    /// the prior is inactive for a gene (locus absent from the table, or all candidate alleles share
+    /// the same effective frequency) -- selection is byte-identical to the T1K oracle. The prior is
+    /// a bounded, coverage-vanishing tie-breaker that only tips near-ties; it can never override a
+    /// clear coverage margin (see `--allele-freq-weight`). CAVEAT: the HWE model assumes per-locus
+    /// allele independence, which is mis-specified under the strong linkage disequilibrium and
+    /// admixture typical of HLA/KIR cohorts -- acceptable for a bounded opt-in tie-breaker, but not a
+    /// population-conditioned frequency model.
+    #[arg(long = "allele-freq", value_name = "STRING")]
+    pub allele_freq: Option<String>,
+
+    /// Weight `w` scaling the HWE log-prior into the same weighted-read units as the coverage
+    /// objective (only meaningful with `--allele-freq`). The prior can flip a call only when the
+    /// candidate coverage margin is within the prior span `w * |Δ ln P_HWE|`; a coverage margin
+    /// above the span can never be overridden. At `w = 0` the span is 0 and the prior is inactive
+    /// everywhere (byte-identical to off). Must be finite and non-negative. Default `2.0`.
+    #[arg(
+        long = "allele-freq-weight",
+        default_value_t = 2.0,
+        value_parser = parse_finite_non_negative_f64
+    )]
+    pub allele_freq_weight: f64,
+}
+
+/// Parses a `--allele-freq-weight` value, rejecting negatives and non-finite inputs.
+///
+/// A negative weight inverts the HWE prior, and NaN/±inf make the span comparisons
+/// `w * |Δ ln P_HWE|` fail closed, so only finite, non-negative values are accepted.
+fn parse_finite_non_negative_f64(s: &str) -> Result<f64, String> {
+    let value: f64 = s.parse().map_err(|_| format!("`{s}` is not a valid number"))?;
+    if !value.is_finite() {
+        return Err(format!("must be a finite number, got `{s}`"));
+    }
+    if value < 0.0 {
+        return Err(format!("must be non-negative, got `{s}`"));
+    }
+    Ok(value)
 }
 
 /// Arguments for the `analyze` subcommand. Mirrors `analyzer`'s flag names (`Analyzer.cpp`'s
@@ -231,4 +271,49 @@ pub struct AnalyzeArgs {
     /// The maximum variant group size to call a novel variant. `-1` for no limitation.
     #[arg(long = "varMaxGroup", default_value_t = 8)]
     pub var_max_group: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_finite_non_negative_f64_accepts_valid_weights() {
+        assert_eq!(parse_finite_non_negative_f64("0"), Ok(0.0));
+        assert_eq!(parse_finite_non_negative_f64("2.0"), Ok(2.0));
+        assert_eq!(parse_finite_non_negative_f64("0.5"), Ok(0.5));
+    }
+
+    #[test]
+    fn parse_finite_non_negative_f64_rejects_negative() {
+        assert!(parse_finite_non_negative_f64("-1.0").is_err());
+        assert!(parse_finite_non_negative_f64("-0.0001").is_err());
+    }
+
+    #[test]
+    fn parse_finite_non_negative_f64_rejects_non_finite() {
+        assert!(parse_finite_non_negative_f64("nan").is_err());
+        assert!(parse_finite_non_negative_f64("inf").is_err());
+        assert!(parse_finite_non_negative_f64("-inf").is_err());
+    }
+
+    #[test]
+    fn parse_finite_non_negative_f64_rejects_garbage() {
+        assert!(parse_finite_non_negative_f64("abc").is_err());
+    }
+
+    #[test]
+    fn genotype_cli_validates_allele_freq_weight() {
+        // A complete, otherwise-valid genotype invocation parses when the weight is valid,
+        // so the negative-weight failure below is attributable to the value_parser, not to
+        // a missing required argument.
+        let base = ["unum", "genotype", "-f", "ref.fa", "-u", "reads.fa"];
+        assert!(
+            Cli::try_parse_from(base.iter().chain(["--allele-freq-weight", "1.5"].iter())).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(base.iter().chain(["--allele-freq-weight", "-1.0"].iter()))
+                .is_err()
+        );
+    }
 }

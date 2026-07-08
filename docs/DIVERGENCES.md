@@ -46,6 +46,14 @@ When an overlap arrives without a precomputed alignment, T1K declares a fresh `s
 
 `unum` uses the recomputed alignment directly and does not reproduce the shadowing bug. This only affects the test-only `align == None` path.
 
+### Opt-in HWE frequency prior adds a homozygous pair-search candidate (#29)
+
+- **unum:** `crates/unum-core/src/genotyper.rs` — `select_alleles_for_genes_haplotype_search` (the Path-A pair search) and `reconcile_zygosity_with_prior` (Path B)
+- **T1K:** `Genotyper.hpp:1697-1996` (pair search enumerates only het pairs `k > j`)
+- **Affects real output:** only when `--allele-freq` is supplied with a weight > 0 and the gene's locus is present with ≥2 distinct candidate frequencies; **off by default → byte-identical to T1K.**
+
+With the opt-in population-frequency prior active for a gene, unum extends the Path-A pair search to also enumerate the **homozygous candidate `(A, A)`** (`k == j`), which T1K never considers (its inner loop is `k > j`, het pairs only). When that homozygous candidate wins the (coverage + HWE-prior) objective, unum **collapses the gene to a genuine 1-type homozygous call** — it drops the losing allele types and keeps only the winning type at rank 0 — so `get_gene_allele_types` returns 1 and the gene is treated identically to a naturally-homozygous gene. Without the collapse the winner remap would leave rank-1 in place, the gene would stay multi-typed, and the reconciliation loop would spin to `ITER_MAX`; the collapse mirrors Path B's `retain(rank != 1)` hom reduction. Covered by a dedicated regression test (`path_a_hom_winner_collapses_gene_to_one_type`).
+
 ## Known T1K quirks/bugs still reproduced (candidates for future divergence)
 
 These are places where `unum` currently matches T1K on purpose — a known bug, quirk, or UB in T1K that we reproduce for parity rather than fix. They are tracked here as candidates for future divergence: if any starts to matter for a real result, revisit it the way we did the weighted-count bug above. Each is marked in the source with a comment explaining it is a deliberate parity choice.

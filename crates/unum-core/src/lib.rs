@@ -3,6 +3,7 @@
 
 pub mod align_algo;
 pub mod alignments;
+pub mod allele_freq;
 pub mod bam_extract;
 pub mod extract;
 pub mod fastq;

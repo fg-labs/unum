@@ -161,6 +161,7 @@
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
+use crate::allele_freq::AlleleFreqTable;
 use crate::overlap;
 use crate::ref_kmer_filter::{RefKmerFilter, Scratch};
 
@@ -1427,6 +1428,32 @@ pub fn discriminative_quality_phred(a_called: f64, a_second: f64) -> i32 {
     }
 }
 
+/// The Hardy-Weinberg log-prior `ln P_HWE` for a genotype whose two allele
+/// series have effective population frequencies `f_j` and `f_k` (#29).
+///
+/// For a heterozygote (`homozygous == false`) this is
+/// `ln 2 + ln f_j + ln f_k`; for a homozygote (`homozygous == true`) it is
+/// `2 · ln f_j` (Wigginton 2005: `P(hom A) = f_A²`, `P(het A,B) = 2 f_A f_B`).
+/// The classic HWE crossover `ln 2 + ln f_A + ln f_B > 2 ln f_A` whenever
+/// `f_B > f_A / 2` is intentional -- a het of two common alleles can rightly
+/// outscore a common homozygote; the bounded prior weight `w` (not this fn)
+/// keeps it from overriding strong read evidence.
+///
+/// Free fn (mirrors [`discriminative_quality_phred`]). A series whose locus is
+/// absent from the frequency table can never reach here -- the gene is
+/// inactive and the caller short-circuits upstream -- so both frequencies are
+/// the strictly-positive Jeffreys-smoothed values and the logs are finite.
+///
+/// # FLOATS
+///
+/// Only appears in the opt-in [`Genotyper::covered_prior_bonus`] path; the
+/// default (`--allele-freq` absent) selection never calls it, preserving the
+/// byte-identity invariant.
+#[must_use]
+pub fn hwe_log_prior(f_j: f64, f_k: f64, homozygous: bool) -> f64 {
+    if homozygous { 2.0 * f_j.ln() } else { std::f64::consts::LN_2 + f_j.ln() + f_k.ln() }
+}
+
 /// Ported from `SeqSet::GetSeqMissingBaseCoverage` (`SeqSet.hpp:2717-2755`):
 /// counts how many of `allele_ref`'s exon positions (sorted ascending by
 /// observed base coverage) fall below `ratio` times the MEDIAN exon-position
@@ -2084,6 +2111,31 @@ pub struct Genotyper {
     /// [`Genotyper::get_gene_allele_types`]/[`Genotyper::get_allele_description`]/
     /// [`Genotyper::output_representative_alleles`].
     pub selected_alleles: Vec<Vec<(i32, i32)>>,
+
+    // --- #29 opt-in Hardy-Weinberg population-frequency prior ---
+    /// The population allele-frequency table for the opt-in HWE selection
+    /// prior. `None` (the default) => the prior is off and selection is
+    /// byte-identical to the oracle. Set via [`Genotyper::set_allele_freq`].
+    pub allele_freq: Option<AlleleFreqTable>,
+    /// The prior weight `w` scaling `hwe_log_prior` into the same
+    /// weighted-read units as the coverage objective. Default `2.0`
+    /// (`--allele-freq-weight`). At `w = 0` the prior span is 0 and the prior
+    /// is inactive everywhere. Set via [`Genotyper::set_allele_freq_weight`].
+    pub allele_freq_weight: f64,
+
+    /// Debug-only counter of the number of `(j, k)` candidate genotype pairs
+    /// enumerated by the most recent
+    /// [`Genotyper::select_alleles_for_genes_haplotype_search`] pass, summed
+    /// across all genes. It exists so a test can assert the candidate SET is
+    /// unchanged on the prior-inactive path (the candidate-set invariant of
+    /// #29): the count increments once per scored `(j, k)` pair -- including the
+    /// `k == j` hom candidate only when the prior is active for the gene -- so
+    /// an inactive-gene run enumerates exactly the same pairs as the flag-off
+    /// run. Reset to `0` at the start of each haplotype-search pass. Compiled
+    /// only under `test`/`debug_assertions`, so it costs nothing in release
+    /// (the increment sites are `#[cfg]`-gated too).
+    #[cfg(any(test, debug_assertions))]
+    pub haplotype_pair_enumeration_count: usize,
 }
 
 impl Default for Genotyper {
@@ -2133,6 +2185,10 @@ impl Genotyper {
             cross_gene_rate: 0.04,
             read_length: 0,
             selected_alleles: Vec::new(),
+            allele_freq: None,
+            allele_freq_weight: 2.0,
+            #[cfg(any(test, debug_assertions))]
+            haplotype_pair_enumeration_count: 0,
         }
     }
 
@@ -2165,6 +2221,100 @@ impl Genotyper {
     pub fn set_allele_name_structure(&mut self, n: i32, d: u8) {
         self.allele_digit_units = n;
         self.allele_delimiter = d;
+    }
+
+    /// Sets the #29 population allele-frequency table, enabling the opt-in HWE
+    /// selection prior. With no table set (the default) the prior is off and
+    /// selection is byte-identical to the oracle.
+    pub fn set_allele_freq(&mut self, table: AlleleFreqTable) {
+        self.allele_freq = Some(table);
+    }
+
+    /// Sets the #29 prior weight `w` (`--allele-freq-weight`, default `2.0`).
+    /// At `w = 0` the prior span is 0 and the prior is inactive everywhere.
+    pub fn set_allele_freq_weight(&mut self, w: f64) {
+        self.allele_freq_weight = w;
+    }
+
+    /// True iff the #29 population-frequency prior can act on a gene whose
+    /// candidate allele *series* are `candidate_series`: the table must be
+    /// present, the gene's locus must be present in the table (every candidate
+    /// must resolve to a frequency), and there must be at least two *distinct*
+    /// effective frequencies among the candidates (so `Δ ln P_HWE ≠ 0`).
+    ///
+    /// When this returns `false` the selector runs exactly the default logic
+    /// for that gene: the Path-A `k == j` hom candidate is not enumerated and
+    /// the Path-B reconciliation is not invoked, so the candidate *set* is
+    /// unchanged (the candidate-set invariant). Governs BOTH selection paths.
+    #[must_use]
+    pub fn prior_active_for_gene(&self, candidate_series: &[&str]) -> bool {
+        let Some(table) = self.allele_freq.as_ref() else {
+            return false;
+        };
+        if self.allele_freq_weight == 0.0 {
+            return false;
+        }
+
+        // Every candidate must resolve to a frequency; a `None` means the
+        // locus is absent from the table => the gene is inactive.
+        let mut first: Option<f64> = None;
+        let mut has_distinct = false;
+        for &series in candidate_series {
+            let Some(f) = table.frequency(series) else {
+                return false;
+            };
+            match first {
+                None => first = Some(f),
+                // Exact `!=` is intentional (not an approximate compare): the
+                // byte-identity guarantee requires that two candidates mapping
+                // to bit-identical effective `f` (e.g. both absent => same
+                // floor) count as constant => no distinguishing prior signal.
+                #[allow(clippy::float_cmp)]
+                Some(f0) => {
+                    if f != f0 {
+                        has_distinct = true;
+                    }
+                }
+            }
+        }
+        has_distinct
+    }
+
+    /// The #29 prior bonus added to a candidate genotype's coverage objective:
+    /// `w · hwe_log_prior(f_j, f_k, homozygous)`.
+    ///
+    /// Returns the LITERAL `0.0` (bit-for-bit `0.0f64`, not a computed
+    /// near-zero) whenever the prior is inactive -- the flag is off, the gene's
+    /// locus is absent, or the two series map to the identical effective
+    /// frequency (`Δ ln P_HWE = 0`). Because `x + 0.0 == x` for every finite
+    /// non-NaN `x`, adding this to the coverage objective is bit-identical to
+    /// the default path in the inactive case (the objective invariant).
+    ///
+    /// The inactive/constant check is this fn's FIRST action, so no log/mul is
+    /// ever evaluated on the inactive path.
+    #[must_use]
+    pub fn covered_prior_bonus(&self, series_j: &str, series_k: &str, homozygous: bool) -> f64 {
+        let Some(table) = self.allele_freq.as_ref() else {
+            return 0.0;
+        };
+        if self.allele_freq_weight == 0.0 {
+            return 0.0;
+        }
+        let (Some(f_j), Some(f_k)) = (table.frequency(series_j), table.frequency(series_k)) else {
+            // Locus absent from the table => inactive.
+            return 0.0;
+        };
+        // A het whose two series map to the identical effective frequency
+        // carries no distinguishing prior signal for the constant-skip
+        // guarantee; return the literal 0.0 rather than a computed near-zero so
+        // the exact-tie comparison in the selector is bit-for-bit unchanged.
+        // Exact `==` is intentional (not an approximate compare) for exactly
+        // this byte-identity reason.
+        #[allow(clippy::float_cmp)]
+        if !homozygous && f_j == f_k {
+            return 0.0;
+        }
+        self.allele_freq_weight * hwe_log_prior(f_j, f_k, homozygous)
     }
 
     /// Calls [`parse_allele_name`] with this `Genotyper`'s configured
@@ -3746,7 +3896,334 @@ impl Genotyper {
         }
 
         self.select_alleles_for_genes_haplotype_search(&mut read_covered, &seq_weight_of);
+        // #29 Path B: span-gated hom-vs-het reconciliation for the <=2-allele-type
+        // genes the pair search skips (`allele_type_cnt <= 2` -> `continue`).
+        // A strict NO-OP when the prior is off/inactive (never mutates the frozen
+        // greedy result), so the byte-identity invariant holds.
+        self.reconcile_zygosity_with_prior(&seq_weight_of);
         self.select_alleles_for_genes_quality_scores();
+    }
+
+    /// Coverage functional for a single candidate genotype on gene `gene_idx`,
+    /// mirroring the `covered_read_cnt` accumulation inside
+    /// [`Genotyper::select_alleles_for_genes_haplotype_search`] (the Path-A
+    /// objective's data term). Used by BOTH Path A (implicitly, via the same
+    /// accumulation there) and Path B ([`Genotyper::reconcile_zygosity_with_prior`])
+    /// so the two paths score coverage identically -- the plan's shared helper.
+    ///
+    /// The candidate is `(rank_j, rank_k)`; `homozygous` means `rank_k == rank_j`
+    /// (only `rank_j`'s reads count, the second allele contributes no *new*
+    /// reads, and there is no distinct k-side missing-coverage term). `covered`
+    /// is the union of optimal, currently-uncovered (`read_coverage == 0`) reads
+    /// at the candidate ranks; `read_coverage` must already have gene `gene_idx`'s
+    /// own contribution removed (coverage from every OTHER gene's rank-0/1
+    /// alleles), exactly as the pair search maintains it.
+    ///
+    /// `missing_coverage_weight` is the gene's `missing_coverage -> max abundance`
+    /// map (built identically to `missing_coverage_allele_type_weight[gene_idx]`
+    /// in the pair search).
+    #[allow(clippy::too_many_arguments)]
+    fn gene_candidate_covered_read_cnt(
+        &self,
+        gene_idx: usize,
+        read_coverage: &[i32],
+        rank_j: i32,
+        rank_k: i32,
+        homozygous: bool,
+        allele_type_cnt: i32,
+        missing_coverage_weight: &HashMap<i32, f64>,
+        seq_weight_of: &impl Fn(usize) -> i32,
+    ) -> f64 {
+        let selected = &self.selected_alleles[gene_idx];
+
+        // Marginal covered read set: optimal, currently-uncovered reads at
+        // rank_j, then (for a het) the additional such reads at rank_k. Mirrors
+        // the `covered_from_a` / `covered_reads` accumulation in the pair search.
+        let mut covered_reads: Vec<i32> = Vec::new();
+        let mut used_ec: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let mut allele_j = 0usize;
+        for (l, &(allele_idx, rank)) in selected.iter().enumerate() {
+            if rank != rank_j {
+                continue;
+            }
+            let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+            let ec = self.allele_info[allele_idx_usize].equivalent_class;
+            if used_ec.contains(&ec) {
+                continue;
+            }
+            used_ec.insert(ec);
+            let reads = self.reads_in_allele[allele_idx_usize].clone();
+            for r in 0..reads.len() {
+                let read_idx = usize::try_from(reads[r].0).unwrap();
+                if read_coverage[read_idx] == 0
+                    && self.is_reads_in_allele_idx_optimal(&reads, r)
+                    && !covered_reads.contains(&reads[r].0)
+                {
+                    covered_reads.push(reads[r].0);
+                }
+            }
+            allele_j = l;
+        }
+        if !homozygous {
+            used_ec.clear();
+            for &(allele_idx, rank) in selected {
+                if rank != rank_k {
+                    continue;
+                }
+                let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                let ec = self.allele_info[allele_idx_usize].equivalent_class;
+                if used_ec.contains(&ec) {
+                    continue;
+                }
+                used_ec.insert(ec);
+                let reads = self.reads_in_allele[allele_idx_usize].clone();
+                for r in 0..reads.len() {
+                    let read_idx = usize::try_from(reads[r].0).unwrap();
+                    if read_coverage[read_idx] == 0
+                        && self.is_reads_in_allele_idx_optimal(&reads, r)
+                        && !covered_reads.contains(&reads[r].0)
+                    {
+                        covered_reads.push(reads[r].0);
+                    }
+                }
+            }
+        }
+
+        // Missing-coverage terms (minimum missing_coverage among the ranks'
+        // alleles), matching the pair search.
+        let mut j_missing_coverage: i32 = -1;
+        let mut k_missing_coverage: i32 = -1;
+        for &(allele_idx, rank) in selected {
+            let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+            if rank == rank_j {
+                let mc = self.allele_info[allele_idx_usize].missing_coverage;
+                if j_missing_coverage == -1 || mc < j_missing_coverage {
+                    j_missing_coverage = mc;
+                }
+            } else if !homozygous && rank == rank_k {
+                let mc = self.allele_info[allele_idx_usize].missing_coverage;
+                if k_missing_coverage == -1 || mc < k_missing_coverage {
+                    k_missing_coverage = mc;
+                }
+            }
+        }
+        if homozygous {
+            k_missing_coverage = j_missing_coverage;
+        }
+
+        let mut covered_read_cnt = 0.0f64;
+        for &read_idx in &covered_reads {
+            covered_read_cnt += f64::from(
+                self.read_assignments[usize::try_from(read_idx).unwrap()][0].adjust_weight,
+            );
+        }
+
+        if allele_type_cnt > 3 || j_missing_coverage >= 10 || k_missing_coverage >= 10 {
+            let mut weight_j =
+                missing_coverage_weight.get(&j_missing_coverage).copied().unwrap_or(0.0);
+            let mut weight_k =
+                missing_coverage_weight.get(&k_missing_coverage).copied().unwrap_or(0.0);
+            if allele_type_cnt <= 3 {
+                if weight_j >= 1.0 {
+                    weight_j = weight_j.log10();
+                }
+                if weight_k >= 1.0 {
+                    weight_k = weight_k.log10();
+                }
+            }
+            let allele_j_idx = usize::try_from(selected[allele_j].0).unwrap();
+            let k_term = if homozygous {
+                0.0
+            } else {
+                f64::from(k_missing_coverage) * weight_k * f64::from(self.read_length) / 150.0
+            };
+            covered_read_cnt = covered_read_cnt
+                - f64::from(j_missing_coverage) * weight_j * f64::from(self.read_length) / 150.0
+                - k_term
+                + f64::from(seq_weight_of(allele_j_idx));
+        }
+
+        covered_read_cnt
+    }
+
+    /// #29 Path B: span-gated hom-vs-het reconciliation for genes with
+    /// `allele_type_cnt in {1, 2}` (the ones the pair search skips at
+    /// `allele_type_cnt <= 2`). For each such gene, and ONLY when the prior is
+    /// active for it (`prior_active_for_gene`), it compares the greedy zygosity
+    /// against the alternative using the SAME coverage functional the pair
+    /// search uses ([`Genotyper::gene_candidate_covered_read_cnt`]):
+    ///
+    /// - A 1-type (greedy-homozygous) gene has no second allele to promote, so
+    ///   there is no het candidate: the hom call is forced and this fn never
+    ///   changes it (the single-observed-allele case).
+    /// - A 2-type (greedy-heterozygous) gene scores hom `(A, A)` (HWE
+    ///   `2 ln f_A`, coverage = rank-0 reads alone) against het `(A, B)` (HWE
+    ///   `ln2 + ln f_A + ln f_B`, coverage = ranks 0+1). The greedy het is
+    ///   overturned to hom (by demoting the rank-1 alleles) ONLY when the prior
+    ///   favors the hom (`Δ ln P_HWE < 0`) AND the coverage margin is within the
+    ///   prior span (`Δcov <= w · |Δ ln P_HWE|`). Otherwise the greedy call
+    ///   stands.
+    ///
+    /// This is the unifying no-override rule from the design: at `w = 0` the span
+    /// is 0, so nothing is ever overridden and the greedy call is reproduced
+    /// exactly (byte-identity anchor). Gated on `prior_active_for_gene`, so the
+    /// entire pass is a strict NO-OP when the table is off/inactive -- the frozen
+    /// greedy result is never mutated.
+    #[allow(clippy::needless_range_loop, clippy::too_many_lines)]
+    fn reconcile_zygosity_with_prior(&mut self, seq_weight_of: &impl Fn(usize) -> i32) {
+        // Fast, allocation-free NO-OP when the flag is off: no table => the prior
+        // can never be active for any gene, so skip the whole pass.
+        if self.allele_freq.is_none() || self.allele_freq_weight == 0.0 {
+            return;
+        }
+        let gene_cnt_usize = usize::try_from(self.gene_cnt).expect("gene_cnt is non-negative");
+        let read_cnt = self.read_assignments.len();
+
+        for i in 0..gene_cnt_usize {
+            let allele_type_cnt = self.get_gene_allele_types(i);
+            // Only the <=2-type genes the pair search skips; a 1-type gene has no
+            // het candidate (hom forced), a 0-type gene has nothing to call.
+            if allele_type_cnt != 2 {
+                continue;
+            }
+
+            // Resolve ranks 0 and 1 to their major-allele series (the natural
+            // frequency key), the same way Path A does.
+            let mut series0: Option<String> = None;
+            let mut series1: Option<String> = None;
+            for &(allele_idx, rank) in &self.selected_alleles[i] {
+                let target = match rank {
+                    0 => &mut series0,
+                    1 => &mut series1,
+                    _ => continue,
+                };
+                if target.is_some() {
+                    continue;
+                }
+                let major_idx = usize::try_from(
+                    self.allele_info[usize::try_from(allele_idx).unwrap()].major_allele_idx,
+                )
+                .unwrap();
+                *target = Some(self.major_allele_idx_to_name[major_idx].clone());
+            }
+            let (Some(series0), Some(series1)) = (series0, series1) else {
+                continue;
+            };
+
+            // Gate: the prior must be active for this gene. When inactive this is
+            // a NO-OP -- the greedy call stands byte-identically.
+            if !self.prior_active_for_gene(&[series0.as_str(), series1.as_str()]) {
+                continue;
+            }
+
+            // Build `read_coverage` from every OTHER gene's rank-0/1 alleles
+            // (this gene's own contribution is excluded), exactly as the pair
+            // search does before measuring a candidate's marginal coverage.
+            let mut read_coverage = vec![0i32; read_cnt];
+            let mut used_ec: std::collections::HashSet<i32> = std::collections::HashSet::new();
+            for g in 0..gene_cnt_usize {
+                if g == i {
+                    continue;
+                }
+                used_ec.clear();
+                for &(allele_idx, rank) in &self.selected_alleles[g] {
+                    if rank > 1 {
+                        continue;
+                    }
+                    let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                    let ec = self.allele_info[allele_idx_usize].equivalent_class;
+                    if used_ec.contains(&ec) {
+                        continue;
+                    }
+                    used_ec.insert(ec);
+                    let reads = self.reads_in_allele[allele_idx_usize].clone();
+                    for r in 0..reads.len() {
+                        if self.is_reads_in_allele_idx_optimal(&reads, r) {
+                            read_coverage[usize::try_from(reads[r].0).unwrap()] += 1;
+                        }
+                    }
+                }
+            }
+
+            // Per-gene missing_coverage -> max-abundance weight map (matches the
+            // pair search's `missing_coverage_allele_type_weight[i]`).
+            let allele_type_cnt_usize = usize::try_from(allele_type_cnt).unwrap_or(0);
+            let mut allele_type_info: Vec<(i32, f64)> = vec![(-1, 0.0); allele_type_cnt_usize];
+            for &(allele_idx, allele_type) in &self.selected_alleles[i] {
+                let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                let allele_type_usize = usize::try_from(allele_type).unwrap();
+                if allele_type_usize >= allele_type_info.len() {
+                    continue;
+                }
+                allele_type_info[allele_type_usize].1 +=
+                    self.allele_info[allele_idx_usize].abundance;
+                let mc = self.allele_info[allele_idx_usize].missing_coverage;
+                if allele_type_info[allele_type_usize].0 == -1
+                    || mc < allele_type_info[allele_type_usize].0
+                {
+                    allele_type_info[allele_type_usize].0 = mc;
+                }
+            }
+            let mut missing_coverage_weight: HashMap<i32, f64> = HashMap::new();
+            for &(mc, abund) in &allele_type_info {
+                let entry = missing_coverage_weight.entry(mc).or_insert(0.0);
+                if abund > *entry {
+                    *entry = abund;
+                }
+            }
+
+            // Score hom (A, A) [rank 0 only] vs het (A, B) [ranks 0, 1] with the
+            // shared coverage functional.
+            let cov_hom = self.gene_candidate_covered_read_cnt(
+                i,
+                &read_coverage,
+                0,
+                0,
+                true,
+                allele_type_cnt,
+                &missing_coverage_weight,
+                seq_weight_of,
+            );
+            let cov_het = self.gene_candidate_covered_read_cnt(
+                i,
+                &read_coverage,
+                0,
+                1,
+                false,
+                allele_type_cnt,
+                &missing_coverage_weight,
+                seq_weight_of,
+            );
+
+            // The HWE margin het - hom (in nats): ln2 + ln f_B - ln f_A. Both
+            // series resolve to Some (the prior-active gate proved the locus is
+            // present); a defensive fallback leaves the greedy call otherwise.
+            let table = self.allele_freq.as_ref().expect("prior active => table present");
+            let (Some(f_a), Some(f_b)) = (table.frequency(&series0), table.frequency(&series1))
+            else {
+                continue;
+            };
+            let hwe_het = hwe_log_prior(f_a, f_b, false);
+            let hwe_hom = hwe_log_prior(f_a, f_a, true);
+            let delta_hwe = hwe_het - hwe_hom; // > 0 favors het, < 0 favors hom.
+
+            // Greedy called het (rank-1 present). Overturn to hom only when the
+            // prior favors the hom AND the het's coverage advantage is within the
+            // prior span. `w = 0` => span 0 => never overrides (byte-identity).
+            let span = self.allele_freq_weight * delta_hwe.abs();
+            let delta_cov = cov_het - cov_hom; // >= 0: het is a coverage superset.
+            let prior_favors_hom = delta_hwe < 0.0;
+            if prior_favors_hom && delta_cov <= span {
+                // Remove the rank-1 alleles so the gene becomes a genuine 1-type
+                // (homozygous) gene -- identical in shape to a naturally
+                // homozygous gene: `get_gene_allele_types` then returns 1, and
+                // `get_allele_description` / `output_representative_alleles` apply
+                // their standard hom clamping + rank-1 rescue exactly as they
+                // would for any hom call. (No allele is invented; only the
+                // spurious second-allele rank is dropped.)
+                self.selected_alleles[i].retain(|&(_, rank)| rank != 1);
+            }
+        }
     }
 
     /// The `iterMax = 1000` best-haplotype-pair search
@@ -3777,6 +4254,14 @@ impl Genotyper {
     ) {
         const ITER_MAX: i32 = 1000;
         let gene_cnt_usize = usize::try_from(self.gene_cnt).expect("gene_cnt is non-negative");
+
+        // #29 debug candidate-set invariant: reset the per-pass enumeration
+        // counter so a test can compare the number of `(j, k)` pairs scored on
+        // the prior-active vs prior-inactive path (see the field's doc comment).
+        #[cfg(any(test, debug_assertions))]
+        {
+            self.haplotype_pair_enumeration_count = 0;
+        }
 
         let mut read_coverage = vec![0i32; read_covered.len()];
         let mut used_ec: std::collections::HashSet<i32> = std::collections::HashSet::new();
@@ -3843,6 +4328,33 @@ impl Genotyper {
                 let mut max_cover = 0.0f64;
                 let mut max_cover_abundance = 0.0f64;
 
+                // #29 population-frequency prior: resolve each rank to the
+                // major-allele *series* of a representative allele at that rank
+                // (the same rank->series resolution `get_allele_description`
+                // does via `major_allele_idx_to_name`), then decide whether the
+                // prior is active for this gene. When inactive, `objective ==
+                // covered_read_cnt` bit-for-bit (`covered_prior_bonus` returns
+                // literal 0.0) AND the `k == j` hom candidate is NOT enumerated,
+                // so the candidate SET and argmax are byte-identical to the
+                // default path.
+                let allele_type_cnt_usize = usize::try_from(allele_type_cnt).unwrap_or(0);
+                let mut rank_series: Vec<Option<String>> = vec![None; allele_type_cnt_usize];
+                for &(allele_idx, rank) in &selected {
+                    let rank_usize = usize::try_from(rank).unwrap_or(usize::MAX);
+                    if rank_usize >= rank_series.len() || rank_series[rank_usize].is_some() {
+                        continue;
+                    }
+                    let allele_idx_usize = usize::try_from(allele_idx).unwrap();
+                    let major_idx =
+                        usize::try_from(self.allele_info[allele_idx_usize].major_allele_idx)
+                            .unwrap();
+                    rank_series[rank_usize] =
+                        Some(self.major_allele_idx_to_name[major_idx].clone());
+                }
+                let candidate_series: Vec<&str> =
+                    rank_series.iter().filter_map(|s| s.as_deref()).collect();
+                let prior_active = self.prior_active_for_gene(&candidate_series);
+
                 // Remove the effects of the current gene.
                 used_ec.clear();
                 for &(allele_idx, rank) in &selected {
@@ -3894,7 +4406,14 @@ impl Genotyper {
                         allele_j = l;
                     }
 
-                    for k in (j + 1)..allele_type_cnt {
+                    // #29: when the prior is active for this gene, extend the
+                    // inner loop to include the `k == j` HOMOZYGOUS candidate
+                    // `(A, A)`; when inactive the bound stays `(j + 1)..` so the
+                    // enumerated candidate SET is byte-identical to the default
+                    // path (the candidate-set invariant).
+                    let k_start = if prior_active { j } else { j + 1 };
+                    for k in k_start..allele_type_cnt {
+                        let homozygous = k == j;
                         let mut covered_reads = covered_from_a.clone();
                         used_ec.clear();
                         let mut allele_k = 0usize;
@@ -3940,6 +4459,20 @@ impl Genotyper {
                                     k_missing_coverage = mc;
                                 }
                             }
+                        }
+                        // #29 hom candidate `(A, A)`: the `else if rank == k`
+                        // branch above never fires when `k == j` (the `rank ==
+                        // j` arm wins), so mirror the j-side terms onto the
+                        // k-side. The covered SET is `covered_from_a` alone
+                        // (allele A contributes no *new* reads a second time),
+                        // and the design specifies no distinct k-side
+                        // missing-coverage term (`k_missing_coverage =
+                        // j_missing_coverage`). This makes the missing-coverage
+                        // adjustment and the abundance tiebreak
+                        // (`abundance_A^2`) well-defined for the hom.
+                        if homozygous {
+                            abundance_k = abundance_j;
+                            k_missing_coverage = j_missing_coverage;
                         }
                         let abundance_sum = abundance_j * abundance_k;
 
@@ -3995,26 +4528,67 @@ impl Genotyper {
                                 }
                             }
                             let allele_j_idx = usize::try_from(selected[allele_j].0).unwrap();
+                            // #29 hom candidate: no distinct k-side
+                            // missing-coverage term (the second allele of a
+                            // homozygote contributes no *new* coverage), so the
+                            // k-side subtraction is dropped for `k == j`.
+                            let k_term = if homozygous {
+                                0.0
+                            } else {
+                                f64::from(k_missing_coverage)
+                                    * weight_k
+                                    * f64::from(self.read_length)
+                                    / 150.0
+                            };
                             covered_read_cnt = covered_read_cnt
                                 - f64::from(j_missing_coverage)
                                     * weight_j
                                     * f64::from(self.read_length)
                                     / 150.0
-                                - f64::from(k_missing_coverage)
-                                    * weight_k
-                                    * f64::from(self.read_length)
-                                    / 150.0
+                                - k_term
                                 + f64::from(seq_weight_of(allele_j_idx));
                         }
                         let _ = allele_k;
 
+                        // #29: the prior-aware objective. `covered_prior_bonus`
+                        // returns the LITERAL 0.0 when the prior is inactive for
+                        // this gene (flag off / locus absent / equal-`f`
+                        // series), so on the default path `objective ==
+                        // covered_read_cnt` bit-for-bit and the comparison chain
+                        // is byte-identical. When active, the bounded HWE term
+                        // (`w * |Δ ln P_HWE|`, O(1) nats) can only tip a
+                        // candidate whose coverage margin is within the span --
+                        // a larger margin can never be flipped, which falls out
+                        // of the arithmetic (no extra gating needed here). The
+                        // abundance-product tiebreak below is retained unchanged
+                        // as the strictly-lower-priority tiebreak.
+                        let series_j = rank_series[usize::try_from(j).unwrap()].as_deref();
+                        let series_k = rank_series[usize::try_from(k).unwrap()].as_deref();
+                        let objective = match (series_j, series_k) {
+                            (Some(sj), Some(sk)) => {
+                                covered_read_cnt + self.covered_prior_bonus(sj, sk, homozygous)
+                            }
+                            // A rank with no representative series cannot be
+                            // active (it would have failed `prior_active_for_gene`
+                            // via a `None` frequency); fall back to the literal
+                            // coverage objective (adds nothing).
+                            _ => covered_read_cnt,
+                        };
+
+                        // #29 debug candidate-set invariant: count every scored
+                        // `(j, k)` pair (see the field's doc comment).
+                        #[cfg(any(test, debug_assertions))]
+                        {
+                            self.haplotype_pair_enumeration_count += 1;
+                        }
+
                         #[allow(clippy::float_cmp)]
-                        let tie = covered_read_cnt == max_cover;
+                        let tie = objective == max_cover;
                         if best_types.is_empty()
-                            || covered_read_cnt > max_cover
+                            || objective > max_cover
                             || (tie && abundance_sum > max_cover_abundance)
                         {
-                            max_cover = covered_read_cnt;
+                            max_cover = objective;
                             max_cover_abundance = abundance_sum;
                             best_types.clear();
                             best_types.push((j, k));
@@ -4025,7 +4599,35 @@ impl Genotyper {
                 }
 
                 let best_type = best_types[0];
-                if best_type != (0, 1) {
+                if best_type.0 == best_type.1 {
+                    // #29 homozygous winner `(A, A)`: collapse the gene to a
+                    // genuine 1-type homozygous call -- keep only the winning
+                    // type's alleles (at rank 0) and DROP the losing types, so
+                    // `get_gene_allele_types` becomes 1 and the gene is skipped
+                    // by the `allele_type_cnt <= 2` guard on the next iteration.
+                    //
+                    // Without this collapse the het-style remap below is a
+                    // no-op for a hom winner: the `rank == best_type.1` arm is
+                    // dead when `.0 == .1`, so rank-1 survives, the gene stays
+                    // multi-typed, and `best_type != (0, 1)` re-fires
+                    // `updated_gene_cnt += 1` on every pass -- spinning the loop
+                    // to `ITER_MAX` and leaving a mis-shaped (still-het) call.
+                    // Mirrors Path B's retain-based hom collapse
+                    // (`reconcile_zygosity_with_prior`). Reachable only when the
+                    // prior is active (the `k == j` candidate is gated on
+                    // `prior_active`), so the default path is untouched.
+                    let win = best_type.0;
+                    updated_gene_cnt += 1;
+                    self.selected_alleles[i].retain(|&(_, rank)| rank == win);
+                    for entry in &mut self.selected_alleles[i] {
+                        entry.1 = 0;
+                    }
+                    let winners: Vec<i32> =
+                        self.selected_alleles[i].iter().map(|&(a, _)| a).collect();
+                    for allele_idx in winners {
+                        self.allele_info[usize::try_from(allele_idx).unwrap()].allele_rank = 0;
+                    }
+                } else if best_type != (0, 1) {
                     updated_gene_cnt += 1;
                     for &(allele_idx, rank) in &selected {
                         let new_rank = if rank == best_type.0 {
@@ -6098,5 +6700,467 @@ mod tests {
     fn discriminative_quality_lower_bound_when_called_negligible() {
         // a_called ~0, a_second > 0: ratio ~1 -> raw ~0 -> 0 (never negative).
         assert_eq!(discriminative_quality_phred(0.0, 25.0), 0);
+    }
+
+    // --- #29 HWE population-frequency prior helpers ---
+
+    /// Writes an AFND-style TSV to a uniquely-named temp file and parses it
+    /// into an `AlleleFreqTable`. Cleans up the file before returning.
+    fn freq_table_from_rows(rows: &str) -> AlleleFreqTable {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("unum_genotyper_freq_test_{}_{n}.tsv", std::process::id()));
+        {
+            let mut file = std::fs::File::create(&path).expect("create temp tsv");
+            file.write_all(rows.as_bytes()).expect("write temp tsv");
+        }
+        let table = AlleleFreqTable::from_tsv(&path).expect("parse temp tsv");
+        std::fs::remove_file(&path).ok();
+        table
+    }
+
+    #[test]
+    fn hwe_log_prior_het_and_hom_exact_forms() {
+        // het (j != k): ln2 + ln f_j + ln f_k.
+        let het = hwe_log_prior(0.2, 0.1, false);
+        let expected_het = std::f64::consts::LN_2 + 0.2_f64.ln() + 0.1_f64.ln();
+        assert!((het - expected_het).abs() < 1e-15, "het={het} expected={expected_het}");
+
+        // hom (j == k): 2 ln f_j (the f_k arg is ignored).
+        let hom = hwe_log_prior(0.2, 0.9, true);
+        let expected_hom = 2.0 * 0.2_f64.ln();
+        assert!((hom - expected_hom).abs() < 1e-15, "hom={hom} expected={expected_hom}");
+    }
+
+    #[test]
+    fn hwe_log_prior_het_beats_hom_when_fb_exceeds_half_fa() {
+        // The classic crossover: het of two commons > hom of one common when
+        // f_B > f_A / 2. With f_A = 0.3, f_B = 0.25 (> 0.15):
+        // het = ln2 + ln0.3 + ln0.25; hom = 2 ln0.3.
+        let f_a = 0.3;
+        let f_b = 0.25;
+        assert!(f_b > f_a / 2.0, "test premise: f_B must exceed f_A/2");
+        let het = hwe_log_prior(f_a, f_b, false);
+        let hom = hwe_log_prior(f_a, f_a, true);
+        assert!(het > hom, "het={het} should beat hom={hom} when f_B > f_A/2");
+
+        // And when f_B < f_A / 2 the hom wins (no spurious het).
+        let f_b_rare = 0.05;
+        assert!(f_b_rare < f_a / 2.0);
+        let het_rare = hwe_log_prior(f_a, f_b_rare, false);
+        assert!(het_rare < hom, "het_rare={het_rare} should lose to hom={hom} when f_B < f_A/2");
+    }
+
+    #[test]
+    fn covered_prior_bonus_literal_zero_when_no_table() {
+        // No table => the flag is off => literal 0.0 (bit-for-bit).
+        let g = Genotyper::new();
+        let bonus = g.covered_prior_bonus("A*01:01", "A*02:01", false);
+        assert_eq!(bonus.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn covered_prior_bonus_literal_zero_when_locus_absent() {
+        // Table present but the queried locus is absent => literal 0.0.
+        let mut g = Genotyper::new();
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.5\t30\nA*02:01\t0.5\t20\n"));
+        let bonus = g.covered_prior_bonus("DRB1*03:01", "DRB1*01:01", false);
+        assert_eq!(bonus.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn covered_prior_bonus_literal_zero_when_series_map_to_equal_freq() {
+        // Two alleles absent from a present locus map to the identical floor
+        // frequency, so a het carries no distinguishing prior => literal 0.0.
+        let mut g = Genotyper::new();
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.5\t30\nA*02:01\t0.5\t20\n"));
+        let bonus = g.covered_prior_bonus("A*80:01", "A*81:01", false);
+        assert_eq!(bonus.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn covered_prior_bonus_nonzero_when_active_het() {
+        // Distinct present frequencies => a nonzero weighted HWE bonus equal to
+        // w * (ln2 + ln f_j + ln f_k).
+        let mut g = Genotyper::new();
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.6\t60\nA*02:01\t0.4\t40\n"));
+        // Σ = 100, |L| = 2, denom = 100 + 1.0 = 101.
+        let f_j: f64 = (60.0 + 0.5) / 101.0;
+        let f_k: f64 = (40.0 + 0.5) / 101.0;
+        let expected = 2.0 * (std::f64::consts::LN_2 + f_j.ln() + f_k.ln());
+        let bonus = g.covered_prior_bonus("A*01:01", "A*02:01", false);
+        assert!((bonus - expected).abs() < 1e-12, "bonus={bonus} expected={expected}");
+    }
+
+    #[test]
+    fn prior_active_for_gene_false_on_empty_and_absent_and_equal() {
+        // No table => inactive.
+        let mut g = Genotyper::new();
+        assert!(!g.prior_active_for_gene(&["A*01:01", "A*02:01"]));
+
+        // Table present, but locus absent for a candidate => inactive.
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.6\t60\nA*02:01\t0.4\t40\n"));
+        assert!(!g.prior_active_for_gene(&["A*01:01", "DRB1*03:01"]));
+
+        // All candidates map to the same effective frequency (both absent =>
+        // same floor) => no distinct f => inactive.
+        assert!(!g.prior_active_for_gene(&["A*80:01", "A*81:01"]));
+
+        // w = 0 forces inactive even with distinct present frequencies.
+        g.set_allele_freq_weight(0.0);
+        assert!(!g.prior_active_for_gene(&["A*01:01", "A*02:01"]));
+    }
+
+    #[test]
+    fn prior_active_for_gene_true_when_two_distinct_present_frequencies() {
+        let mut g = Genotyper::new();
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.6\t60\nA*02:01\t0.4\t40\n"));
+        assert!(g.prior_active_for_gene(&["A*01:01", "A*02:01"]));
+    }
+
+    // --- #29 Path-A haplotype-pair-search prior injection + hom candidate ---
+
+    /// Builds a single-gene [`Genotyper`] whose haplotype pair search has
+    /// `ranks.len()` allele types, one allele per rank in its own equivalence
+    /// class. `ranks[r] = (series_name, abundance, read_indices)`: the allele at
+    /// rank `r` maps to `series_name` (registered in `major_allele_idx_to_name`
+    /// at index `r`), has the given `abundance` and `missing_coverage = 0`, and
+    /// covers each read index in `read_indices` (every read is optimal with
+    /// `qual = 1.0` and `adjust_weight = 1.0`). `selected_alleles[0]` is
+    /// initialized in rank order `(allele_idx = r, rank = r)`.
+    ///
+    /// Missing-coverage adjustment is avoided for `ranks.len() == 3` (the block
+    /// keys off `allele_type_cnt > 3` or `missing_coverage >= 10`), so
+    /// `covered_read_cnt` is exactly the sum of `adjust_weight` over the
+    /// distinct reads covered by the pair -- one weighted read per read index.
+    fn build_pair_search_genotyper(ranks: &[(&str, f64, &[i32])]) -> Genotyper {
+        let mut g = Genotyper::new();
+        g.gene_cnt = 1;
+        let allele_cnt = ranks.len();
+        g.allele_cnt = i32::try_from(allele_cnt).unwrap();
+        g.major_allele_cnt = g.allele_cnt;
+        g.read_length = 150;
+
+        // Total read count = max read index + 1.
+        let total_reads = ranks
+            .iter()
+            .flat_map(|(_, _, reads)| reads.iter().copied())
+            .max()
+            .map_or(0, |m| usize::try_from(m).unwrap() + 1);
+
+        // One `ReadAssignment` slot per read: allele_idx is filled per rank
+        // below, all optimal (qual 1.0), unit adjust weight.
+        g.read_assignments = vec![Vec::new(); total_reads];
+        g.reads_in_allele = vec![Vec::new(); allele_cnt];
+        g.allele_info = Vec::with_capacity(allele_cnt);
+        g.major_allele_idx_to_name = Vec::with_capacity(allele_cnt);
+        let mut selected: Vec<(i32, i32)> = Vec::with_capacity(allele_cnt);
+
+        for (r, (series, abundance, reads)) in ranks.iter().enumerate() {
+            let allele_idx = i32::try_from(r).unwrap();
+            g.major_allele_idx_to_name.push((*series).to_string());
+            g.allele_info.push(AlleleInfo {
+                major_allele_idx: allele_idx,
+                gene_idx: 0,
+                equivalent_class: allele_idx, // each rank in its own EC
+                abundance: *abundance,
+                missing_coverage: 0,
+                ..AlleleInfo::default()
+            });
+            for &read_idx in *reads {
+                let read_usize = usize::try_from(read_idx).unwrap();
+                let within_idx = i32::try_from(g.read_assignments[read_usize].len()).unwrap();
+                g.read_assignments[read_usize].push(ReadAssignment {
+                    allele_idx,
+                    start: 0,
+                    end: 0,
+                    weight: 1.0,
+                    qual: 1.0,
+                    adjust_weight: 1.0,
+                });
+                g.reads_in_allele[r].push((read_idx, within_idx));
+            }
+            selected.push((allele_idx, i32::try_from(r).unwrap()));
+        }
+        g.selected_alleles = vec![selected];
+        g
+    }
+
+    /// Runs the haplotype pair search on the fixture and returns the winning
+    /// pair as the pair of major-allele *series* at ranks 0 and 1 afterwards.
+    fn run_pair_search(g: &mut Genotyper) -> (String, String) {
+        let total_reads = g.read_assignments.len();
+        let mut read_covered = vec![false; total_reads];
+        g.select_alleles_for_genes_haplotype_search(&mut read_covered, &|_idx| 0);
+        // Resolve ranks 0 and 1 to their major-allele series.
+        let series_at = |want_rank: i32| -> String {
+            for &(allele_idx, rank) in &g.selected_alleles[0] {
+                if rank == want_rank {
+                    let ai = usize::try_from(allele_idx).unwrap();
+                    let major = usize::try_from(g.allele_info[ai].major_allele_idx).unwrap();
+                    return g.major_allele_idx_to_name[major].clone();
+                }
+            }
+            String::new()
+        };
+        (series_at(0), series_at(1))
+    }
+
+    /// (a) Exact coverage tie between two het pairs -> the higher-HWE pair wins
+    /// when the prior is active. Ranks: 0 covers reads {0,1,2}; 1 covers {10};
+    /// 2 covers {11}. Pairs (0,1) and (0,2) each cover 4 distinct reads (tie).
+    /// Abundances of ranks 1 and 2 are equal, so the abundance-product tiebreak
+    /// is also a tie -> without the prior (0,1) wins (first enumerated). With
+    /// the prior favoring rank 2's series (higher frequency), (0,2) wins.
+    #[test]
+    fn path_a_exact_tie_higher_hwe_pair_wins_when_active() {
+        // rank 0 = A*01:01 (common), rank 1 = A*03:01 (rare), rank 2 = A*02:01
+        // (common). Prior should tip the tie from (0,1) to (0,2).
+        let ranks: [(&str, f64, &[i32]); 3] =
+            [("A*01:01", 5.0, &[0, 1, 2]), ("A*03:01", 1.0, &[10]), ("A*02:01", 1.0, &[11])];
+
+        // Flag-off baseline: (0,1) wins the tie (first enumerated).
+        let mut g_off = build_pair_search_genotyper(&ranks);
+        let (r0, r1) = run_pair_search(&mut g_off);
+        assert_eq!((r0.as_str(), r1.as_str()), ("A*01:01", "A*03:01"));
+
+        // Prior active, A*02:01 far more frequent than A*03:01 -> (0,2) wins.
+        let mut g_on = build_pair_search_genotyper(&ranks);
+        g_on.set_allele_freq(freq_table_from_rows(
+            "A*01:01\t0.5\t500\nA*02:01\t0.45\t450\nA*03:01\t0.005\t5\n",
+        ));
+        let (r0, r1) = run_pair_search(&mut g_on);
+        assert_eq!(
+            (r0.as_str(), r1.as_str()),
+            ("A*01:01", "A*02:01"),
+            "prior should tip the exact tie to the higher-frequency second allele"
+        );
+    }
+
+    /// Regression (#29 hom candidate): when the `(0, 0)` HOMOZYGOUS candidate
+    /// wins the argmax, the gene must collapse to a genuine 1-type homozygous
+    /// call -- not leave rank-1 in place (which kept the gene multi-typed, made
+    /// `best_type != (0, 1)` re-fire `updated_gene_cnt` every pass, and spun the
+    /// loop to `ITER_MAX`). rank 0 is a common series with 5 reads; rank 1 a
+    /// very rare series adding 1 read; rank 2 a moderate series adding 1 read.
+    /// The hom bonus `2·w·ln f_0` beats the single-read coverage gain of any
+    /// het, so `(0, 0)` wins and the gene must become exactly 1-type.
+    #[test]
+    fn path_a_hom_winner_collapses_gene_to_one_type() {
+        let ranks: [(&str, f64, &[i32]); 3] =
+            [("A*01:01", 9.0, &[0, 1, 2, 3, 4]), ("A*03:01", 1.0, &[5]), ("A*02:01", 1.0, &[6])];
+        let mut g = build_pair_search_genotyper(&ranks);
+        g.set_allele_freq(freq_table_from_rows(
+            "A*01:01\t0.9\t900\nA*03:01\t0.001\t1\nA*02:01\t0.05\t50\n",
+        ));
+        let (r0, r1) = run_pair_search(&mut g);
+        assert_eq!(
+            g.get_gene_allele_types(0),
+            1,
+            "a homozygous winner must collapse the gene to exactly 1 allele type"
+        );
+        assert_eq!(r0, "A*01:01", "the homozygous call is the common rank-0 series");
+        assert_eq!(r1, "", "no rank-1 allele survives a homozygous collapse");
+    }
+
+    /// (b) Coverage margin greater than the prior span -> the prior cannot
+    /// override the higher-coverage pair. Rank 1 covers many more reads than
+    /// rank 2, so (0,1) wins on coverage by a margin far exceeding
+    /// `w * |Δ ln P_HWE|`, regardless of frequencies favoring rank 2.
+    #[test]
+    fn path_a_coverage_margin_above_span_no_override() {
+        let rank1_reads: Vec<i32> = (10..40).collect(); // 30 reads
+        let ranks: [(&str, f64, &[i32]); 3] = [
+            ("A*01:01", 5.0, &[0, 1, 2]),
+            ("A*03:01", 1.0, &rank1_reads), // rare but high coverage
+            ("A*02:01", 1.0, &[100]),       // common but 1 read
+        ];
+        let mut g = build_pair_search_genotyper(&ranks);
+        g.set_allele_freq(freq_table_from_rows(
+            "A*01:01\t0.5\t500\nA*02:01\t0.45\t450\nA*03:01\t0.005\t5\n",
+        ));
+        let (r0, r1) = run_pair_search(&mut g);
+        assert_eq!(
+            (r0.as_str(), r1.as_str()),
+            ("A*01:01", "A*03:01"),
+            "a coverage margin above the prior span must not be overridden"
+        );
+    }
+
+    /// (c) Coverage -> infinity: scaling every candidate's read count by a large
+    /// factor makes the coverage margin dwarf the O(1) HWE span, so the prior
+    /// influence vanishes and the higher-coverage pair wins -- the same call the
+    /// clear-margin case makes. This mirrors (b) at 1000x scale, demonstrating
+    /// the coverage-vanishing property directly.
+    #[test]
+    fn path_a_coverage_to_infinity_prior_vanishes() {
+        // rank 1 has a modest but decisive coverage lead over rank 2; scale it
+        // so the margin is enormous. Even a maximal frequency gap (w * span is a
+        // handful of nats) cannot flip it.
+        let rank1_reads: Vec<i32> = (1000..3000).collect(); // 2000 reads
+        let ranks: [(&str, f64, &[i32]); 3] = [
+            ("A*01:01", 5.0, &[0, 1, 2]),
+            ("A*03:01", 1.0, &rank1_reads),
+            ("A*02:01", 1.0, &[5000]),
+        ];
+        let mut g = build_pair_search_genotyper(&ranks);
+        // Extreme frequency gap: A*02:01 common, A*03:01 at the Jeffreys floor.
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.5\t5000\nA*02:01\t0.5\t5000\n"));
+        // (A*03:01 absent -> floor; but locus present so prior is active for the
+        // A*01:01/A*02:01 distinction.) The huge coverage margin still wins.
+        let (r0, r1) = run_pair_search(&mut g);
+        assert_eq!(
+            (r0.as_str(), r1.as_str()),
+            ("A*01:01", "A*03:01"),
+            "as coverage grows the O(1) prior term cannot flip the call"
+        );
+    }
+
+    /// (d) Candidate-set invariant: with the gene inactive (empty table), the
+    /// `k == j` hom candidate is NOT enumerated and both the enumeration count
+    /// and the winning pair equal the flag-off run. Guards the
+    /// abundance-product-tiebreak hole (a phantom `(A,A)` candidate could beat
+    /// the het on the tiebreak even though the bonus is literal `0.0`).
+    #[test]
+    fn path_a_candidate_set_invariant_when_inactive() {
+        // A true-homozygote shape: rank 0 dominates, ranks 1 and 2 add no new
+        // reads (their reads are already covered by rank 0). If the hom (0,0)
+        // candidate were enumerated on the inactive path it would tie (0,1) on
+        // coverage and WIN the abundance-product tiebreak (5*5 > 5*1), changing
+        // the call. Gating enumeration on `prior_active_for_gene` prevents that.
+        let ranks: [(&str, f64, &[i32]); 3] =
+            [("A*01:01", 5.0, &[0, 1, 2]), ("A*02:01", 1.0, &[0]), ("A*03:01", 1.0, &[1])];
+
+        // Flag-off run.
+        let mut g_off = build_pair_search_genotyper(&ranks);
+        let (off_r0, off_r1) = run_pair_search(&mut g_off);
+        let off_count = g_off.haplotype_pair_enumeration_count;
+
+        // Flag present but the table is EMPTY -> inactive gene.
+        let mut g_empty = build_pair_search_genotyper(&ranks);
+        g_empty.set_allele_freq(AlleleFreqTable::default());
+        let (e_r0, e_r1) = run_pair_search(&mut g_empty);
+        let empty_count = g_empty.haplotype_pair_enumeration_count;
+
+        assert_eq!(
+            empty_count, off_count,
+            "an inactive gene must enumerate the same candidate pairs as flag-off \
+             (no k==j hom candidate)"
+        );
+        assert_eq!(
+            (e_r0.as_str(), e_r1.as_str()),
+            (off_r0.as_str(), off_r1.as_str()),
+            "an inactive gene's winning pair must be byte-identical to flag-off"
+        );
+        // Sanity: the inactive path enumerates only the het pairs
+        // (0,1),(0,2),(1,2) for a 3-type gene -> exactly 3.
+        assert_eq!(off_count, 3, "3-type gene should enumerate 3 het pairs on the inactive path");
+    }
+
+    // --- #29 Path-B span-gated hom-vs-het reconciliation ---
+
+    /// True iff the single gene of `g` is heterozygous after reconciliation
+    /// (i.e. still has a rank-1 allele). A homozygous call removes the rank-1
+    /// entry, leaving a genuine 1-type gene.
+    fn is_heterozygous(g: &Genotyper) -> bool {
+        g.selected_alleles[0].iter().any(|&(_, rank)| rank == 1)
+    }
+
+    /// (a) Path-B `w = 0` reproduces the greedy call exactly. A 2-type gene whose
+    /// prior would otherwise favor the hom is left heterozygous when `w = 0` (the
+    /// span is 0, so nothing is ever overridden). Compared against the flag-off
+    /// run: byte-identical selected-allele state.
+    #[test]
+    fn path_b_w_zero_reproduces_greedy() {
+        // rank 0 = A*01:01 (common), rank 1 = A*03:01 (rare). f_B < f_A/2 so the
+        // prior would favor the hom; delta_cov = 1 read (tiny), within any w > 0
+        // span -- but at w = 0 the span is 0 and the het stands.
+        let ranks: [(&str, f64, &[i32]); 2] =
+            [("A*01:01", 5.0, &[0, 1, 2]), ("A*03:01", 1.0, &[10])];
+
+        // Flag-off baseline: het (rank-1 present).
+        let mut g_off = build_pair_search_genotyper(&ranks);
+        g_off.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(is_heterozygous(&g_off), "flag-off 2-type gene stays het");
+        let off_state = g_off.selected_alleles[0].clone();
+
+        // Table present but w = 0 -> prior inactive -> byte-identical to flag-off.
+        let mut g_w0 = build_pair_search_genotyper(&ranks);
+        g_w0.set_allele_freq(freq_table_from_rows("A*01:01\t0.5\t900\nA*03:01\t0.005\t5\n"));
+        g_w0.set_allele_freq_weight(0.0);
+        g_w0.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(is_heterozygous(&g_w0), "w=0 must never override the greedy zygosity");
+        assert_eq!(g_w0.selected_alleles[0], off_state, "w=0 reproduces the greedy state exactly");
+    }
+
+    /// (b) Single-observed-allele locus -> hom forced, het branch never entered.
+    /// A 1-type gene has no rank-1 allele, so reconciliation cannot manufacture a
+    /// het even with an active, het-favoring prior; the hom call stands.
+    #[test]
+    fn path_b_single_observed_allele_hom_forced() {
+        let ranks: [(&str, f64, &[i32]); 1] = [("A*01:01", 5.0, &[0, 1, 2])];
+        let mut g = build_pair_search_genotyper(&ranks);
+        // Two common alleles present -> a het WOULD have higher HWE, but there is
+        // no second allele to promote.
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.5\t500\nA*02:01\t0.5\t500\n"));
+        assert_eq!(g.get_gene_allele_types(0), 1, "fixture is a 1-type (hom) gene");
+        g.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert_eq!(g.get_gene_allele_types(0), 1, "hom is forced; the het branch is never entered");
+        assert!(!is_heterozygous(&g), "no rank-1 allele can be manufactured");
+    }
+
+    /// (c1) Adversarial hom-vs-het ABOVE the span -> the prior does NOT override.
+    /// The greedy het's coverage advantage (rank 1 covers many reads) exceeds the
+    /// prior span `w * |Δ ln P_HWE|`, so even a hom-favoring frequency table
+    /// leaves the het call intact.
+    #[test]
+    fn path_b_adversarial_above_span_no_override() {
+        // rank 1 (rare A*03:01) covers 30 reads -> delta_cov = 30 >> span.
+        let rank1_reads: Vec<i32> = (10..40).collect();
+        let ranks: [(&str, f64, &[i32]); 2] =
+            [("A*01:01", 5.0, &[0, 1, 2]), ("A*03:01", 1.0, &rank1_reads)];
+        let mut g = build_pair_search_genotyper(&ranks);
+        // f_B rare (floor) << f_A/2 -> prior favors hom, but |Δ ln P_HWE| is a few
+        // nats; w=2 => span ~ a handful of reads, far below delta_cov = 30.
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.5\t9000\nA*03:01\t0.001\t1\n"));
+        g.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(
+            is_heterozygous(&g),
+            "a coverage margin above the prior span must not be overridden to hom"
+        );
+    }
+
+    /// (c2) Within-span near-tie -> the prior DOES tip the zygosity to the
+    /// higher-HWE call. The het's coverage advantage is a single read (delta_cov =
+    /// 1), within the span of a hom-favoring frequency table, so reconciliation
+    /// overturns the greedy het to a hom call.
+    #[test]
+    fn path_b_within_span_prior_tips_to_hom() {
+        // rank 1 (rare) covers exactly ONE read -> delta_cov = 1.
+        let ranks: [(&str, f64, &[i32]); 2] =
+            [("A*01:01", 5.0, &[0, 1, 2]), ("A*03:01", 1.0, &[10])];
+        let mut g = build_pair_search_genotyper(&ranks);
+        assert!(is_heterozygous(&g), "fixture starts as a greedy het");
+        // f_A common, f_B at the Jeffreys floor: f_B << f_A/2, so the prior
+        // strongly favors the hom; |Δ ln P_HWE| is large, span >> delta_cov = 1.
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.5\t9000\nA*03:01\t0.001\t1\n"));
+        g.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(!is_heterozygous(&g), "within-span, a hom-favoring prior tips the call to hom");
+        assert_eq!(g.get_gene_allele_types(0), 1, "the reconciled gene is a genuine 1-type hom");
+    }
+
+    /// The prior never manufactures a het against a clean hom: when the prior
+    /// favors the het (two commons) but the greedy call is a 1-type hom, there is
+    /// still no second allele to promote, so the hom stands.
+    #[test]
+    fn path_b_prior_never_manufactures_het_on_one_type_gene() {
+        let ranks: [(&str, f64, &[i32]); 1] = [("A*01:01", 5.0, &[0, 1, 2])];
+        let mut g = build_pair_search_genotyper(&ranks);
+        g.set_allele_freq(freq_table_from_rows("A*01:01\t0.4\t400\nA*02:01\t0.4\t400\n"));
+        g.reconcile_zygosity_with_prior(&|_idx| 0);
+        assert!(!is_heterozygous(&g), "a het-favoring prior cannot create a rank-1 allele");
     }
 }
