@@ -38,6 +38,19 @@ pub enum InputSpec {
 /// [`read_magic_prefix`] buffers up to this many bytes before classifying.
 const MAGIC_PREFIX_LEN: usize = 4;
 
+/// The result of opening an input for extraction: either a ready FASTQ/FASTA
+/// reader, or a marker that the input is a BAM/CRAM (which the caller routes
+/// to htslib by its original path/stdin -- we never hand a peeked Rust stream
+/// to htslib; see the stdin routing note in the design doc).
+pub enum OpenedInput {
+    /// FASTQ/FASTA: a reader positioned at the first record.
+    Fastq(FastqReader),
+    /// BAM (`BAM\1` magic) -- route the original input to the BAM extractor.
+    Bam,
+    /// CRAM (`CRAM` magic) -- route the original input to the BAM extractor.
+    Cram,
+}
+
 /// Classifies an input from its leading bytes (`prefix`, up to
 /// [`MAGIC_PREFIX_LEN`] bytes as produced by [`read_magic_prefix`]).
 ///
@@ -71,7 +84,7 @@ pub fn detect_format(prefix: &[u8]) -> Result<DetectedFormat> {
 /// BAM/CRAM can deliver 1-3 bytes on the first read), so the magic must not be
 /// matched until the full 4-byte prefix is in hand -- otherwise a short first
 /// read misclassifies BAM/CRAM as unrecognized. These bytes are consumed from
-/// `reader`; [`open_fastq_reader`] chains them back in front of the remainder
+/// `reader`; [`open_input`] chains them back in front of the remainder
 /// so no input is lost.
 ///
 /// # Errors
@@ -91,10 +104,9 @@ fn read_magic_prefix(reader: &mut impl Read) -> Result<Vec<u8>> {
     Ok(prefix)
 }
 
-/// Opens `spec`, transparently decompressing via niffler, and detects the
-/// format. Returns a [`FastqReader`] positioned at the first byte plus the
-/// detected format. Errors if the detected format is BAM/CRAM (handled by
-/// the alignment path in Stage 2, not here).
+/// Opens `spec`, transparently decompresses (niffler), detects the format,
+/// and returns a FASTQ reader or a BAM/CRAM marker. Never errors on BAM/CRAM
+/// -- that routing is the caller's decision (`--bam-mode`).
 ///
 /// Streams strictly shorter than 5 bytes (including empty input) can never
 /// be gzip, so niffler cannot sniff them and returns
@@ -120,9 +132,9 @@ fn read_magic_prefix(reader: &mut impl Read) -> Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// Returns an error if the path cannot be opened, compression detection
-/// fails, the format is unrecognized, or the format is BAM/CRAM.
-pub fn open_fastq_reader(spec: &InputSpec) -> Result<(FastqReader, DetectedFormat)> {
+/// Returns an error if the input cannot be opened, compression detection
+/// fails, or the format is unrecognized.
+pub fn open_input(spec: &InputSpec) -> Result<(OpenedInput, DetectedFormat)> {
     let (label, decoded): (String, Box<dyn std::io::Read>) = match spec {
         InputSpec::Path(p) => {
             let label = p.display().to_string();
@@ -157,14 +169,33 @@ pub fn open_fastq_reader(spec: &InputSpec) -> Result<(FastqReader, DetectedForma
     let mut decoded = decoded;
     let prefix = read_magic_prefix(&mut decoded)?;
     let fmt = detect_format(&prefix)?;
-    match fmt {
+    let opened = match fmt {
         DetectedFormat::Fastq | DetectedFormat::Fasta => {
             let rejoined = std::io::BufReader::new(std::io::Cursor::new(prefix).chain(decoded));
-            Ok((FastqReader::from_bufread(label, Box::new(rejoined)), fmt))
+            OpenedInput::Fastq(FastqReader::from_bufread(label, Box::new(rejoined)))
         }
-        DetectedFormat::Bam | DetectedFormat::Cram => bail!(
-            "{label} is a {fmt:?} file; BAM/CRAM input requires --bam-mode (available in a \
-             later release), not the FASTQ path"
+        DetectedFormat::Bam => OpenedInput::Bam,
+        DetectedFormat::Cram => OpenedInput::Cram,
+    };
+    Ok((opened, fmt))
+}
+
+/// Opens `spec` as FASTQ/FASTA, erroring if it is BAM/CRAM (which needs
+/// `--bam-mode`). Preserved for the pure-FASTQ callers/tests from Stage 1.
+///
+/// # Errors
+///
+/// As [`open_input`], plus an error if the detected format is BAM/CRAM.
+pub fn open_fastq_reader(spec: &InputSpec) -> Result<(FastqReader, DetectedFormat)> {
+    let label = match spec {
+        InputSpec::Path(p) => p.display().to_string(),
+        InputSpec::Stdin => "<stdin>".to_string(),
+    };
+    let (opened, fmt) = open_input(spec)?;
+    match opened {
+        OpenedInput::Fastq(reader) => Ok((reader, fmt)),
+        OpenedInput::Bam | OpenedInput::Cram => bail!(
+            "{label} is a {fmt:?} file; BAM/CRAM input requires --bam-mode, not the FASTQ path"
         ),
     }
 }
@@ -324,5 +355,44 @@ mod tests {
     fn open_fastq_reader_errors_on_a_missing_path() {
         let missing = std::path::PathBuf::from("/nonexistent/path/does-not-exist.fastq");
         assert!(open_fastq_reader(&InputSpec::Path(missing)).is_err());
+    }
+
+    #[test]
+    fn open_input_returns_fastq_reader_for_fastq() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("r.fq");
+        std::fs::write(&p, b"@r1\nACGT\n+\nIIII\n").unwrap();
+        let (opened, fmt) = open_input(&InputSpec::Path(p)).unwrap();
+        assert_eq!(fmt, DetectedFormat::Fastq);
+        let OpenedInput::Fastq(mut reader) = opened else { panic!("expected Fastq") };
+        assert_eq!(reader.next_record().unwrap().unwrap().id, "r1");
+    }
+
+    #[test]
+    fn open_input_marks_bam_and_cram_without_erroring() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let bam = dir.path().join("x.bam");
+        std::fs::write(&bam, b"BAM\x01rest-of-header-bytes").unwrap();
+        let (opened, fmt) = open_input(&InputSpec::Path(bam)).unwrap();
+        assert_eq!(fmt, DetectedFormat::Bam);
+        assert!(matches!(opened, OpenedInput::Bam));
+
+        let cram = dir.path().join("x.cram");
+        std::fs::write(&cram, b"CRAM\x03rest").unwrap();
+        let (opened, fmt) = open_input(&InputSpec::Path(cram)).unwrap();
+        assert_eq!(fmt, DetectedFormat::Cram);
+        assert!(matches!(opened, OpenedInput::Cram));
+    }
+
+    #[test]
+    fn open_fastq_reader_still_errors_on_bam_pointing_at_bam_mode() {
+        // The existing contract must be preserved (Stage 1 tests already cover
+        // the message; this re-asserts it after the open_input refactor).
+        let dir = tempfile::tempdir().unwrap();
+        let bam = dir.path().join("x.bam");
+        std::fs::write(&bam, b"BAM\x01rest").unwrap();
+        let err = open_fastq_reader_err_message(&InputSpec::Path(bam));
+        assert!(err.contains("--bam-mode"), "message should still point at --bam-mode: {err}");
     }
 }
