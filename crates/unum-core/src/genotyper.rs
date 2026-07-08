@@ -747,11 +747,14 @@ pub fn extend_overlap(
         );
     extended.relaxed_match_cnt = extended.match_cnt;
 
-    // `ret` (SeqSet.hpp:2074-2075): decided from the PRE-clip-adjustment
-    // similarity and never revisited, even though `extendedOverlap.similarity`
-    // itself IS mutated below when a clip is present -- ported verbatim
-    // (not a bug in this port; matches stock exactly).
-    let passed = extended.similarity >= ref_seq_similarity;
+    // DIVERGENCE from T1K (see docs/DIVERGENCES.md): T1K decides `ret`
+    // (`SeqSet.hpp:2074-2075`) from the PRE-clip-adjustment similarity and never
+    // revisits it, even though it mutates `extendedOverlap.similarity` below
+    // when a clip is present. The clip adjustment credits the clipped bases as
+    // matches (adding `2*clip` to both numerator and denominator, which raises
+    // similarity), so the corrected value is the one the threshold should test.
+    // `unum` recomputes `passed` from the post-clip similarity.
+    let mut passed = extended.similarity >= ref_seq_similarity;
 
     if left_clip > 0 || right_clip > 0 {
         extended.match_cnt += 2 * left_clip + 2 * right_clip;
@@ -762,6 +765,7 @@ pub fn extend_overlap(
                     + 2 * left_clip
                     + 2 * right_clip,
             );
+        passed = extended.similarity >= ref_seq_similarity;
     }
 
     passed.then_some(extended)
@@ -5379,6 +5383,32 @@ mod tests {
         let extended =
             extend_overlap(read, consensus, &core, 0.99, &mut crate::align_algo::DpCache::new());
         assert!(extended.is_none() || extended.unwrap().similarity < 0.99);
+    }
+
+    #[test]
+    fn extend_overlap_clip_raises_similarity_past_threshold() {
+        // DIVERGENCE from T1K (see docs/DIVERGENCES.md): the pass/fail decision
+        // must use the CLIP-ADJUSTED similarity, not the pre-clip value.
+        //
+        // The read has 5 bases hanging off the 5' end of the consensus (a clip
+        // of 5). The core covers the 11 shared bases with a partially-mismatched
+        // match_cnt of 16, so:
+        //   pre-clip  similarity = 16 / (11 + 11)          = 0.727  (< 0.8)
+        //   post-clip similarity = (16 + 2*5) / (22 + 2*5) = 0.8125 (>= 0.8)
+        // T1K decides `passed` from 0.727 and rejects the overlap; `unum`
+        // recomputes after the clip adjustment and accepts it.
+        let consensus = b"AAAACGTACGT"; // 11 bases
+        let read = b"GGGGGAAAACGTACGT"; // 5 clipped 'G' + the 11 shared bases
+        let mut core = simple_overlap(0, 5, 15, 0, 10, 1);
+        core.match_cnt = 16; // partially-mismatched core (16 of 22)
+
+        let extended =
+            extend_overlap(read, consensus, &core, 0.8, &mut crate::align_algo::DpCache::new());
+        assert!(
+            extended.is_some(),
+            "clip-adjusted similarity (~0.81) clears the 0.8 threshold; overlap must be accepted"
+        );
+        assert!(extended.unwrap().similarity >= 0.8);
     }
 
     // --- assign_read ---
