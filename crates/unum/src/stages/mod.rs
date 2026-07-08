@@ -15,17 +15,16 @@
 //! (genotype -> analyze in-memory hand-off is a deliberate follow-up, out of
 //! scope here).
 //!
-//! # Scope: FASTQ paired/single-end, and BAM/CRAM (no-alignment + coordinate alignment)
+//! # Scope: FASTQ paired/single-end, and BAM/CRAM (no-alignment + alignment)
 //!
 //! `-1`/`-2` (paired) and `-u` (single-end) FASTQ input are supported via [`run`]'s
 //! original in-memory extract -> genotype fusion. `-b` (BAM/CRAM) input is ALSO fused
 //! in-memory, via [`run_bam_fused`]: `--bam-mode no-alignment` (coordinate/unsorted 2-pass
 //! or grouped/name-sorted one-pass, matching `extract::run_bam_no_alignment`'s routing)
-//! and `--bam-mode alignment` on a COORDINATE-sorted BAM/CRAM are both wired through
+//! and `--bam-mode alignment` (coordinate-sorted 2-pass or grouped/name-sorted one-pass,
+//! matching `extract::run_bam_alignment`'s routing) are both wired through
 //! [`unum_core::bam_extract`] into an [`unum_core::extract::InMemoryCandidateSink`], same
-//! as the FASTQ path. `--bam-mode alignment` on a grouped/name-sorted BAM/CRAM is NOT yet
-//! supported here (the grouped-alignment extractor doesn't exist yet) and errors with a
-//! clear message. `-r` is accepted (and required for CRAM); for BAM it is accepted and
+//! as the FASTQ path. `-r` is accepted (and required for CRAM); for BAM it is accepted and
 //! ignored, matching `extract`'s own CRAM handling. Unlike the FASTQ path, `has_mate` for
 //! BAM/CRAM input is derived from the extractor's own [`unum_core::bam_extract::BamExtractMetrics::single_end`]
 //! (there is no `-2` flag for BAM). `-o` remains required for both input kinds -- no T1K
@@ -188,9 +187,10 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
 /// - `alignment` on a coordinate-sorted file: [`bam_extract::extract_from_bam_with_threads`],
 ///   fed gene intervals resolved from `-c` via [`bam_extract::parse_coord_fa`]/
 ///   [`bam_extract::build_genes`].
-/// - `alignment` on a grouped/name-sorted file: NOT YET SUPPORTED -- the grouped-alignment
-///   one-pass extractor does not exist yet (a later task); errors with a clear message
-///   pointing at `samtools sort` as the workaround.
+/// - `alignment` on a grouped/name-sorted file: [`bam_extract::extract_from_bam_alignment_grouped`],
+///   fed the SAME gene intervals plus a factory that always returns a fresh
+///   [`InMemoryCandidateSink`] (`run`'s `-b` is always a file/path -- there is no `-i -`
+///   stdin route into `run`, so this is always called with `seekable = true`).
 /// - `alignment` on an unsorted file: rejected (mirrors `extract::run_bam_alignment`).
 ///
 /// Unlike the FASTQ branch, `has_mate` is derived from the extractor's own
@@ -201,10 +201,9 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
 ///
 /// Returns an error if: `--bam-mode` is not given; the input cannot be content-sniffed/opened
 /// (including a missing `-r` for CRAM, or a mistaken FASTQ/FASTA `-b`); `--bam-mode alignment`
-/// is given a grouped/name-sorted or unsorted BAM/CRAM; `--bam-mode alignment` is given without
-/// `-c`; `--bam-mode no-alignment` is given `-c` (rejected -- see
-/// [`run_bam_no_alignment_fused`]); or the underlying extraction/genotyping/analysis itself
-/// fails.
+/// is given an unsorted BAM/CRAM; `--bam-mode alignment` is given without `-c`; `--bam-mode
+/// no-alignment` is given `-c` (rejected -- see [`run_bam_no_alignment_fused`]); or the
+/// underlying extraction/genotyping/analysis itself fails.
 fn run_bam_fused(args: &RunArgs, prefix: &str, bam: &str) -> anyhow::Result<()> {
     use unum_core::read_input::{InputSpec, OpenedInput, open_input};
 
@@ -320,17 +319,16 @@ fn run_bam_no_alignment_fused(
 
 /// `run_bam_fused`'s `--bam-mode alignment` route: parses `-c` as a coordinate FASTA (gene
 /// intervals + k-mer seed reference, same as `extract::run_coordinate_alignment`), then routes
-/// on `alignments`' `@HD` sort order -- coordinate-sorted takes
-/// [`bam_extract::extract_from_bam_with_threads`]; grouped/name-sorted is not yet supported
-/// here (the grouped-alignment one-pass extractor is a later task) and errors with a
-/// `samtools sort` workaround hint; unsorted is rejected outright, mirroring
-/// `extract::run_bam_alignment`.
+/// on `alignments`' `@HD` sort order, mirroring `extract::run_bam_alignment`'s dispatch --
+/// coordinate-sorted takes [`bam_extract::extract_from_bam_with_threads`]; grouped/name-sorted
+/// takes [`bam_extract::extract_from_bam_alignment_grouped`] with `seekable = true` (`run`'s
+/// `-b` is always a file/path, never stdin -- there is no `-i -` route into `run`); unsorted is
+/// rejected outright, mirroring `extract::run_bam_alignment`.
 ///
 /// # Errors
 ///
 /// Returns an error if `-c` is missing or cannot be opened/parsed, the BAM/CRAM cannot be
-/// opened, `alignments` is grouped/name-sorted or unsorted, or the underlying extraction
-/// itself fails.
+/// opened, `alignments` is unsorted, or the underlying extraction itself fails.
 fn run_bam_alignment_fused(
     args: &RunArgs,
     bam: &str,
@@ -350,11 +348,11 @@ fn run_bam_alignment_fused(
             .with_context(|| format!("loading coord FASTA sequences {coord}"))?;
     let mut alignments = Alignments::open_with_reference(bam, reference)
         .with_context(|| format!("opening BAM/CRAM {bam}"))?;
+    let genes = bam_extract::build_genes(&alignments, &coord_records)
+        .context("resolving coord FASTA chroms to BAM header chrIds")?;
 
     match alignments.sort_order() {
         SortOrder::Coordinate => {
-            let genes = bam_extract::build_genes(&alignments, &coord_records)
-                .context("resolving coord FASTA chroms to BAM header chrIds")?;
             let mut sink = InMemoryCandidateSink::new();
             let metrics = bam_extract::extract_from_bam_with_threads(
                 &mut alignments,
@@ -369,11 +367,21 @@ fn run_bam_alignment_fused(
             report_bam_extract_metrics(metrics.single_end, &metrics);
             Ok((metrics.single_end, sink))
         }
-        SortOrder::QueryName | SortOrder::QueryGrouped => bail!(
-            "run -b --bam-mode alignment on a grouped/name-sorted BAM lands in a later task \
-             (grouped-alignment); coordinate-sort the BAM (samtools sort) to use the current \
-             alignment path"
-        ),
+        SortOrder::QueryName | SortOrder::QueryGrouped => {
+            let (metrics, single_end, sink) = bam_extract::extract_from_bam_alignment_grouped(
+                &mut alignments,
+                &mut filter,
+                &genes,
+                RUN_BAM_ABNORMAL_UNALIGNED_FLAG,
+                RUN_BAM_MATE_ID_SUFFIX_LEN,
+                threads,
+                true,
+                |_single_end| Ok(InMemoryCandidateSink::new()),
+            )
+            .context("extracting candidate reads from BAM (grouped alignment)")?;
+            report_bam_extract_metrics(single_end, &metrics);
+            Ok((single_end, sink))
+        }
         SortOrder::Unsorted => bail!(
             "run -b --bam-mode alignment requires a coordinate-sorted BAM (@HD SO:coordinate); \
              this input is unsorted/unstated -- run `samtools sort`"

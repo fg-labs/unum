@@ -246,6 +246,23 @@ pub fn build_genes(alignments: &Alignments, records: &[CoordRecord]) -> Result<V
     Ok(genes)
 }
 
+/// Independent per-read gene-interval overlap test for non-coordinate-ordered
+/// input (grouped/name-sorted alignment). Replaces the coordinate path's
+/// monotonic `tag` cursor with a self-contained scan, preserving its EXACT
+/// accept condition: `chr_id == g.chr_id && start <= g.end && end > g.start`.
+/// A plain linear scan (NOT a binary search): `genes` is tiny (HLA/KIR), and
+/// `end` is not monotonic within a chromosome under nested intervals, so a
+/// binary search keyed on `end` would violate its precondition and drop valid
+/// overlaps.
+pub(crate) fn read_overlaps_any_gene(
+    chr_id: i32,
+    start: i32,
+    end: i32,
+    genes: &[GeneInterval],
+) -> bool {
+    genes.iter().any(|g| g.chr_id == chr_id && start <= g.end && end > g.start)
+}
+
 /// `BamExtractor.cpp:118-129`: `chrom` is a "valid alternative chromosome"
 /// (i.e. treated the same as an off-target/alt-contig hit) if its name
 /// contains `_`, `.`, OR `*` anywhere. EXACT reproduction, including the
@@ -1042,6 +1059,560 @@ fn flush_grouped_candidate(
             group.len()
         ),
     }
+}
+
+/// One buffered/live record captured by [`extract_from_bam_alignment_grouped`]'s
+/// group loop -- the ALIGNMENT analogue of [`GroupedRecord`]. Unlike the
+/// no-alignment one, this captures EVERY record of a QNAME group (primary +
+/// secondary + supplementary, no `is_primary()` skip), plus the per-record
+/// alignment STATE ([`scan_pass1_chunk`]'s `Selection::Alignment` branch reads
+/// off each record) needed to reproduce that path's status-conditioned
+/// candidacy without re-reading the BAM: a secondary alignment overlapping a
+/// gene makes the whole template a candidate, so its state must be carried,
+/// even though only the PRIMARY sequences are ever emitted.
+///
+/// The multiple `bool` fields are independent per-record BAM FLAG/alignment
+/// facts (a captured record snapshot), not a hidden state machine -- so
+/// `clippy::struct_excessive_bools` does not apply; folding them into enums
+/// would only obscure their direct correspondence to `scan_pass1_chunk`'s
+/// per-record reads.
+#[allow(clippy::struct_excessive_bools)]
+struct AlignmentGroupedRecord {
+    /// QNAME with `mate_id_len` trimming applied ([`trim_name`]) -- the group
+    /// key, and the id the paired/orphan emits (see [`GroupedRecord::trimmed_name`]).
+    trimmed_name: String,
+    /// Raw, untrimmed QNAME ([`Alignments::read_id`]) -- the id a genuine
+    /// single-end (`0x1`-unset) lone read emits (see [`GroupedRecord::raw_name`]).
+    raw_name: String,
+    seq: Vec<u8>,
+    qual: Vec<u8>,
+    /// `0x40` (READ1) -- orders a 2-primary group's `(mate1, mate2)` emission.
+    is_first_mate: bool,
+    /// `0x1` (paired) -- a lone record's `0x1`-unset (genuine single-end, emit
+    /// untrimmed id) vs `0x1`-set (orphan, emit trimmed id) dispatch, and the
+    /// non-seekable head's `single_end` majority vote.
+    is_paired: bool,
+    /// `!(0x900)` -- only primary records are emitted; secondaries/
+    /// supplementaries contribute to candidacy but never to output.
+    is_primary: bool,
+    /// [`Alignments::is_template_aligned`] -- the first branch key
+    /// (`!template_aligned || chrom_alt`) of `scan_pass1_chunk`.
+    is_template_aligned: bool,
+    /// [`Alignments::is_aligned`] -- distinguishes an unaligned mate of an
+    /// aligned pair (`template_aligned && !is_aligned`, not a candidate
+    /// trigger) from a main-chrom on-target read.
+    is_aligned: bool,
+    /// `is_aligned && valid_alternative_chrom(chrom_name(chrom_id))` --
+    /// captured here (guarded by `is_aligned` short-circuit so `chrom_name` is
+    /// never called on an unmapped `tid == -1`), matching `scan_pass1_chunk`'s
+    /// own `chrom_alt` computation.
+    chrom_alt: bool,
+    /// Reference id ([`Alignments::chrom_id`]) -- the overlap test's `chr_id`.
+    chr_id: i32,
+    /// `segments.first().a` / `segments.last().b`, meaningful only when
+    /// [`Self::has_segments`]; the interval fed to [`read_overlaps_any_gene`].
+    start: i32,
+    end: i32,
+    /// Whether the record has any CIGAR-derived segment. `scan_pass1_chunk`
+    /// (`bam_extract.rs`'s `let Some(first_seg) = segments.first() else {
+    /// continue }`) drops an aligned read with no segments before the overlap
+    /// test; the on-target candidacy branch reproduces that by requiring this.
+    has_segments: bool,
+}
+
+/// Reads the CURRENT record's [`AlignmentGroupedRecord`] snapshot. Caller must
+/// have already called `alignments.next()`. Captures records regardless of
+/// `is_primary()` (unlike the no-alignment [`read_grouped_record`]): the
+/// alignment path classifies every member of a QNAME group.
+fn read_alignment_grouped_record(
+    alignments: &Alignments,
+    mate_id_len: i32,
+) -> AlignmentGroupedRecord {
+    let raw_name = alignments.read_id();
+    let is_aligned = alignments.is_aligned();
+    // `is_aligned &&` short-circuits so `chrom_name` is never called on an
+    // unmapped `tid == -1` (which would panic) -- exactly `scan_pass1_chunk`.
+    let chrom_alt =
+        is_aligned && valid_alternative_chrom(&alignments.chrom_name(alignments.chrom_id()));
+    let segments = alignments.segments();
+    let has_segments = !segments.is_empty();
+    // `a`/`b` are `i64` reference coordinates; the same truncating cast
+    // `scan_pass1_chunk` applies. Only consulted when `has_segments` (aligned).
+    #[allow(clippy::cast_possible_truncation)]
+    let (start, end) = match (segments.first(), segments.last()) {
+        (Some(first), Some(last)) => (first.a as i32, last.b as i32),
+        _ => (0, 0),
+    };
+    AlignmentGroupedRecord {
+        trimmed_name: trim_name(&raw_name, mate_id_len),
+        raw_name,
+        seq: alignments.read_seq(),
+        qual: alignments.qual(),
+        is_first_mate: alignments.is_first_mate(),
+        is_paired: alignments.is_paired(),
+        is_primary: alignments.is_primary(),
+        is_template_aligned: alignments.is_template_aligned(),
+        is_aligned,
+        chrom_alt,
+        chr_id: alignments.chrom_id(),
+        start,
+        end,
+        has_segments,
+    }
+}
+
+/// Pulls the next record (primary OR non-primary) for
+/// [`extract_from_bam_alignment_grouped`]'s group loop: drains `head` first (in
+/// encounter order), then reads live from `alignments`. Unlike the
+/// no-alignment [`next_buffered_or_live`], it does NOT skip `!is_primary()`
+/// records -- the alignment path needs the whole QNAME group. `None` at EOF.
+///
+/// # Errors
+///
+/// Returns an error if the underlying BAM read fails (a genuine parse error,
+/// distinct from a clean EOF).
+fn next_alignment_buffered_or_live(
+    head: &mut VecDeque<AlignmentGroupedRecord>,
+    alignments: &mut Alignments,
+    mate_id_len: i32,
+) -> Result<Option<AlignmentGroupedRecord>> {
+    if let Some(record) = head.pop_front() {
+        return Ok(Some(record));
+    }
+    if alignments.next().context("reading next BAM record (grouped alignment)")? {
+        return Ok(Some(read_alignment_grouped_record(alignments, mate_id_len)));
+    }
+    Ok(None)
+}
+
+/// The per-record candidacy decision for the NON-joint case, reproducing
+/// [`scan_pass1_chunk`]'s `Selection::Alignment` status-conditioned branches
+/// EXACTLY (`bam_extract.rs` lines ~1305-1405), for ONE record of a QNAME
+/// group. A group (outside the genuine-unaligned-pair joint case) is a
+/// candidate iff ANY of its records returns `true` here -- the set-union that
+/// mirrors the coordinate path's `candidates.entry(trimmed_name).or_default()`
+/// idempotent insertion across every record of a template.
+///
+/// The three branches, in `scan_pass1_chunk` order:
+/// 1. `!is_template_aligned || chrom_alt` (ALT-contig, or `-u`/abnormal /
+///    single-end unaligned reads that did NOT take the joint path): the
+///    per-read predicate `!is_low_complexity(seq) && filter.good(seq)` --
+///    mirrors `Pass1Site::PairedNotAlignedCandidate` / `SingleEndNotAligned`.
+/// 2. `is_template_aligned && !is_aligned` (the unaligned mate of an aligned
+///    pair): `false` -- `scan_pass1_chunk` `continue`s it (never a candidate
+///    trigger), though its primary seq is still EMITTED if the template is a
+///    candidate via another record.
+/// 3. `is_template_aligned && is_aligned && !chrom_alt` (main-chrom on-target):
+///    `has_segments && !is_low_complexity(seq) && read_overlaps_any_gene(...)`
+///    -- position/gene-overlap only, with NO seed/k-mer test (matches
+///    `Pass1Site::PairedOnTargetCandidate`/`SingleEndOnTarget`, which resolve
+///    to `true` after only the low-complexity pre-check). The `has_segments`
+///    guard reproduces `scan_pass1_chunk`'s `segments.first()` early-`continue`.
+fn per_record_alignment_candidate(
+    record: &AlignmentGroupedRecord,
+    filter: &RefKmerFilter,
+    genes: &[GeneInterval],
+    scratch: &mut Scratch,
+) -> bool {
+    if !record.is_template_aligned || record.chrom_alt {
+        return !is_low_complexity(&record.seq)
+            && filter.is_good_candidate_with_scratch(&record.seq, scratch);
+    }
+    if !record.is_aligned {
+        return false;
+    }
+    record.has_segments
+        && !is_low_complexity(&record.seq)
+        && read_overlaps_any_gene(record.chr_id, record.start, record.end, genes)
+}
+
+/// The COORDINATE sort key used to pick which of a single-end name's EMITTABLE
+/// records the coordinate path would reach first (and therefore emit) --
+/// ascending `(chrom_id, start)`, with UNALIGNED records (`tid == -1`) sorting
+/// AFTER every aligned one (a coordinate-sorted BAM places unmapped records
+/// last). The leading rank byte (`0` aligned / `1` unaligned) enforces that
+/// unaligned-last ordering independently of the (negative) unaligned
+/// `chrom_id`, so the raw `chr_id`/`start` never have to encode +infinity.
+fn single_end_coordinate_key(record: &AlignmentGroupedRecord) -> (u8, i32, i32) {
+    let aligned_rank = u8::from(!record.is_aligned);
+    (aligned_rank, record.chr_id, record.start)
+}
+
+/// Resolves and emits (if it passes) one flushed QNAME group for
+/// [`extract_from_bam_alignment_grouped`]. Candidacy is status-conditioned:
+///
+/// - **Genuine unaligned pair (joint):** exactly 2 primaries, both
+///   `!is_template_aligned`, with `!single_end && !abnormal_unaligned_flag` --
+///   the JOINT predicate `!lc(s1) && !lc(s2) && (good(s1) || good(s2))`,
+///   mirroring [`Pass1Site::UnalignedPair`]. (Unmapped reads carry no
+///   secondary alignments, so "2 primaries both unmapped" already implies a
+///   2-member group; the explicit primary count keeps the rule robust.)
+/// - **Otherwise:** the set-union of [`per_record_alignment_candidate`] over
+///   ALL records (primary + secondary + supplementary). With `-u`, an
+///   unaligned pair falls here (per-read), NOT the joint branch.
+///
+/// Emission is status-conditioned on `single_end`:
+///
+/// - **Single-end:** emit exactly ONE record's seq/qual -- the FIRST in
+///   COORDINATE order (via [`single_end_coordinate_key`]) among the group's
+///   EMITTABLE records ([`per_record_alignment_candidate`]) -- under its
+///   UNTRIMMED id. This may be a NON-PRIMARY (e.g. an on-target `0x800`
+///   supplementary), matching the coordinate path's `used_name`-deduped
+///   "first emittable record in the scan wins" selection; emitting the
+///   primary unconditionally would break set-equality when the primary is
+///   off-target but a supplementary is on-target.
+/// - **Paired:** PRIMARIES ONLY, with the same id/pairing rules as
+///   [`flush_grouped_candidate`]: a 2-primary group emits `(mate1, mate2)`
+///   ordered by `is_first_mate` on the trimmed name; a 1-primary `0x1`-unset
+///   group emits a lone read with the UNTRIMMED id; a 1-primary `0x1`-set
+///   orphan emits a lone read with the trimmed id.
+///
+/// # Errors
+///
+/// Returns an error if a QNAME group has more than 2 PRIMARY records (a
+/// malformed grouped/name-sorted claim), or if `sink.emit_pair` fails.
+#[allow(clippy::too_many_arguments)]
+fn flush_alignment_grouped_candidate(
+    group: &[AlignmentGroupedRecord],
+    filter: &RefKmerFilter,
+    genes: &[GeneInterval],
+    single_end: bool,
+    abnormal_unaligned_flag: bool,
+    scratch: &mut Scratch,
+    sink: &mut impl CandidateSink,
+    emitted: &mut u64,
+) -> Result<()> {
+    if group.is_empty() {
+        return Ok(());
+    }
+
+    let primaries: Vec<&AlignmentGroupedRecord> =
+        group.iter().filter(|record| record.is_primary).collect();
+    if primaries.len() > 2 {
+        bail!(
+            "more than two primary records share QNAME {:?} in grouped/name-sorted alignment \
+             mode; hint: the input's @HD GO:query/SO:queryname claim may not hold (mates are not \
+             actually adjacent) -- unum's grouped one-pass requires a genuinely grouped/\
+             name-sorted BAM",
+            group[0].trimmed_name
+        );
+    }
+
+    let is_candidate = if !single_end
+        && !abnormal_unaligned_flag
+        && primaries.len() == 2
+        && !primaries[0].is_template_aligned
+        && !primaries[1].is_template_aligned
+    {
+        // JOINT unaligned-pair predicate (mirrors Pass1Site::UnalignedPair):
+        // both mates non-low-complexity AND at least one a good candidate.
+        let seq1 = &primaries[0].seq;
+        let seq2 = &primaries[1].seq;
+        (!is_low_complexity(seq1) && !is_low_complexity(seq2))
+            && (filter.is_good_candidate_with_scratch(seq1, scratch)
+                || filter.is_good_candidate_with_scratch(seq2, scratch))
+    } else {
+        // OR-union of the per-record decision over EVERY record of the group.
+        group.iter().any(|record| per_record_alignment_candidate(record, filter, genes, scratch))
+    };
+
+    if !is_candidate {
+        return Ok(());
+    }
+
+    // -- SINGLE-END emission (the faithful selection). The coordinate path
+    // emits, per single-end name, the seq/qual of the record it reaches FIRST
+    // in COORDINATE order among that name's EMITTABLE records -- which may be a
+    // NON-PRIMARY: an on-target `0x800` supplementary retains real SEQ, so a
+    // group whose primary is off-target but whose supplementary is on-target
+    // emits the SUPPLEMENTARY's seq, not the primary's. (`scan_pass1_chunk` does
+    // NOT filter `!is_primary()` on the alignment path, and its shared
+    // `used_name` dedup lets the first emittable aligned record in coordinate
+    // order win, blocking the rest.) Emitting the primary here (the previous
+    // behavior) broke set-equality with the coordinate path on exactly that
+    // shape. Reproduce the coordinate selection: among all records whose
+    // per-record predicate holds -- identical to `per_record_alignment_candidate`,
+    // the coordinate single-end EMITTABLE condition (on-target = `!lc && overlap`;
+    // not-template-aligned/alt = `!lc && good`) -- pick the minimum by
+    // `single_end_coordinate_key` (coordinate order, unaligned last). `min_by_key`
+    // returns the FIRST of equal-key records, i.e. group/file order; two records
+    // of one single-end read sharing an exact `(tid, pos)` does not arise in
+    // practice (a single-end read's records are either all aligned at distinct
+    // positions or a lone unmapped record), so this tie-break is deterministic and
+    // never actually consulted. Emit that record's seq/qual under its UNTRIMMED id
+    // (matching the coordinate single-end emit's `GetReadId()` / `raw_name`).
+    if single_end {
+        let selected = group
+            .iter()
+            .filter(|record| per_record_alignment_candidate(record, filter, genes, scratch))
+            .min_by_key(|record| single_end_coordinate_key(record));
+        if let Some(record) = selected {
+            let read = ReadRecord {
+                id: record.raw_name.clone(),
+                seq: record.seq.clone(),
+                qual: Some(record.qual.clone()),
+            };
+            sink.emit_pair(&read, None)?;
+            *emitted += 1;
+        }
+        return Ok(());
+    }
+
+    // Emit PRIMARIES ONLY (same id/pairing rules as flush_grouped_candidate).
+    match primaries.as_slice() {
+        [] => Ok(()), // candidacy via a non-primary only, with no primary to emit
+        [lone] => {
+            let id = if lone.is_paired { &lone.trimmed_name } else { &lone.raw_name };
+            let read =
+                ReadRecord { id: id.clone(), seq: lone.seq.clone(), qual: Some(lone.qual.clone()) };
+            sink.emit_pair(&read, None)?;
+            *emitted += 1;
+            Ok(())
+        }
+        [a, b] => {
+            let (mate1, mate2) = if a.is_first_mate && !b.is_first_mate {
+                (a, b)
+            } else if b.is_first_mate && !a.is_first_mate {
+                (b, a)
+            } else {
+                (a, b)
+            };
+            let r1 = ReadRecord {
+                id: mate1.trimmed_name.clone(),
+                seq: mate1.seq.clone(),
+                qual: Some(mate1.qual.clone()),
+            };
+            let r2 = ReadRecord {
+                id: mate1.trimmed_name.clone(),
+                seq: mate2.seq.clone(),
+                qual: Some(mate2.qual.clone()),
+            };
+            sink.emit_pair(&r1, Some(&r2))?;
+            *emitted += 1;
+            Ok(())
+        }
+        // Guarded by the >2-primary bail above; defensive only.
+        _ => bail!(
+            "internal error: grouped alignment flush reached a {}-primary group after the \
+             >2-primary abort check",
+            primaries.len()
+        ),
+    }
+}
+
+/// Runs the grouped/name-sorted (`GO:query`/`SO:queryname`) `--bam-mode
+/// alignment` ONE-PASS BAM/CRAM read-extraction driver: the ALIGNMENT analogue
+/// of [`extract_from_bam_no_alignment_grouped`]. A grouped/name-sorted BAM
+/// keeps a template's records (both mates, plus any secondary/supplementary
+/// alignments) adjacent in file order, so a SINGLE streaming pass can both
+/// classify every record and reunite its QNAME group -- reproducing the
+/// coordinate two-pass path's ([`extract_from_bam_with_threads`]) candidate SET
+/// without a `rewind()` (so `alignments` may be [`Alignments::from_stdin`] when
+/// `seekable == false`).
+///
+/// # Set-equality with the coordinate path (the correctness contract)
+///
+/// This is a unum EXTENSION beyond T1K (T1K has no grouped-alignment path), so
+/// its correctness is defined by SET-EQUALITY of the emitted candidates with
+/// the coordinate path -- proven by Task 9's differential test. Every
+/// per-record decision here reproduces [`scan_pass1_chunk`]'s
+/// `Selection::Alignment` status-conditioned branch (see
+/// [`per_record_alignment_candidate`] and [`flush_alignment_grouped_candidate`]
+/// for the branch-by-branch correspondence), and a template is a candidate iff
+/// ANY of its records triggers candidacy -- the union that mirrors the
+/// coordinate path's idempotent `candidates` insertion per template. Only
+/// PRIMARY sequences are emitted (the coordinate path's pass 2 fetches primary
+/// mates by name), so a candidacy triggered by a secondary alignment still
+/// emits the primary pair.
+///
+/// # Setup: `seekable` (file) vs `!seekable` (stdin)
+///
+/// - `seekable`: `general_info(true)` + `rewind()` give the bitwise-identical
+///   `single_end`/`read_len` the coordinate path uses, and
+///   [`compute_hit_len_required`] (21/17, `read_len/5`) the identical
+///   `hitLenRequired`.
+/// - `!seekable`: buffers a bounded HEAD of raw records (up to
+///   [`HIT_LEN_SAMPLE_SIZE`], all records -- the group loop consumes them),
+///   deriving `single_end` from the primary `0x1`-FLAG majority
+///   (`has_mate_cnt < head_primary_cnt / 2`, the negation of
+///   [`Alignments::general_info`]'s `mate_paired` rule) and `read_len` as the
+///   max primary `l_qseq`, then `compute_hit_len_required(if single_end {0}
+///   else {1}, read_len)`.
+///
+/// Both then apply `set_hit_len_required` + the `infer_kmer_length` /
+/// conditional `update_kmer_length` block copied from
+/// [`extract_from_bam_with_threads`]. Unlike the no-alignment grouped path,
+/// this does NOT call `set_ref_seq_similarity` (the alignment mode never pins
+/// similarity -- matching the coordinate alignment path).
+///
+/// # Sink FACTORY
+///
+/// Like [`extract_from_bam_no_alignment_grouped`], takes `make_sink`, a
+/// `FnOnce(single_end) -> Result<S>` factory, and calls it the moment
+/// `single_end` is known (after setup, before the group loop emits). Returns
+/// `(metrics, single_end, sink)`.
+///
+/// `threads` is accepted for signature parity with the sibling entry points
+/// but unused: a QNAME group is tiny, so there is no useful unit of parallel
+/// work.
+///
+/// # Errors
+///
+/// Returns an error if: `make_sink` fails; a QNAME group has more than 2
+/// PRIMARY records; the setup `general_info`/`rewind` fails (seekable); or an
+/// underlying BAM read fails (a genuine parse error, distinct from clean EOF).
+#[allow(clippy::too_many_arguments)]
+pub fn extract_from_bam_alignment_grouped<S, F>(
+    alignments: &mut Alignments,
+    filter: &mut RefKmerFilter,
+    genes: &[GeneInterval],
+    abnormal_unaligned_flag: bool,
+    mate_id_len: i32,
+    threads: usize,
+    seekable: bool,
+    make_sink: F,
+) -> Result<(BamExtractMetrics, bool, S)>
+where
+    S: CandidateSink,
+    F: FnOnce(bool) -> Result<S>,
+{
+    let _ = threads;
+    extract_from_bam_alignment_grouped_with_head_limit(
+        alignments,
+        filter,
+        genes,
+        abnormal_unaligned_flag,
+        mate_id_len,
+        seekable,
+        HIT_LEN_SAMPLE_SIZE,
+        make_sink,
+    )
+}
+
+/// [`extract_from_bam_alignment_grouped`]'s implementation, with the
+/// sampled-head bound taken as an explicit parameter (only consulted on the
+/// `!seekable` path) so `#[cfg(test)]` could force a tiny head to exercise a
+/// QNAME group straddling the head/live boundary, mirroring
+/// [`extract_from_bam_no_alignment_grouped_with_head_limit`].
+#[allow(clippy::too_many_arguments)]
+fn extract_from_bam_alignment_grouped_with_head_limit<S, F>(
+    alignments: &mut Alignments,
+    filter: &mut RefKmerFilter,
+    genes: &[GeneInterval],
+    abnormal_unaligned_flag: bool,
+    mate_id_len: i32,
+    seekable: bool,
+    head_limit: usize,
+    make_sink: F,
+) -> Result<(BamExtractMetrics, bool, S)>
+where
+    S: CandidateSink,
+    F: FnOnce(bool) -> Result<S>,
+{
+    // -- (1) Setup: derive single_end + hitLenRequired. `head` is empty on the
+    // seekable path (the group loop reads purely live from the rewound cursor)
+    // and pre-filled on the non-seekable path (bounded head, no rewind).
+    let mut head: VecDeque<AlignmentGroupedRecord> = VecDeque::new();
+    let (single_end, mut hit_len_required) = if seekable {
+        let general_info =
+            alignments.general_info(true).context("computing general_info (grouped alignment)")?;
+        alignments.rewind().context("rewinding after general_info (grouped alignment)")?;
+        (
+            general_info.frag_stdev == 0,
+            compute_hit_len_required(general_info.frag_stdev, general_info.read_len),
+        )
+    } else {
+        let mut head_primary_cnt: u64 = 0;
+        let mut has_mate_cnt: u64 = 0;
+        let mut max_read_len: i32 = 0;
+        while head.len() < head_limit
+            && alignments.next().context("reading BAM head (grouped alignment)")?
+        {
+            let record = read_alignment_grouped_record(alignments, mate_id_len);
+            if record.is_primary {
+                head_primary_cnt += 1;
+                if record.is_paired {
+                    has_mate_cnt += 1;
+                }
+                let len = i32::try_from(record.seq.len()).unwrap_or(i32::MAX);
+                if len > max_read_len {
+                    max_read_len = len;
+                }
+            }
+            head.push_back(record);
+        }
+        // Negation of general_info's `has_mate_cnt >= total / 2` majority vote.
+        let single_end = has_mate_cnt < head_primary_cnt / 2;
+        // `compute_hit_len_required` keys only on `frag_stdev == 0`, so a
+        // sentinel 0 (single-end) / 1 (paired) selects the 17/21 base exactly.
+        let hlr = compute_hit_len_required(i32::from(!single_end), max_read_len);
+        (single_end, hlr)
+    };
+
+    filter.set_hit_len_required(hit_len_required);
+    // infer/update kmer length (copied from extract_from_bam_with_threads);
+    // NO set_ref_seq_similarity (alignment mode does not pin similarity).
+    let inferred = filter.infer_kmer_length();
+    if inferred > filter.kmer_length() {
+        filter.update_kmer_length(inferred);
+        if inferred > usize::try_from(hit_len_required).unwrap_or(0) {
+            hit_len_required = i32::try_from(inferred).unwrap_or(i32::MAX);
+            filter.set_hit_len_required(hit_len_required);
+        }
+    }
+
+    // `single_end` is now known -- create the sink via the factory before the
+    // group loop emits (the same B2 chicken-and-egg fix the no-alignment
+    // grouped path documents).
+    let mut sink = make_sink(single_end)?;
+
+    // -- (2) ONE continuous group-accumulation loop over head ++ live. Records
+    // are grouped by trimmed-QNAME adjacency; a group is flushed on the first
+    // differently-named record and once more at EOF. Unlike the no-alignment
+    // loop, there is NO >2-member abort here (a group legitimately holds a
+    // primary pair PLUS secondaries) -- the >2-PRIMARY guard lives in the flush.
+    let mut scratch = Scratch::default();
+    let mut current_group: Vec<AlignmentGroupedRecord> = Vec::new();
+    let mut emitted: u64 = 0;
+
+    while let Some(record) = next_alignment_buffered_or_live(&mut head, alignments, mate_id_len)? {
+        if let Some(first) = current_group.first() {
+            if first.trimmed_name != record.trimmed_name {
+                flush_alignment_grouped_candidate(
+                    &current_group,
+                    filter,
+                    genes,
+                    single_end,
+                    abnormal_unaligned_flag,
+                    &mut scratch,
+                    &mut sink,
+                    &mut emitted,
+                )?;
+                current_group.clear();
+            }
+        }
+        current_group.push(record);
+    }
+    flush_alignment_grouped_candidate(
+        &current_group,
+        filter,
+        genes,
+        single_end,
+        abnormal_unaligned_flag,
+        &mut scratch,
+        &mut sink,
+        &mut emitted,
+    )?;
+
+    let metrics = BamExtractMetrics {
+        single_end,
+        hit_len_required,
+        kmer_length: filter.kmer_length(),
+        pass1_emitted: emitted,
+        candidates_recorded: 0,
+        pass2_emitted: 0,
+    };
+    Ok((metrics, single_end, sink))
 }
 
 /// Handles one unaligned-template pair within pass 1
@@ -2016,6 +2587,24 @@ mod tests {
                 GeneInterval { chr_id: 1, start: 100, end: 200 },
             ]
         );
+    }
+
+    #[test]
+    fn read_overlaps_any_gene_matches_cursor_including_nested() {
+        let genes = vec![
+            GeneInterval { chr_id: 0, start: 100, end: 500 }, // contains the next
+            GeneInterval { chr_id: 0, start: 200, end: 250 },
+            GeneInterval { chr_id: 1, start: 50, end: 150 },
+        ];
+        // Nested case that a binary-search-on-end would wrongly drop:
+        assert!(read_overlaps_any_gene(0, 260, 270, &genes)); // overlaps [100,500]
+        assert!(read_overlaps_any_gene(0, 120, 180, &genes));
+        assert!(read_overlaps_any_gene(0, 500, 550, &genes)); // start==end boundary: 500<=500 && 550>100
+        assert!(!read_overlaps_any_gene(0, 40, 100, &genes)); // end==start boundary rejected: 100 > 100 false
+        assert!(!read_overlaps_any_gene(0, 600, 700, &genes));
+        assert!(!read_overlaps_any_gene(2, 120, 180, &genes)); // wrong chr
+        assert!(read_overlaps_any_gene(1, 100, 120, &genes));
+        assert!(!read_overlaps_any_gene(0, 120, 180, &[]));
     }
 
     #[test]
@@ -4076,5 +4665,916 @@ mod tests {
     /// reads without relying on emit order.
     fn ref_bytes_first_90() -> Vec<u8> {
         PARALLEL_TEST_REF.as_bytes()[0..90].to_vec()
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 7: one-pass grouped/name-sorted ALIGNMENT extractor
+    // (`extract_from_bam_alignment_grouped`). Each test below exercises one
+    // status-conditioned classification branch, asserting the emitted
+    // candidate SET (via a `HashSet` derived from the collecting `VecSink`)
+    // matches what the coordinate path's `scan_pass1_chunk` would select for
+    // the same records -- the set-equality invariant Task 9's differential
+    // test proves end-to-end. Fixtures are `@HD SO:queryname` (grouped/
+    // name-sorted), two contigs: `chr1` (gene interval `[1000, 5000]`) and
+    // `chr1_alt` (alt contig, name contains `_`).
+
+    /// Builds the shared `@HD SO:queryname` header with the `chr1`/`chr1_alt`
+    /// contigs every grouped-alignment fixture uses.
+    fn grouped_alignment_header() -> Header {
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "queryname");
+        header.push_record(&hd);
+        let mut sq1 = HeaderRecord::new(b"SQ");
+        sq1.push_tag(b"SN", "chr1");
+        sq1.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq1);
+        let mut sq2 = HeaderRecord::new(b"SQ");
+        sq2.push_tag(b"SN", "chr1_alt");
+        sq2.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq2);
+        header
+    }
+
+    /// Writes one record to a grouped-alignment fixture. `cigar = None` (with
+    /// `tid = pos = -1`) writes an unmapped record; otherwise an aligned one.
+    #[allow(clippy::too_many_arguments)]
+    fn add_grouped_alignment_record(
+        writer: &mut Writer,
+        name: &[u8],
+        seq: &[u8],
+        flags: u16,
+        tid: i32,
+        pos: i64,
+        mtid: i32,
+        mpos: i64,
+        cigar: Option<&CigarString>,
+    ) {
+        let qual = vec![30u8; seq.len()];
+        let mut r = bam::Record::new();
+        r.set(name, cigar, seq, &qual);
+        r.set_tid(tid);
+        r.set_pos(pos);
+        r.set_mtid(mtid);
+        r.set_mpos(mpos);
+        r.set_flags(flags);
+        writer.write(&r).unwrap();
+    }
+
+    /// The `chr1 [1000, 5000]` gene interval every grouped-alignment fixture
+    /// selects on-target reads against.
+    fn grouped_alignment_genes(alignments: &Alignments) -> Vec<GeneInterval> {
+        build_genes(
+            alignments,
+            &[CoordRecord {
+                name: "only".to_string(),
+                chrom: "chr1".to_string(),
+                start: 1000,
+                end: 5000,
+                strand: "+".to_string(),
+                seq: PARALLEL_TEST_REF.to_string(),
+            }],
+        )
+        .unwrap()
+    }
+
+    /// Runs [`extract_from_bam_alignment_grouped`] end to end over `bam_path`,
+    /// returning the metrics, derived `single_end`, and the collecting sink.
+    fn run_grouped_alignment(
+        bam_path: &std::path::Path,
+        ref_fasta: &std::path::Path,
+        abnormal_unaligned_flag: bool,
+        seekable: bool,
+    ) -> (BamExtractMetrics, bool, VecSink) {
+        let mut filter =
+            RefKmerFilter::from_reference_fasta(ref_fasta, INITIAL_KMER_LENGTH).unwrap();
+        let mut alignments = Alignments::open(bam_path).unwrap();
+        let genes = grouped_alignment_genes(&alignments);
+        extract_from_bam_alignment_grouped(
+            &mut alignments,
+            &mut filter,
+            &genes,
+            abnormal_unaligned_flag,
+            -1,
+            1,
+            seekable,
+            |_single_end| Ok(VecSink::default()),
+        )
+        .unwrap()
+    }
+
+    /// The SET of read-1 QNAMEs emitted into a [`VecSink`].
+    fn emitted_ids(sink: &VecSink) -> std::collections::HashSet<String> {
+        sink.pairs.iter().map(|(r1, _)| r1.id.clone()).collect()
+    }
+
+    /// On-target main-chrom aligned pair inside `[1000, 5000]` with
+    /// ref-substring SEQs: `is_template_aligned && is_aligned && !chrom_alt`,
+    /// overlaps a gene, not low-complexity -> CANDIDATE (no seed test needed).
+    /// A second, off-target pair with the SAME ref-substring SEQs (so it WOULD
+    /// seed-hit) confirms only the on-target one is selected.
+    fn build_grouped_on_target_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+        let header = grouped_alignment_header();
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+        let cig90 = CigarString(vec![Cigar::Match(90)]);
+
+        // Name-sorted: "off_seed" < "on_target".
+        // off_seed: main chrom, OUTSIDE the gene, ref-substring SEQs (seed-hit)
+        // -- must be EXCLUDED (the main-chrom aligned branch has no seed test).
+        // No reverse (0x10) flags: read_seq() then stores/emits SEQ forward, so
+        // the emitted-SEQ assertions compare directly against ref substrings.
+        add_grouped_alignment_record(
+            &mut writer,
+            b"off_seed",
+            &ref_bytes[0..90],
+            0x1 | 0x2 | 0x40,
+            0,
+            50_000,
+            0,
+            50_200,
+            Some(&cig90),
+        );
+        add_grouped_alignment_record(
+            &mut writer,
+            b"off_seed",
+            &ref_bytes[100..190],
+            0x1 | 0x2 | 0x80,
+            0,
+            50_200,
+            0,
+            50_000,
+            Some(&cig90),
+        );
+        // on_target: main chrom, INSIDE the gene -> CANDIDATE.
+        add_grouped_alignment_record(
+            &mut writer,
+            b"on_target",
+            &ref_bytes[0..90],
+            0x1 | 0x2 | 0x40,
+            0,
+            1100,
+            0,
+            1300,
+            Some(&cig90),
+        );
+        add_grouped_alignment_record(
+            &mut writer,
+            b"on_target",
+            &ref_bytes[100..190],
+            0x1 | 0x2 | 0x80,
+            0,
+            1300,
+            0,
+            1100,
+            Some(&cig90),
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn grouped_alignment_on_target_main_chrom_pair_is_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("on_target.bam");
+        build_grouped_on_target_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (metrics, single_end, sink) = run_grouped_alignment(&bam_path, &ref_fasta, false, true);
+
+        assert!(!single_end, "paired fixture must not be single-end");
+        assert_eq!(
+            emitted_ids(&sink),
+            ["on_target".to_string()].into_iter().collect(),
+            "only the on-target pair is a candidate; the off-target pair (same seed-hitting \
+             SEQs) must be excluded"
+        );
+        assert_eq!(metrics.pass1_emitted, 1);
+        // The on-target pair is emitted as a PAIR of PRIMARY records.
+        let (r1, r2) = sink.pairs.iter().find(|(r, _)| r.id == "on_target").unwrap();
+        let r2 = r2.as_ref().expect("on-target must emit both mates");
+        assert_eq!(r1.seq, ref_bytes_first_90(), "mate1 (is_first_mate) first");
+        assert_eq!(r2.seq, PARALLEL_TEST_REF.as_bytes()[100..190]);
+    }
+
+    #[test]
+    fn grouped_alignment_off_target_main_chrom_seed_hit_is_not_candidate() {
+        // C-1: the main-chrom aligned branch selects purely by gene overlap;
+        // there is NO seed/k-mer test on it. `build_grouped_on_target_bam`
+        // includes an off-target pair whose SEQs DO seed-hit -- if the branch
+        // (wrongly) applied a seed test, that pair would leak in.
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("off_seed.bam");
+        build_grouped_on_target_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (_metrics, _single_end, sink) =
+            run_grouped_alignment(&bam_path, &ref_fasta, false, true);
+
+        assert!(
+            !emitted_ids(&sink).contains("off_seed"),
+            "off-target main-chrom pair must NOT be a candidate even though its SEQs seed-hit"
+        );
+    }
+
+    /// Genuine unaligned pair (both mates unmapped, `0x1` set): the JOINT
+    /// predicate `!lc(s1) && !lc(s2) && (good(s1) || good(s2))`.
+    /// - `unaligned_good`: both mates good, both non-lc -> JOINT passes.
+    /// - `unaligned_onelc`: mate1 homopolymer (low-complexity), mate2 good --
+    ///   JOINT's `!lc(s1)` fails, so the template is EXCLUDED. A per-read OR
+    ///   would (wrongly) rescue it via mate2; asserting exclusion proves the
+    ///   joint AND-gate.
+    fn build_grouped_unaligned_pair_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+        let header = grouped_alignment_header();
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+        // unaligned_good: both good.
+        add_grouped_alignment_record(
+            &mut writer,
+            b"unaligned_good",
+            &ref_bytes[0..90],
+            0x1 | 0x4 | 0x8 | 0x40,
+            -1,
+            -1,
+            -1,
+            -1,
+            None,
+        );
+        add_grouped_alignment_record(
+            &mut writer,
+            b"unaligned_good",
+            &ref_bytes[100..190],
+            0x1 | 0x4 | 0x8 | 0x80,
+            -1,
+            -1,
+            -1,
+            -1,
+            None,
+        );
+        // unaligned_onelc: mate1 low-complexity, mate2 good.
+        add_grouped_alignment_record(
+            &mut writer,
+            b"unaligned_onelc",
+            &[b'A'; 90],
+            0x1 | 0x4 | 0x8 | 0x40,
+            -1,
+            -1,
+            -1,
+            -1,
+            None,
+        );
+        add_grouped_alignment_record(
+            &mut writer,
+            b"unaligned_onelc",
+            &ref_bytes[100..190],
+            0x1 | 0x4 | 0x8 | 0x80,
+            -1,
+            -1,
+            -1,
+            -1,
+            None,
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn grouped_alignment_genuine_unaligned_pair_uses_joint_predicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("unaligned_pair.bam");
+        build_grouped_unaligned_pair_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (_metrics, single_end, sink) =
+            run_grouped_alignment(&bam_path, &ref_fasta, false, true);
+
+        assert!(!single_end, "paired (0x1-set) unaligned fixture must classify paired");
+        assert_eq!(
+            emitted_ids(&sink),
+            ["unaligned_good".to_string()].into_iter().collect(),
+            "the joint predicate requires BOTH mates non-low-complexity; unaligned_onelc \
+             (mate1 homopolymer) must be excluded, not rescued per-read"
+        );
+        // unaligned_good emits BOTH primaries as a pair.
+        let (_r1, r2) = sink.pairs.iter().find(|(r, _)| r.id == "unaligned_good").unwrap();
+        assert!(r2.is_some(), "an unaligned pair emits both mates");
+    }
+
+    /// ALT-contig pair (mapped to `chr1_alt`, `chrom_alt` true): the PER-READ
+    /// predicate `!lc && good`, NOT the joint one. `alt_mixed`'s mate1 is a
+    /// homopolymer (fails `!lc`), mate2 is good -- per-read OR rescues via
+    /// mate2, so the template IS a candidate. A joint AND-gate would exclude
+    /// it (mate1 low-complexity), so emission proves the per-read branch.
+    fn build_grouped_alt_contig_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+        let header = grouped_alignment_header();
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+        let cig90 = CigarString(vec![Cigar::Match(90)]);
+
+        // alt_mixed on chr1_alt (tid 1): mate1 low-complexity, mate2 good.
+        add_grouped_alignment_record(
+            &mut writer,
+            b"alt_mixed",
+            &[b'A'; 90],
+            0x1 | 0x2 | 0x20 | 0x40,
+            1,
+            500,
+            1,
+            700,
+            Some(&cig90),
+        );
+        add_grouped_alignment_record(
+            &mut writer,
+            b"alt_mixed",
+            &ref_bytes[200..290],
+            0x1 | 0x2 | 0x10 | 0x80,
+            1,
+            700,
+            1,
+            500,
+            Some(&cig90),
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn grouped_alignment_alt_contig_pair_uses_per_read_predicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("alt_contig.bam");
+        build_grouped_alt_contig_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (_metrics, single_end, sink) =
+            run_grouped_alignment(&bam_path, &ref_fasta, false, true);
+
+        assert!(!single_end);
+        assert_eq!(
+            emitted_ids(&sink),
+            ["alt_mixed".to_string()].into_iter().collect(),
+            "ALT-contig pairs use the per-read `!lc && good` predicate; mate2 (good) rescues \
+             even though mate1 is low-complexity -- a joint AND-gate would wrongly exclude it"
+        );
+        let (_r1, r2) = sink.pairs.iter().find(|(r, _)| r.id == "alt_mixed").unwrap();
+        assert!(r2.is_some(), "an ALT-contig pair emits both primary mates");
+    }
+
+    /// Abnormal-unmapped (`-u`, `abnormal_unaligned_flag = true`): an unaligned
+    /// pair falls to the PER-READ predicate instead of the joint one. Same
+    /// mate1-lc/mate2-good shape as the ALT case: per-read rescues via mate2.
+    fn build_grouped_abnormal_unmapped_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+        let header = grouped_alignment_header();
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+        // abn_mixed: unmapped pair, mate1 low-complexity, mate2 good.
+        add_grouped_alignment_record(
+            &mut writer,
+            b"abn_mixed",
+            &[b'A'; 90],
+            0x1 | 0x4 | 0x8 | 0x40,
+            -1,
+            -1,
+            -1,
+            -1,
+            None,
+        );
+        add_grouped_alignment_record(
+            &mut writer,
+            b"abn_mixed",
+            &ref_bytes[100..190],
+            0x1 | 0x4 | 0x8 | 0x80,
+            -1,
+            -1,
+            -1,
+            -1,
+            None,
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn grouped_alignment_abnormal_unmapped_uses_per_read_predicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("abnormal.bam");
+        build_grouped_abnormal_unmapped_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        // With -u the unaligned pair takes the per-read branch.
+        let (_metrics, single_end, sink) = run_grouped_alignment(&bam_path, &ref_fasta, true, true);
+
+        assert!(!single_end);
+        assert_eq!(
+            emitted_ids(&sink),
+            ["abn_mixed".to_string()].into_iter().collect(),
+            "under -u an unaligned pair uses the per-read `!lc && good` predicate (mate2 \
+             rescues); the joint AND-gate must NOT apply"
+        );
+    }
+
+    /// Secondary alignment overlapping a gene makes the template a candidate,
+    /// but ONLY the PRIMARY records are emitted. `sec_gene`'s two primaries are
+    /// OFF-target (main chrom, outside the gene) with `noise` SEQs (candidates
+    /// on neither their position nor a seed test), while a SECONDARY of mate1
+    /// lands INSIDE the gene with a ref-substring SEQ -- so the template is a
+    /// candidate via the secondary, and the emitted pair carries the PRIMARY
+    /// (off-target `noise`) SEQs, never the secondary's.
+    fn build_grouped_secondary_gene_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+        let header = grouped_alignment_header();
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+        let cig90 = CigarString(vec![Cigar::Match(90)]);
+
+        let prim1 = noise(90);
+        let prim2 = noise(80);
+        // Primary mate1: off-target, noise (no reverse flag -> forward SEQ).
+        add_grouped_alignment_record(
+            &mut writer,
+            b"sec_gene",
+            &prim1,
+            0x1 | 0x2 | 0x40,
+            0,
+            50_000,
+            0,
+            50_200,
+            Some(&cig90),
+        );
+        // Primary mate2: off-target, noise.
+        add_grouped_alignment_record(
+            &mut writer,
+            b"sec_gene",
+            &prim2,
+            0x1 | 0x2 | 0x80,
+            0,
+            50_200,
+            0,
+            50_000,
+            Some(&CigarString(vec![Cigar::Match(80)])),
+        );
+        // Secondary of mate1 (0x100): INSIDE the gene, ref-substring SEQ.
+        add_grouped_alignment_record(
+            &mut writer,
+            b"sec_gene",
+            &ref_bytes[0..90],
+            0x1 | 0x2 | 0x100 | 0x40,
+            0,
+            2000,
+            0,
+            50_200,
+            Some(&cig90),
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn grouped_alignment_secondary_overlapping_gene_makes_template_candidate_emitting_primary_only()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("secondary_gene.bam");
+        build_grouped_secondary_gene_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (_metrics, single_end, sink) =
+            run_grouped_alignment(&bam_path, &ref_fasta, false, true);
+
+        assert!(!single_end);
+        assert_eq!(
+            emitted_ids(&sink),
+            ["sec_gene".to_string()].into_iter().collect(),
+            "a secondary alignment overlapping a gene makes the template a candidate"
+        );
+        let (r1, r2) = sink.pairs.iter().find(|(r, _)| r.id == "sec_gene").unwrap();
+        let r2 = r2.as_ref().expect("must emit both primary mates");
+        // The load-bearing assertion: the emitted SEQs are the PRIMARY
+        // (off-target noise) sequences, NOT the on-target secondary's.
+        assert_eq!(r1.seq, noise(90), "mate1 must be the PRIMARY (noise) seq, not the secondary");
+        assert_eq!(r2.seq, noise(80), "mate2 must be the PRIMARY (noise) seq");
+        assert_ne!(
+            r1.seq,
+            ref_bytes_first_90(),
+            "the on-target SECONDARY sequence must never be emitted"
+        );
+    }
+
+    /// Single-end (`0x1` UNSET) on-target read: emitted LONE, carrying the
+    /// UNTRIMMED read id. `se_read/1`'s trailing `/1` is stripped for the
+    /// grouping compare (default `mate_id_len = -1`) but must be KEPT in the
+    /// emitted id -- matching the coordinate path's single-end emit. Two
+    /// off-target single-end pads (`se_pad_a`/`se_pad_b`) make the `0x1`-unset
+    /// majority classify the file single-end.
+    fn build_grouped_single_end_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+        let header = grouped_alignment_header();
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+        let cig90 = CigarString(vec![Cigar::Match(90)]);
+
+        // Name-sorted: "se_pad_a" < "se_pad_b" < "se_read/1".
+        // Pads: off-target -> not candidates (keep the emitted set clean).
+        add_grouped_alignment_record(
+            &mut writer,
+            b"se_pad_a",
+            &noise(90),
+            0,
+            0,
+            60_000,
+            -1,
+            -1,
+            Some(&cig90),
+        );
+        add_grouped_alignment_record(
+            &mut writer,
+            b"se_pad_b",
+            &noise(90),
+            0,
+            0,
+            61_000,
+            -1,
+            -1,
+            Some(&cig90),
+        );
+        // se_read/1: on-target single-end -> candidate, emitted lone.
+        add_grouped_alignment_record(
+            &mut writer,
+            b"se_read/1",
+            &ref_bytes[0..90],
+            0,
+            0,
+            1100,
+            -1,
+            -1,
+            Some(&cig90),
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn grouped_alignment_single_end_on_target_emits_untrimmed_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("single_end.bam");
+        build_grouped_single_end_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (metrics, single_end, sink) = run_grouped_alignment(&bam_path, &ref_fasta, false, true);
+
+        assert!(single_end, "an all-0x1-unset fixture must classify single-end");
+        assert_eq!(
+            emitted_ids(&sink),
+            ["se_read/1".to_string()].into_iter().collect(),
+            "only the on-target single-end read is a candidate, and its id keeps the UNTRIMMED \
+             /1 suffix"
+        );
+        assert_eq!(metrics.pass1_emitted, 1);
+        let (r1, r2) = sink.pairs.iter().find(|(r, _)| r.id == "se_read/1").unwrap();
+        assert!(r2.is_none(), "a single-end read is emitted LONE");
+        assert_eq!(r1.seq, ref_bytes_first_90());
+    }
+
+    #[test]
+    fn grouped_alignment_non_seekable_head_derivation_matches_seekable() {
+        // The non-seekable (stdin) path never calls general_info/rewind; it
+        // derives single_end + hitLenRequired from a bounded head instead.
+        // Over a file-backed reader the two setups must select the same set.
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("on_target_nonseekable.bam");
+        build_grouped_on_target_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (_m_seek, se_seek, sink_seek) =
+            run_grouped_alignment(&bam_path, &ref_fasta, false, true);
+        let (_m_head, se_head, sink_head) =
+            run_grouped_alignment(&bam_path, &ref_fasta, false, false);
+
+        assert_eq!(se_seek, se_head, "single_end derivation must agree across setup paths");
+        assert_eq!(
+            emitted_ids(&sink_seek),
+            emitted_ids(&sink_head),
+            "the non-seekable head-derived setup must select the same candidate set"
+        );
+    }
+
+    // -- Task 7 single-end EMISSION-selection faithfulness (Defect A) + the
+    // on-target-ignores-good faithfulness (the reviewer's "Defect B", verified
+    // here to be a NON-defect: the coordinate path -- `evaluate_pass1_site`'s
+    // `SingleEndOnTarget` arm and T1K `BamExtractor.cpp:836-850` -- emits
+    // on-target single-end reads after ONLY the low-complexity check, with NO
+    // `good()`/`HasHitInSet` gate; see the green
+    // `single_end_ontarget_non_candidate_read_is_emitted_unconditionally`
+    // regression). These prove the grouped single-end emitter selects the SAME
+    // record the coordinate path would (the first EMITTABLE in coordinate order,
+    // which may be a NON-PRIMARY), keyed on (id, seq, qual) -- Task 9's gate,
+    // previewed here for single-end.
+
+    /// Writes single-end records `(name, seq, flags, tid, pos)` to `path` in the
+    /// EXACT order given (the caller pre-sorts: coordinate order for the
+    /// coordinate extractor, name/QNAME-grouped order for the grouped one),
+    /// under the shared `chr1`/`chr1_alt` header. `cigar` is `Match(seq.len())`
+    /// for every aligned record and `None` (unmapped) when `tid < 0`.
+    fn write_single_end_records_ordered(
+        path: &std::path::Path,
+        records: &[(&str, Vec<u8>, u16, i32, i64)],
+    ) {
+        let header = grouped_alignment_header();
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+        for (name, seq, flags, tid, pos) in records {
+            #[allow(clippy::cast_possible_truncation)]
+            let cig = CigarString(vec![Cigar::Match(seq.len() as u32)]);
+            let cigar = if *tid < 0 { None } else { Some(&cig) };
+            add_grouped_alignment_record(
+                &mut writer,
+                name.as_bytes(),
+                seq,
+                *flags,
+                *tid,
+                *pos,
+                -1,
+                -1,
+                cigar,
+            );
+        }
+        drop(writer);
+    }
+
+    /// The SET of `(id, seq, qual)` triples a [`VecSink`] emitted as read-1 (the
+    /// downstream-genotyping key the grouped/coordinate set-equality is defined
+    /// on). Single-end emits are all lone (read-2 is always `None`).
+    #[allow(clippy::type_complexity)]
+    fn single_end_emit_set(
+        sink: &VecSink,
+    ) -> std::collections::HashSet<(String, Vec<u8>, Option<Vec<u8>>)> {
+        sink.pairs
+            .iter()
+            .map(|(r1, r2)| {
+                assert!(r2.is_none(), "single-end emits must be lone");
+                (r1.id.clone(), r1.seq.clone(), r1.qual.clone())
+            })
+            .collect()
+    }
+
+    /// Test 1 (the reviewer's `sup_x` counterexample): a single-end read whose
+    /// PRIMARY is off-target (SEQ=A) but whose `0x800` SUPPLEMENTARY is on-target
+    /// (SEQ=B). The coordinate path scans the on-target supplementary and emits
+    /// `(sup_x, B)`; the grouped path MUST emit the supplementary's B, NOT the
+    /// primary's A.
+    fn build_grouped_single_end_supplementary_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+        // Name-sorted: "se_pad_a" < "se_pad_b" < "sup_x". Off-target single-end
+        // pads (not candidates) keep the emitted set clean and make the
+        // 0x1-unset single-end majority unambiguous.
+        let records: Vec<(&str, Vec<u8>, u16, i32, i64)> = vec![
+            ("se_pad_a", noise(90), 0, 0, 60_000),
+            ("se_pad_b", noise(90), 0, 0, 61_000),
+            // sup_x primary: OFF-target, SEQ=A=ref[0..90].
+            ("sup_x", ref_bytes[0..90].to_vec(), 0, 0, 50_000),
+            // sup_x supplementary (0x800): ON-target, SEQ=B=ref[100..190].
+            ("sup_x", ref_bytes[100..190].to_vec(), 0x800, 0, 2000),
+        ];
+        write_single_end_records_ordered(path, &records);
+    }
+
+    #[test]
+    fn grouped_alignment_single_end_emits_on_target_supplementary_not_off_target_primary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("sup_x.bam");
+        build_grouped_single_end_supplementary_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (metrics, single_end, sink) = run_grouped_alignment(&bam_path, &ref_fasta, false, true);
+
+        assert!(single_end, "an all-0x1-unset fixture must classify single-end");
+        assert_eq!(metrics.pass1_emitted, 1, "only sup_x is a candidate");
+        let (r1, r2) = sink.pairs.iter().find(|(r, _)| r.id == "sup_x").unwrap();
+        assert!(r2.is_none(), "single-end read emits LONE");
+        assert_eq!(
+            r1.seq,
+            PARALLEL_TEST_REF.as_bytes()[100..190].to_vec(),
+            "must emit the ON-TARGET supplementary's SEQ (B), matching the coordinate path"
+        );
+        assert_ne!(r1.seq, ref_bytes_first_90(), "must NOT emit the off-target primary's SEQ (A)");
+    }
+
+    #[test]
+    fn grouped_alignment_single_end_on_target_read_failing_good_is_still_emitted() {
+        // "Defect B" verification: on-target single-end reads are emitted after
+        // ONLY the low-complexity check -- NO good()/HasHitInSet gate (T1K
+        // BamExtractor.cpp:836-850). A `noise(90)` read is non-low-complexity
+        // but NOT a kmer candidate, yet -- placed on-target -- the coordinate
+        // path emits it, so the grouped path must too. Gating on-target behind
+        // good() here would break set-equality and the coordinate regression.
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("se_ontarget_noise.bam");
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        // Document that the on-target read's SEQ genuinely fails good().
+        let filter = RefKmerFilter::from_reference_fasta(&ref_fasta, INITIAL_KMER_LENGTH).unwrap();
+        assert!(
+            !filter.is_good_candidate(&noise(90)),
+            "the noise read must NOT be a good candidate (so this proves good() is not gated)"
+        );
+
+        let records: Vec<(&str, Vec<u8>, u16, i32, i64)> = vec![
+            ("se_pad_a", noise(90), 0, 0, 60_000), // off-target: not a candidate
+            ("noise_on", noise(90), 0, 0, 2000),   // on-target, fails good() -> STILL emitted
+        ];
+        write_single_end_records_ordered(&bam_path, &records);
+
+        let (metrics, single_end, sink) = run_grouped_alignment(&bam_path, &ref_fasta, false, true);
+        assert!(single_end);
+        assert_eq!(metrics.pass1_emitted, 1);
+        let (r1, _) = sink.pairs.iter().find(|(r, _)| r.id == "noise_on").unwrap();
+        assert_eq!(r1.seq, noise(90), "the on-target non-candidate read must be emitted verbatim");
+    }
+
+    #[test]
+    fn grouped_alignment_single_end_set_equals_coordinate_path() {
+        // Test 3 (STRONGEST): build ONE single-end record set, write it BOTH
+        // coordinate-sorted and QNAME-grouped, run the coordinate extractor on
+        // the former and the grouped extractor on the latter, and assert the
+        // emitted (id, seq, qual) SETS are EQUAL. Covers: a plain on-target read;
+        // the off-target-primary / on-target-supplementary shape (`sup_x`); an
+        // on-target read failing good() (`noise_on`); and `multi_on`, whose two
+        // on-target records have DIFFERENT coordinate order vs. file order (so it
+        // pins the "first EMITTABLE in COORDINATE order" selection, not file
+        // order). This previews Task 9's set-equality gate for single-end.
+        let tmp = tempfile::tempdir().unwrap();
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        // The shared record set (name, seq, flags, tid, pos), single-end (0x1
+        // unset), all on `chr1` (tid 0). Insertion order below is the FILE order
+        // WITHIN each QNAME group for the grouped BAM.
+        let seq_a = ref_bytes[0..90].to_vec(); // sup_x primary (off-target)
+        let seq_b = ref_bytes[100..190].to_vec(); // sup_x supplementary (on-target)
+        let seq_c = ref_bytes[200..290].to_vec(); // multi_on primary (on-target, pos 3000)
+        let seq_d = ref_bytes[0..90].to_vec(); // multi_on supplementary (on-target, pos 1100)
+        let records: Vec<(&str, Vec<u8>, u16, i32, i64)> = vec![
+            ("plain_on", ref_bytes[0..90].to_vec(), 0, 0, 1100),
+            ("noise_on", noise(90), 0, 0, 2000),
+            ("sup_x", seq_a.clone(), 0, 0, 50_000),
+            ("sup_x", seq_b.clone(), 0x800, 0, 2500),
+            ("multi_on", seq_c.clone(), 0, 0, 3000),
+            ("multi_on", seq_d.clone(), 0x800, 0, 1100),
+        ];
+
+        // Coordinate BAM: records sorted by (tid, pos) ascending (stable).
+        let mut coord_records = records.clone();
+        coord_records.sort_by_key(|(_, _, _, tid, pos)| (*tid, *pos));
+        let coord_bam = tmp.path().join("coord.bam");
+        write_single_end_records_ordered(&coord_bam, &coord_records);
+
+        // Grouped BAM: records sorted by name (stable -> preserves file order
+        // within a QNAME group).
+        let mut grouped_records = records.clone();
+        grouped_records.sort_by_key(|(name, _, _, _, _)| *name);
+        let grouped_bam = tmp.path().join("grouped.bam");
+        write_single_end_records_ordered(&grouped_bam, &grouped_records);
+
+        let coord_sink = run_full_parallel(&coord_bam, &ref_fasta, 1);
+        let (_m, grouped_single_end, grouped_sink) =
+            run_grouped_alignment(&grouped_bam, &ref_fasta, false, true);
+        assert!(grouped_single_end, "the grouped fixture must classify single-end");
+
+        let coord_set = single_end_emit_set(&coord_sink);
+        let grouped_set = single_end_emit_set(&grouped_sink);
+        assert_eq!(
+            grouped_set, coord_set,
+            "grouped single-end emitted (id, seq, qual) set must equal the coordinate path's"
+        );
+
+        // Spell out the expected (id, seq) pairs so a regression on EITHER path
+        // is caught, not just a coincidental agreement. (Qual is uniform here and
+        // already covered by the set-equality above; comparing (id, seq) keeps
+        // this assertion free of the sink's phred-encoding detail.)
+        let coord_id_seq: std::collections::HashSet<(String, Vec<u8>)> =
+            coord_set.iter().map(|(id, seq, _)| (id.clone(), seq.clone())).collect();
+        let expected: std::collections::HashSet<(String, Vec<u8>)> = [
+            ("plain_on".to_string(), ref_bytes[0..90].to_vec()),
+            ("noise_on".to_string(), noise(90)),
+            ("sup_x".to_string(), seq_b), // on-target supplementary B, not off-target primary A
+            ("multi_on".to_string(), seq_d), // earliest-coordinate on-target D, not file-first C
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            coord_id_seq, expected,
+            "the coordinate path's emitted (id, seq) set must match expectations"
+        );
+    }
+
+    // -- Task 9: the differential set-equality GATE for PAIRED input. The
+    // single-end differential above previews the same invariant; this pins the
+    // dominant PAIRED case across the branch-diverse classification ladder.
+
+    /// Writes paired records `(name, seq, flags, tid, pos, mtid, mpos)` to `path`
+    /// in the EXACT order given (the caller pre-sorts: coordinate order for the
+    /// coordinate extractor, QNAME-grouped order for the grouped one), under the
+    /// shared `chr1`/`chr1_alt` header. CIGAR is `Match(seq.len())` for an
+    /// aligned record (`tid >= 0`) and `None` (unmapped) when `tid < 0`.
+    #[allow(clippy::type_complexity)]
+    fn write_paired_records_ordered(
+        path: &std::path::Path,
+        records: &[(&str, Vec<u8>, u16, i32, i64, i32, i64)],
+    ) {
+        let header = grouped_alignment_header();
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+        for (name, seq, flags, tid, pos, mtid, mpos) in records {
+            #[allow(clippy::cast_possible_truncation)]
+            let cig = CigarString(vec![Cigar::Match(seq.len() as u32)]);
+            let cigar = if *tid < 0 { None } else { Some(&cig) };
+            add_grouped_alignment_record(
+                &mut writer,
+                name.as_bytes(),
+                seq,
+                *flags,
+                *tid,
+                *pos,
+                *mtid,
+                *mpos,
+                cigar,
+            );
+        }
+        drop(writer);
+    }
+
+    /// The SET of `(read-1 id, mate-1 seq, mate-2 seq)` triples a [`VecSink`]
+    /// emitted -- the downstream-genotyping key the grouped/coordinate
+    /// set-equality is defined on for paired input.
+    #[allow(clippy::type_complexity)]
+    fn paired_emit_set(
+        sink: &VecSink,
+    ) -> std::collections::HashSet<(String, Vec<u8>, Option<Vec<u8>>)> {
+        sink.pairs
+            .iter()
+            .map(|(r1, r2)| (r1.id.clone(), r1.seq.clone(), r2.as_ref().map(|r| r.seq.clone())))
+            .collect()
+    }
+
+    #[test]
+    fn grouped_alignment_paired_set_equals_coordinate_path() {
+        // Build ONE paired record set, write it BOTH coordinate-sorted and
+        // QNAME-grouped, run the coordinate 2-pass on the former and the grouped
+        // one-pass on the latter, and assert the emitted (id, seq1, seq2) SETS are
+        // EQUAL. Branch coverage: `on_target` (main-chrom aligned, overlaps the
+        // gene -> candidate by overlap, NO seed test); `off_seed` (main-chrom
+        // aligned OUTSIDE the gene with ref-substring SEQs that WOULD seed-hit ->
+        // MUST be excluded, proving no-seed-on-main-chrom); `alt_pair` (aligned to
+        // the ALT contig `chr1_alt` -> per-read `!lc && good` seed branch);
+        // `unaligned_joint` (genuine template-unaligned pair, non-abnormal -> the
+        // JOINT `!lc(s1)&&!lc(s2)&&(good(s1)||good(s2))` predicate).
+        let tmp = tempfile::tempdir().unwrap();
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let m1: u16 = 0x1 | 0x2 | 0x40; // paired, proper, first mate
+        let m2: u16 = 0x1 | 0x2 | 0x80; // paired, proper, second mate
+        let u1: u16 = 0x1 | 0x40 | 0x4 | 0x8; // paired, first, unmapped, mate-unmapped
+        let u2: u16 = 0x1 | 0x80 | 0x4 | 0x8; // paired, second, unmapped, mate-unmapped
+
+        // Insertion order = FILE order within each QNAME group for the grouped BAM.
+        #[allow(clippy::type_complexity)]
+        let records: Vec<(&str, Vec<u8>, u16, i32, i64, i32, i64)> = vec![
+            ("on_target", ref_bytes[0..90].to_vec(), m1, 0, 1100, 0, 1300),
+            ("on_target", ref_bytes[100..190].to_vec(), m2, 0, 1300, 0, 1100),
+            ("off_seed", ref_bytes[0..90].to_vec(), m1, 0, 50_000, 0, 50_200),
+            ("off_seed", ref_bytes[100..190].to_vec(), m2, 0, 50_200, 0, 50_000),
+            ("alt_pair", ref_bytes[0..90].to_vec(), m1, 1, 100, 1, 300),
+            ("alt_pair", ref_bytes[100..190].to_vec(), m2, 1, 300, 1, 100),
+            ("unaligned_joint", ref_bytes[0..90].to_vec(), u1, -1, -1, -1, -1),
+            ("unaligned_joint", ref_bytes[100..190].to_vec(), u2, -1, -1, -1, -1),
+        ];
+
+        // Coordinate BAM: (tid, pos) ascending with UNMAPPED (tid < 0) sorting
+        // LAST (real coordinate-sort order), stable so a pair's members and the
+        // unaligned pair's two mates stay adjacent.
+        let mut coord_records = records.clone();
+        coord_records.sort_by_key(|(_, _, _, tid, pos, _, _)| {
+            (if *tid < 0 { i32::MAX } else { *tid }, *pos)
+        });
+        let coord_bam = tmp.path().join("coord.bam");
+        write_paired_records_ordered(&coord_bam, &coord_records);
+
+        // Grouped BAM: sorted by QNAME (mates adjacent), stable within a group.
+        let mut grouped_records = records.clone();
+        grouped_records.sort_by_key(|(name, _, _, _, _, _, _)| *name);
+        let grouped_bam = tmp.path().join("grouped.bam");
+        write_paired_records_ordered(&grouped_bam, &grouped_records);
+
+        let coord_sink = run_full_parallel(&coord_bam, &ref_fasta, 1);
+        let (_m, grouped_single_end, grouped_sink) =
+            run_grouped_alignment(&grouped_bam, &ref_fasta, false, true);
+        assert!(!grouped_single_end, "the paired fixture must classify paired");
+
+        assert_eq!(
+            paired_emit_set(&grouped_sink),
+            paired_emit_set(&coord_sink),
+            "grouped paired (id, seq1, seq2) set must equal the coordinate path's"
+        );
+
+        // Spell out the expected candidate ids so a regression on EITHER path is
+        // caught, not just a coincidental agreement: `off_seed` excluded (no seed
+        // on the main-chrom aligned branch), the other three present.
+        let ids: std::collections::HashSet<String> =
+            paired_emit_set(&coord_sink).into_iter().map(|(id, _, _)| id).collect();
+        let expected: std::collections::HashSet<String> =
+            ["on_target", "alt_pair", "unaligned_joint"].into_iter().map(String::from).collect();
+        assert_eq!(ids, expected, "off_seed (main-chrom, off-gene, seed-hitting) must be excluded");
     }
 }

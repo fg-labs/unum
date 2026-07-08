@@ -15,14 +15,22 @@
 //!    against the paired/single-end/interleaved [`ReadSource`] the router
 //!    already resolved.
 //! 3. BAM mode ([`run_bam_mode`]) dispatches on `--bam-mode`:
-//!    - `alignment` ([`run_bam_alignment`] → [`run_coordinate_alignment`]):
-//!      Stage 2a implements only coordinate-sorted input; grouped/name-sorted,
-//!      unsorted, and stdin all error as reserved for Stage 2c. Parses `-c`
-//!      as a `_coord.fa` (via [`unum_core::bam_extract::parse_coord_fa`]),
-//!      builds the [`RefKmerFilter`] from its sequences and the sorted
-//!      gene-interval list (via [`unum_core::bam_extract::build_genes`]), and
-//!      calls [`unum_core::bam_extract::extract_from_bam_with_threads`] with
-//!      `-t`. `-f` is unused (and rejected) in this mode.
+//!    - `alignment` ([`run_bam_alignment`]) routes by `@HD` sort order,
+//!      mirroring `no-alignment`'s dispatch: a coordinate-sorted FILE takes
+//!      the seekable 2-pass ([`run_coordinate_alignment`] →
+//!      [`unum_core::bam_extract::extract_from_bam_with_threads`]); a
+//!      grouped/name-sorted input, FILE **or STDIN**, takes the
+//!      stdin-capable one-pass interval matcher
+//!      ([`run_grouped_alignment`] →
+//!      [`unum_core::bam_extract::extract_from_bam_alignment_grouped`]). An
+//!      unsorted/coordinate BAM from stdin is still rejected (that path
+//!      needs a seekable 2-pass; a pipe cannot seek), and an unsorted FILE is
+//!      rejected outright (`alignment` has no order-independent fallback,
+//!      unlike `no-alignment`). Both alignment routes parse `-c` as a
+//!      `_coord.fa` (via [`unum_core::bam_extract::parse_coord_fa`]) and
+//!      build the [`RefKmerFilter`] from its sequences and the sorted
+//!      gene-interval list (via [`unum_core::bam_extract::build_genes`]).
+//!      `-f` is unused (and rejected) in this mode.
 //!    - `no-alignment` ([`run_bam_no_alignment`]): routes by `@HD` sort
 //!      order instead of requiring coordinate-sort -- a coordinate/unsorted
 //!      FILE takes the seekable 2-pass name-map
@@ -429,47 +437,131 @@ fn run_bam_mode(args: &ExtractArgs, spec: &BamInputSpec, mode: BamMode) -> Resul
     }
 }
 
-/// Executes `--bam-mode alignment` extraction. Stage 2a implements only
-/// coordinate-sorted input; grouped/name-sorted, unsorted, and stdin are all
-/// a loud reserved-for-a-later-release error (Stage 2c adds the one-pass
-/// interval matcher these need).
+/// Executes `--bam-mode alignment` extraction: routes by `@HD` sort order,
+/// mirroring [`run_bam_no_alignment`]'s dispatch (NOT by requiring
+/// coordinate-sort unconditionally, like the pre-Stage-2c behavior). A
+/// coordinate-sorted FILE takes the seekable 2-pass
+/// ([`run_coordinate_alignment`]); a grouped/name-sorted input -- FILE **or
+/// STDIN** -- takes the stdin-capable one-pass interval matcher
+/// ([`run_grouped_alignment`]). Unlike `no-alignment`, an unsorted BAM has no
+/// order-independent fallback for `alignment` (the coordinate 2-pass and the
+/// grouped one-pass both rely on sort order to reunite mates efficiently), so
+/// it is rejected outright for both FILE and STDIN input; a coordinate/
+/// unsorted BAM from stdin is also rejected (the coordinate path needs a
+/// seekable 2-pass, which a pipe cannot supply).
 ///
 /// # Errors
 ///
-/// Returns an error for grouped/name-sorted or unsorted input, or stdin
-/// (all reserved for Stage 2c), or any extraction failure.
+/// Returns an error for unsorted input (FILE or STDIN), for coordinate input
+/// from stdin, or any extraction failure.
 fn run_bam_alignment(args: &ExtractArgs, spec: &BamInputSpec) -> Result<()> {
-    // Stage 2a alignment == the existing coordinate 2-pass, which needs a
-    // seekable file. stdin is reserved here, for BAM or CRAM alike (a
-    // coordinate-sorted CRAM from stdin would need the same seekable 2-pass).
-    let (bam_path, is_cram) = match spec {
-        BamInputSpec::Path { path, is_cram } => (path.as_str(), *is_cram),
-        BamInputSpec::Stdin => bail!(
-            "coordinate-sorted BAM/CRAM extraction needs a seekable file; a BAM/CRAM from stdin \
-             requires the grouped/name-sorted one-pass (available in a later release) -- \
-             redirect to a file, or pass a grouped BAM once supported"
-        ),
-    };
+    match spec {
+        BamInputSpec::Stdin => {
+            // Use from_stdin_with_reference() (NOT open("-")) -- see
+            // run_bam_no_alignment's Stdin arm doc comment for why (no-network
+            // CRAM guarantee, `Alignments::from_stdin`'s FileNotFound
+            // footgun).
+            let mut alignments = Alignments::from_stdin_with_reference(args.reference.as_deref())
+                .context("opening BAM/CRAM stream from stdin")?;
+            // Guard on the header BEFORE the one-pass, same rationale as
+            // `ensure_stdin_no_alignment_sort_order` (unit-testable without a
+            // real stdin stream).
+            ensure_stdin_alignment_sort_order(alignments.sort_order())?;
+            run_grouped_alignment(args, &mut alignments, false)
+        }
+        BamInputSpec::Path { path, is_cram } => {
+            let mut alignments =
+                Alignments::open_with_reference(path, require_reference_for_cram(args, *is_cram)?)
+                    .with_context(|| format!("opening BAM/CRAM {path}"))?;
+            match alignments.sort_order() {
+                SortOrder::Coordinate => run_coordinate_alignment(args, alignments),
+                SortOrder::QueryName | SortOrder::QueryGrouped => {
+                    run_grouped_alignment(args, &mut alignments, true)
+                }
+                SortOrder::Unsorted => bail!(
+                    "--bam-mode alignment requires a coordinate-sorted BAM (@HD SO:coordinate); \
+                     this input is unsorted/unstated -- run `samtools sort`"
+                ),
+            }
+        }
+    }
+}
 
-    let alignments =
-        Alignments::open_with_reference(bam_path, require_reference_for_cram(args, is_cram)?)
-            .with_context(|| format!("opening BAM/CRAM {bam_path}"))?;
-
-    // Sort-order guard: alignment (coordinate 2-pass) requires SO:coordinate.
-    match alignments.sort_order() {
-        SortOrder::Coordinate => {}
-        SortOrder::QueryName | SortOrder::QueryGrouped => bail!(
-            "--bam-mode alignment on a grouped/name-sorted BAM uses a one-pass interval \
-             matcher that is not yet available (later release); coordinate-sort the BAM \
-             (samtools sort) to use the current alignment path"
-        ),
-        SortOrder::Unsorted => bail!(
-            "--bam-mode alignment requires a coordinate-sorted BAM (@HD SO:coordinate); \
-             this input is unsorted/unstated -- run `samtools sort`"
+/// Guards a stdin-sourced BAM's `sort_order` for `--bam-mode alignment`: only
+/// grouped/name-sorted input can be matched in one streaming pass
+/// ([`run_grouped_alignment`]); coordinate/unsorted still needs the seekable
+/// 2-pass name-map ([`run_coordinate_alignment`]), which a pipe cannot
+/// supply (no `rewind`). Mirrors [`ensure_stdin_no_alignment_sort_order`]
+/// (same rejected variants, same reasoning), extracted out of
+/// [`run_bam_alignment`]'s `Stdin` arm purely so this routing decision is
+/// unit-testable on a plain [`SortOrder`] value, without needing a real
+/// stdin stream.
+///
+/// # Errors
+///
+/// Returns an error for `SortOrder::Coordinate`/`SortOrder::Unsorted`.
+fn ensure_stdin_alignment_sort_order(sort_order: SortOrder) -> Result<()> {
+    match sort_order {
+        SortOrder::QueryName | SortOrder::QueryGrouped => Ok(()),
+        SortOrder::Coordinate | SortOrder::Unsorted => bail!(
+            "--bam-mode alignment on a coordinate/unsorted BAM/CRAM from stdin needs a seekable \
+             file for the 2-pass; redirect to a file, or pipe a grouped/name-sorted BAM (@HD \
+             SO:queryname or GO:query)"
         ),
     }
+}
 
-    run_coordinate_alignment(args, alignments)
+/// Runs the grouped/name-sorted one-pass `alignment` extraction (stdin-
+/// capable) -- [`bam_extract::extract_from_bam_alignment_grouped`], the
+/// `alignment`-mode twin of [`run_no_alignment_grouped`]. Parses `-c` for
+/// both the gene intervals and the k-mer seed reference, exactly like
+/// [`run_coordinate_alignment`] (this is still `alignment` mode -- `-f`
+/// remains rejected). `single_end` -- hence the output filename(s) -- is not
+/// knowable up front on the `!seekable` (stdin) path, so [`FastqFileSink`]
+/// is created via a factory closure the extractor calls itself the moment
+/// `single_end` is known, same as [`run_no_alignment_grouped`]'s factory.
+///
+/// # Errors
+///
+/// Returns an error if `-f` was given (rejected), `-c` is missing or cannot
+/// be opened/parsed, the coord FASTA's chroms cannot be resolved against the
+/// BAM header, the output FASTQ file(s) cannot be created, or the underlying
+/// extraction fails.
+fn run_grouped_alignment(
+    args: &ExtractArgs,
+    alignments: &mut Alignments,
+    seekable: bool,
+) -> Result<()> {
+    require_no_seq_fasta_in_alignment(args)?;
+    let coord = require_coord_fasta(args)?;
+
+    let coord_records = bam_extract::parse_coord_fa(Path::new(coord))
+        .with_context(|| format!("parsing coord FASTA {coord}"))?;
+    let mut filter = RefKmerFilter::from_reference_fasta(Path::new(coord), INITIAL_KMER_LENGTH)
+        .with_context(|| format!("loading coord FASTA sequences {coord}"))?;
+    let genes = bam_extract::build_genes(alignments, &coord_records)
+        .context("resolving coord FASTA chroms to BAM header chrIds")?;
+
+    let threads = resolve_threads(args.threads);
+    let (metrics, single_end, mut sink) = bam_extract::extract_from_bam_alignment_grouped(
+        alignments,
+        &mut filter,
+        &genes,
+        args.abnormal_unmapped,
+        args.mate_id_suffix_len,
+        threads,
+        seekable,
+        |single_end| {
+            FastqFileSink::create(&args.prefix, !single_end).with_context(|| {
+                format!("creating output FASTQ file(s) for prefix {}", args.prefix)
+            })
+        },
+    )
+    .context("extracting candidate reads from BAM (grouped alignment)")?;
+    sink.flush()?;
+
+    report_alignment_metrics(single_end, &metrics);
+    Ok(())
 }
 
 /// Executes `--bam-mode no-alignment` extraction: routes by `@HD` sort
@@ -744,7 +836,16 @@ fn run_coordinate_alignment(args: &ExtractArgs, mut alignments: Alignments) -> R
     .context("extracting candidate reads from BAM")?;
     sink.flush()?;
 
-    if metrics.single_end {
+    report_alignment_metrics(metrics.single_end, &metrics);
+    Ok(())
+}
+
+/// Shared metrics `eprintln`, mirroring [`report_no_alignment_metrics`]'s
+/// style (kept un-prefixed -- "no-alignment" -- since this is the
+/// `alignment`-mode wording) -- used by both [`run_coordinate_alignment`]
+/// and [`run_grouped_alignment`].
+fn report_alignment_metrics(single_end: bool, metrics: &bam_extract::BamExtractMetrics) {
+    if single_end {
         eprintln!(
             "extracted {} candidate reads (single-end, kmer_length={}, hit_len_required={})",
             metrics.pass1_emitted, metrics.kmer_length, metrics.hit_len_required,
@@ -761,8 +862,6 @@ fn run_coordinate_alignment(args: &ExtractArgs, mut alignments: Alignments) -> R
             metrics.candidates_recorded,
         );
     }
-
-    Ok(())
 }
 
 /// Writes candidate pairs/reads to FASTQ file(s), ported from
@@ -986,16 +1085,32 @@ mod tests {
     }
 
     #[test]
-    fn alignment_from_stdin_is_reserved() {
-        // Unchanged Stage 2a behavior: `alignment` needs a seekable file
-        // (the coordinate 2-pass), so BAM-from-stdin is still reserved for
-        // Stage 2c regardless of the no-alignment routing this task adds.
-        // `run_bam_alignment`'s `Stdin` arm `bail!`s before touching any
-        // real I/O, so this is a real unit test (no stdin stream needed).
-        let err = run_bam_alignment(&args(), &BamInputSpec::Stdin).unwrap_err().to_string();
+    fn alignment_stdin_sort_order_guard_allows_grouped_rejects_coordinate() {
+        // `run_bam_alignment`'s `Stdin` arm must call `Alignments::from_stdin()`
+        // (which needs a real stdin stream) just to read the header's sort
+        // order -- so this exercises the extracted
+        // `ensure_stdin_alignment_sort_order` guard directly on a plain
+        // `SortOrder` value instead, proving the routing decision itself
+        // (grouped/name-sorted allowed, coordinate/unsorted rejected)
+        // without needing a real pipe. Mirrors
+        // `no_alignment_stdin_sort_order_guard_allows_grouped_rejects_coordinate`.
+        ensure_stdin_alignment_sort_order(SortOrder::QueryName)
+            .expect("name-sorted BAM from stdin must be allowed (grouped one-pass)");
+        ensure_stdin_alignment_sort_order(SortOrder::QueryGrouped)
+            .expect("grouped BAM from stdin must be allowed (grouped one-pass)");
+
+        let coord_err =
+            ensure_stdin_alignment_sort_order(SortOrder::Coordinate).unwrap_err().to_string();
         assert!(
-            err.contains("stdin") || err.contains("seekable"),
-            "BAM from stdin must be reserved with a file-redirect hint: {err}"
+            coord_err.contains("seekable") || coord_err.contains("stdin"),
+            "coordinate BAM from stdin must be rejected with a file-redirect hint: {coord_err}"
+        );
+
+        let unsorted_err =
+            ensure_stdin_alignment_sort_order(SortOrder::Unsorted).unwrap_err().to_string();
+        assert!(
+            unsorted_err.contains("seekable") || unsorted_err.contains("stdin"),
+            "unsorted BAM from stdin must be rejected with a file-redirect hint: {unsorted_err}"
         );
     }
 

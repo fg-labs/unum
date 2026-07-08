@@ -854,7 +854,12 @@ fn fai_contig_names(ref_path: &Path) -> Result<std::collections::HashSet<String>
     );
     let text =
         std::fs::read_to_string(&fai).with_context(|| format!("reading {}", fai.display()))?;
-    Ok(text.lines().filter_map(|line| line.split('\t').next().map(str::to_owned)).collect())
+    Ok(text
+        .lines()
+        .filter_map(|line| line.split('\t').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 /// Parses the `SN:` (sequence name) values of every `@SQ` line in `header`,

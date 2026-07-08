@@ -64,8 +64,11 @@ pub struct RunArgs {
     pub ref_coord_fasta: Option<String>,
 
     /// Reference genome FASTA for decoding CRAM (a `.fai` sibling is required;
-    /// build with `samtools faidx`). REQUIRED for CRAM input; ignored for
-    /// BAM/FASTQ. Used exclusively — no REF_PATH/REF_CACHE/network fallback.
+    /// build with `samtools faidx`). REQUIRED for CRAM input; ignored for a
+    /// file-backed BAM and for FASTQ. NOTE: a BAM/SAM piped on **stdin** cannot
+    /// be format-sniffed before decode, so a supplied `-r` still runs the `@SQ`
+    /// coverage preflight there — on stdin, pass `-r` only for CRAM. Used
+    /// exclusively — no REF_PATH/REF_CACHE/network fallback.
     #[arg(short = 'r', long = "reference", value_name = "STRING")]
     pub reference: Option<String>,
 
@@ -127,13 +130,15 @@ pub struct BuildArgs {
 ///   identical to the FASTQ path (BAM as packaged reads). Builds its k-mer
 ///   filter from `-f`; `-c` is unused (and rejected) in this mode.
 ///
-/// (`alignment` is only implemented for a coordinate-sorted BAM as of this
-/// stage; grouped/name-sorted or stdin `alignment` input is rejected with a
-/// "later release" message, as is CRAM input (`-r` is accepted by the CLI
-/// for a future release; it is not yet wired into extraction). `no-alignment`
-/// is fully routed -- coordinate/unsorted takes a 2-pass name-map,
-/// grouped/name-sorted (including stdin) takes a one-pass -- see
-/// `crate::stages::extract::run_bam_no_alignment`.)
+/// (Both modes are fully routed by `@HD` sort order. `alignment`:
+/// coordinate-sorted takes the seekable 2-pass name-map, grouped/name-sorted
+/// (including stdin) takes the one-pass interval matcher, unsorted is rejected
+/// -- see `crate::stages::extract::run_bam_alignment`. `no-alignment`:
+/// coordinate/unsorted takes a 2-pass name-map, grouped/name-sorted (including
+/// stdin) takes a one-pass -- see
+/// `crate::stages::extract::run_bam_no_alignment`. CRAM decodes in either mode
+/// via `-r` (required for CRAM; the reference is used exclusively, with no
+/// REF_PATH/REF_CACHE/network fallback).)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum BamMode {
     /// Class B: coordinate/position-based selection (`bam-extractor` parity).
@@ -167,8 +172,11 @@ pub struct ExtractArgs {
     pub ref_coord_fasta: Option<String>,
 
     /// Reference genome FASTA for decoding CRAM (a `.fai` sibling is required;
-    /// build with `samtools faidx`). REQUIRED for CRAM input; ignored for
-    /// BAM/FASTQ. Used exclusively — no REF_PATH/REF_CACHE/network fallback.
+    /// build with `samtools faidx`). REQUIRED for CRAM input; ignored for a
+    /// file-backed BAM and for FASTQ. NOTE: a BAM/SAM piped on **stdin** cannot
+    /// be format-sniffed before decode, so a supplied `-r` still runs the `@SQ`
+    /// coverage preflight there — on stdin, pass `-r` only for CRAM. Used
+    /// exclusively — no REF_PATH/REF_CACHE/network fallback.
     #[arg(short = 'r', long = "reference", value_name = "STRING")]
     pub reference: Option<String>,
 

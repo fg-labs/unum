@@ -1,10 +1,10 @@
 //! Binary-level end-to-end tests for `unum extract --bam-mode`: proves that
 //! `-i x.bam --bam-mode alignment` and `-b x.bam --bam-mode alignment` reach
-//! the SAME coordinate-`alignment` extraction path, that `--bam-mode
-//! no-alignment` routes by sort order (coordinate -> 2-pass, name-sorted ->
-//! grouped one-pass) instead of erroring, and that every remaining
-//! reserved/guard combination (missing `--bam-mode`, `alignment` on a
-//! non-coordinate-sorted BAM) errors with a helpful, on-topic message.
+//! the SAME coordinate-`alignment` extraction path, that BOTH `--bam-mode
+//! no-alignment` and `--bam-mode alignment` route by sort order (coordinate
+//! -> 2-pass, grouped/name-sorted -> one-pass, FILE or stdin) instead of
+//! erroring, and that the one remaining guard (unsorted input, for either
+//! mode) errors with a helpful, on-topic message.
 //!
 //! The coordinate `alignment` extraction itself is already byte-golden-gated
 //! at the library level by `unum-core/tests/golden_bam_extract.rs`, so this
@@ -158,14 +158,31 @@ fn build_unsorted_bam(dir: &Path) -> PathBuf {
 /// something to work with, without changing [`build_bam`] (shared by other
 /// tests in this file that rely on its single-pair shape).
 fn build_coordinate_bam_replicated(dir: &Path, copies: u32) -> PathBuf {
-    let path = dir.join("coordinate_replicated.bam");
+    build_bam_replicated(dir, "coordinate_replicated.bam", "coordinate", copies)
+}
+
+/// The SAME replicated fixture as [`build_coordinate_bam_replicated`], but
+/// under `@HD SO:queryname` -- for the `run -b --bam-mode alignment`
+/// grouped/name-sorted fused-genotyping test, which needs the same
+/// past-`filter_cov` abundance boost as the coordinate route (see
+/// [`build_coordinate_bam_replicated`]'s doc comment for why).
+fn build_name_sorted_bam_replicated(dir: &Path, copies: u32) -> PathBuf {
+    build_bam_replicated(dir, "name_sorted_replicated.bam", "queryname", copies)
+}
+
+/// Shared builder behind [`build_coordinate_bam_replicated`]/
+/// [`build_name_sorted_bam_replicated`]: writes `copies` DUPLICATE on-target
+/// pairs (same positions/sequences as [`build_bam`]'s single pair, distinct
+/// `QNAME`s) under the given `@HD SO:<sort_order_tag>`.
+fn build_bam_replicated(dir: &Path, filename: &str, sort_order_tag: &str, copies: u32) -> PathBuf {
+    let path = dir.join(filename);
     let kir_seq = kir2dl1_sequence();
     let kir_bytes = kir_seq.as_bytes();
 
     let mut header = Header::new();
     let mut hd = HeaderRecord::new(b"HD");
     hd.push_tag(b"VN", "1.6");
-    hd.push_tag(b"SO", "coordinate");
+    hd.push_tag(b"SO", sort_order_tag);
     header.push_record(&hd);
     let mut sq = HeaderRecord::new(b"SQ");
     sq.push_tag(b"SN", KIR2DL1_CHROM);
@@ -352,10 +369,74 @@ fn no_alignment_mode_on_name_sorted_bam_runs_the_grouped_one_pass() {
 }
 
 #[test]
-fn alignment_on_name_sorted_bam_errors_with_sort_hint() {
+fn grouped_alignment_bam_file_extracts() {
+    // `--bam-mode alignment` on a grouped/name-sorted FILE now routes to the
+    // stdin-capable one-pass interval matcher
+    // (`bam_extract::extract_from_bam_alignment_grouped`, via
+    // `run_grouped_alignment`) instead of erroring -- the SAME on-target
+    // pair as `build_coordinate_bam`, just `@HD SO:queryname`.
     let tmp = tempfile::tempdir().unwrap();
     let coord_fa = coord_fasta_path();
     let bam = build_name_sorted_bam(tmp.path());
+    let out_prefix = tmp.path().join("o");
+    run_extract_ok(&[
+        "-c",
+        s(&coord_fa),
+        "-b",
+        s(&bam),
+        "--bam-mode",
+        "alignment",
+        "-o",
+        s(&out_prefix),
+    ]);
+    let out1 = std::fs::read(paired_out_1(&out_prefix)).unwrap();
+    assert!(
+        !out1.is_empty(),
+        "grouped-alignment one-pass should emit the on-target candidate pair"
+    );
+}
+
+#[test]
+fn stdin_alignment_grouped_extracts() {
+    // The SAME grouped/name-sorted BAM, piped via `-i -` -- proves the
+    // `BamInputSpec::Stdin` arm of `run_bam_alignment` reaches the grouped
+    // one-pass (`seekable = false`) rather than the stdin-reserved error
+    // (which now only fires for a coordinate/unsorted BAM from stdin -- see
+    // `ensure_stdin_alignment_sort_order`).
+    let tmp = tempfile::tempdir().unwrap();
+    let coord_fa = coord_fasta_path();
+    let bam = build_name_sorted_bam(tmp.path());
+    let bam_file = std::fs::File::open(&bam).expect("open fixture BAM for stdin redirect");
+    let out_prefix = tmp.path().join("o");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_unum"))
+        .arg("extract")
+        .args(["-i", "-", "--bam-mode", "alignment", "-c", s(&coord_fa), "-o", s(&out_prefix)])
+        .stdin(Stdio::from(bam_file))
+        .output()
+        .expect("run unum extract with stdin redirected from the fixture BAM");
+    assert!(
+        output.status.success(),
+        "stdin grouped alignment must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let out1 = std::fs::read(paired_out_1(&out_prefix)).unwrap();
+    assert!(
+        !out1.is_empty(),
+        "stdin grouped-alignment one-pass should emit the on-target candidate pair"
+    );
+}
+
+#[test]
+fn unsorted_alignment_still_errors() {
+    // Unlike grouped/name-sorted, an unsorted (no genuine `@HD SO:coordinate`
+    // or `SO:queryname`/`GO:query`) BAM still has no order-independent
+    // fallback for `alignment` mode -- both the coordinate 2-pass and the
+    // grouped one-pass rely on sort order to reunite mates, so this remains
+    // a hard error naming `samtools sort` as the fix.
+    let tmp = tempfile::tempdir().unwrap();
+    let coord_fa = coord_fasta_path();
+    let bam = build_bam(tmp.path(), "unsorted.bam", "unsorted");
     let out = run_extract_raw(&[
         "-c",
         s(&coord_fa),
@@ -368,7 +449,10 @@ fn alignment_on_name_sorted_bam_errors_with_sort_hint() {
     ]);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("coordinate") || err.contains("samtools sort"));
+    assert!(
+        err.contains("samtools sort"),
+        "unsorted alignment error must name `samtools sort`: {err}"
+    );
 }
 
 #[test]
@@ -1069,10 +1153,10 @@ fn cram_without_reference_errors_naming_cram_and_r() {
 /// default CRAM reference chain, which defaults to a LIVE outbound fetch
 /// against the EBI `REF_PATH` endpoint (`https://www.ebi.ac.uk/ena/cram/md5/...`)
 /// -- a hard violation of this project's no-outbound-network rule. `main`'s
-/// `neutralize_cram_ref_path_network_fallback` now points `REF_PATH` at an
-/// inert local sentinel before `Cli::parse()` ever runs, so the SAME
-/// `-r`-less stdin CRAM must instead fail LOCALLY (no reference resolves
-/// against the sentinel), promptly, with no successful output.
+/// `neutralize_cram_ref_path_network_fallback` now points `REF_PATH` at a
+/// fresh, private, `0700` per-process directory (empty, so no md5 reference
+/// resolves) before `Cli::parse()` ever runs, so the SAME `-r`-less stdin CRAM
+/// must instead fail LOCALLY, promptly, with no successful output.
 ///
 /// The fixture header is queryname-sorted with an explicit `M5` tag (see
 /// [`cram_bam_header_queryname_with_m5`]): `no-alignment`'s stdin arm rejects
@@ -1328,43 +1412,84 @@ fn run_bam_alignment_matches_extract_then_genotype() {
     );
 }
 
-/// `run -b --bam-mode alignment` on a grouped/name-sorted BAM is explicitly OUT of Task 5's
-/// scope (the grouped-alignment one-pass extractor lands in a later task) -- proves it fails
-/// with a clear deferral message rather than silently misrouting or panicking, mirroring
-/// `alignment_on_name_sorted_bam_errors_with_sort_hint`'s coverage of the same guard on
-/// `extract`.
+/// Same parity check as [`run_bam_alignment_matches_extract_then_genotype`], but for the
+/// grouped-alignment sub-route this task adds: `run -b --bam-mode alignment` on a
+/// grouped/name-sorted BAM now reaches
+/// [`unum_core::bam_extract::extract_from_bam_alignment_grouped`] (via
+/// `run_bam_alignment_fused`) instead of the earlier deferral error. Uses
+/// [`build_name_sorted_bam_replicated`] (not the single-pair [`build_name_sorted_bam`]) for the
+/// same reason [`run_bam_alignment_matches_extract_then_genotype`] uses
+/// [`build_coordinate_bam_replicated`] -- see that fixture's doc comment.
 #[test]
-fn run_bam_alignment_on_grouped_bam_lands_in_later_task() {
-    let tmp = tempfile::tempdir().unwrap();
+fn run_bam_alignment_on_grouped_bam_runs_the_grouped_one_pass() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let tmp = tmp_dir.path();
     let coord_fa = coord_fasta_path();
-    let ref_fa = write_run_no_alignment_ref_fasta(tmp.path());
-    let bam = build_name_sorted_bam(tmp.path());
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp);
+    let bam = build_name_sorted_bam_replicated(tmp, 5);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_unum"))
-        .arg("run")
-        .args([
-            "-b",
-            s(&bam),
-            "--bam-mode",
-            "alignment",
-            "-c",
-            s(&coord_fa),
-            "-f",
-            s(&ref_fa),
-            "-o",
-            s(&tmp.path().join("o")),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        !out.status.success(),
-        "run -b --bam-mode alignment on a grouped/name-sorted BAM must fail (deferred to a \
-         later task)"
+    // Fused: `unum run -b <bam> --bam-mode alignment -c <coord_fa> -f <ref_fa>` on a
+    // grouped/name-sorted BAM.
+    let run_prefix = tmp.join("via_run");
+    run_run_ok(&[
+        "-b",
+        s(&bam),
+        "--bam-mode",
+        "alignment",
+        "-c",
+        s(&coord_fa),
+        "-f",
+        s(&ref_fa),
+        "-o",
+        s(&run_prefix),
+    ]);
+
+    // Separately: `unum extract -b <bam> --bam-mode alignment -c <coord_fa>` then `unum
+    // genotype -f <ref_fa>` on the emitted candidate FASTQs.
+    let extract_prefix = tmp.join("via_extract");
+    run_extract_ok(&[
+        "-b",
+        s(&bam),
+        "--bam-mode",
+        "alignment",
+        "-c",
+        s(&coord_fa),
+        "-o",
+        s(&extract_prefix),
+    ]);
+    let genotype_prefix = tmp.join("via_genotype");
+    run_genotype_ok(&[
+        "-f",
+        s(&ref_fa),
+        "-1",
+        s(&paired_out_1(&extract_prefix)),
+        "-2",
+        s(&paired_out_2(&extract_prefix)),
+        "-o",
+        s(&genotype_prefix),
+    ]);
+
+    let run_genotype_tsv =
+        std::fs::read_to_string(format!("{}_genotype.tsv", run_prefix.display())).unwrap();
+    let separate_genotype_tsv =
+        std::fs::read_to_string(format!("{}_genotype.tsv", genotype_prefix.display())).unwrap();
+    assert_eq!(
+        run_genotype_tsv, separate_genotype_tsv,
+        "`run -b --bam-mode alignment`'s fused _genotype.tsv (grouped/name-sorted route) must \
+         match the separate extract-then-genotype pipeline byte-for-byte"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    let kir2dl1_line = run_genotype_tsv
+        .lines()
+        .find(|line| line.starts_with("KIR2DL1\t"))
+        .expect("run_genotype_tsv must contain a KIR2DL1 row");
     assert!(
-        stderr.contains("later task") || stderr.contains("grouped-alignment"),
-        "expected a later-task deferral message, got: {stderr}"
+        kir2dl1_line.contains("KIR2DL1*001"),
+        "expected a called KIR2DL1*001 allele, got: {kir2dl1_line}"
+    );
+    assert!(
+        !kir2dl1_line.starts_with("KIR2DL1\t0\t"),
+        "expected calledAlleleCnt > 0 (a real call), got: {kir2dl1_line}"
     );
 }
 
