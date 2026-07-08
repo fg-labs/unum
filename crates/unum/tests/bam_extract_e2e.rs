@@ -189,7 +189,7 @@ fn i_and_b_flag_coordinate_alignment_match_and_are_nonempty() {
 
     let out_i = tmp.path().join("via_i");
     run_extract_ok(&[
-        "-f",
+        "-c",
         s(&coord_fa),
         "-i",
         s(&bam),
@@ -201,7 +201,7 @@ fn i_and_b_flag_coordinate_alignment_match_and_are_nonempty() {
 
     let out_b = tmp.path().join("via_b");
     run_extract_ok(&[
-        "-f",
+        "-c",
         s(&coord_fa),
         "-b",
         s(&bam),
@@ -291,7 +291,7 @@ fn alignment_on_name_sorted_bam_errors_with_sort_hint() {
     let coord_fa = coord_fasta_path();
     let bam = build_name_sorted_bam(tmp.path());
     let out = run_extract_raw(&[
-        "-f",
+        "-c",
         s(&coord_fa),
         "-i",
         s(&bam),

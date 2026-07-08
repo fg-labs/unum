@@ -17,12 +17,12 @@
 //! 3. BAM mode ([`run_bam_mode`]) dispatches on `--bam-mode`:
 //!    - `alignment` ([`run_bam_alignment`] → [`run_coordinate_alignment`]):
 //!      Stage 2a implements only coordinate-sorted input; grouped/name-sorted,
-//!      unsorted, and stdin all error as reserved for Stage 2c. Parses `-f`
+//!      unsorted, and stdin all error as reserved for Stage 2c. Parses `-c`
 //!      as a `_coord.fa` (via [`unum_core::bam_extract::parse_coord_fa`]),
 //!      builds the [`RefKmerFilter`] from its sequences and the sorted
 //!      gene-interval list (via [`unum_core::bam_extract::build_genes`]), and
 //!      calls [`unum_core::bam_extract::extract_from_bam_with_threads`] with
-//!      `-t`.
+//!      `-t`. `-f` is unused (and rejected) in this mode.
 //!    - `no-alignment` ([`run_bam_no_alignment`]): routes by `@HD` sort
 //!      order instead of requiring coordinate-sort -- a coordinate/unsorted
 //!      FILE takes the seekable 2-pass name-map
@@ -32,7 +32,7 @@
 //!      ([`unum_core::bam_extract::extract_from_bam_no_alignment_grouped`]).
 //!      The [`RefKmerFilter`] is built directly from `-f`, same as the FASTQ
 //!      path (no coord-FASTA/gene-interval step -- no-alignment has no
-//!      aligned intervals).
+//!      aligned intervals). `-c` is unused (and rejected) in this mode.
 //!
 //! `-t` controls how many worker threads parallelize the per-read candidate
 //! DECISION in both modes; output is byte-identical at any `-t` -- see
@@ -247,6 +247,47 @@ fn require_bam_mode(args: &ExtractArgs) -> Result<BamMode> {
     )
 }
 
+/// Extracts the required `-f` reference-sequence FASTA path, erroring if
+/// absent. Used by FASTQ mode and `--bam-mode no-alignment`, both of which
+/// build their [`RefKmerFilter`] directly from `-f` (see this module's docs).
+fn require_seq_fasta(args: &ExtractArgs) -> Result<&str> {
+    args.ref_seq_fasta.as_deref().context(
+        "this input requires -f <reference-sequence FASTA> (FASTQ / --bam-mode no-alignment)",
+    )
+}
+
+/// Extracts the required `-c` gene-coordinate FASTA path, erroring if absent.
+/// Used by `--bam-mode alignment`, which parses `-c` for both the gene
+/// intervals ([`bam_extract::parse_coord_fa`]) and the k-mer seed reference
+/// ([`RefKmerFilter::from_reference_fasta`]).
+fn require_coord_fasta(args: &ExtractArgs) -> Result<&str> {
+    args.ref_coord_fasta
+        .as_deref()
+        .context("--bam-mode alignment requires -c <gene coordinate FASTA (*_coord.fa)>")
+}
+
+/// Rejects `-c` outside `--bam-mode alignment`: FASTQ and `--bam-mode
+/// no-alignment` have no aligned intervals to build gene records from, so a
+/// coordinate FASTA passed there is a mistake, not a no-op.
+fn require_no_coord_fasta(args: &ExtractArgs) -> Result<()> {
+    ensure!(
+        args.ref_coord_fasta.is_none(),
+        "-c (coord FASTA) applies only to --bam-mode alignment, not FASTQ / no-alignment input"
+    );
+    Ok(())
+}
+
+/// Rejects `-f` under `--bam-mode alignment`: that mode reads its sequences
+/// from `-c` instead (see this module's docs), so a `-f` passed there is a
+/// mistake, not a no-op.
+fn require_no_seq_fasta_in_alignment(args: &ExtractArgs) -> Result<()> {
+    ensure!(
+        args.ref_seq_fasta.is_none(),
+        "-f (reference-sequence FASTA) is unused by extract --bam-mode alignment; pass the coordinate FASTA via -c"
+    );
+    Ok(())
+}
+
 /// Opens one FASTQ/FASTA input (path or `-` for stdin) with content-based
 /// format detection and niffler decompression, erroring on BAM/CRAM.
 fn open_one_fastq(spec: &str) -> Result<FastqReader> {
@@ -308,9 +349,10 @@ fn resolve_legacy_fastq_source(args: &ExtractArgs) -> Result<ReadSource> {
 /// read-1 file or mismatched mate-pair counts -- see that function's doc
 /// comment).
 fn run_fastq_with_source(args: &ExtractArgs, mut source: ReadSource) -> Result<()> {
-    let mut filter =
-        RefKmerFilter::from_reference_fasta(Path::new(&args.ref_seq_fasta), INITIAL_KMER_LENGTH)
-            .with_context(|| format!("loading reference FASTA {}", args.ref_seq_fasta))?;
+    require_no_coord_fasta(args)?;
+    let seq = require_seq_fasta(args)?;
+    let mut filter = RefKmerFilter::from_reference_fasta(Path::new(seq), INITIAL_KMER_LENGTH)
+        .with_context(|| format!("loading reference FASTA {seq}"))?;
 
     let paired = matches!(source, ReadSource::Paired(_, _) | ReadSource::Interleaved(_));
 
@@ -420,9 +462,10 @@ fn run_bam_alignment(args: &ExtractArgs, spec: &BamInputSpec) -> Result<()> {
 /// extraction ([`bam_extract::extract_from_bam_no_alignment`]/
 /// [`bam_extract::extract_from_bam_no_alignment_grouped`]) itself fails.
 fn run_bam_no_alignment(args: &ExtractArgs, spec: &BamInputSpec) -> Result<()> {
-    let mut filter =
-        RefKmerFilter::from_reference_fasta(Path::new(&args.ref_seq_fasta), INITIAL_KMER_LENGTH)
-            .with_context(|| format!("loading reference FASTA {}", args.ref_seq_fasta))?;
+    require_no_coord_fasta(args)?;
+    let seq = require_seq_fasta(args)?;
+    let mut filter = RefKmerFilter::from_reference_fasta(Path::new(seq), INITIAL_KMER_LENGTH)
+        .with_context(|| format!("loading reference FASTA {seq}"))?;
     let similarity = args.similarity;
     let threads = resolve_threads(args.threads);
 
@@ -596,7 +639,7 @@ fn report_no_alignment_metrics(single_end: bool, metrics: &bam_extract::BamExtra
 
 /// The coordinate-sorted `alignment` extraction -- the former `run_bam` body,
 /// now reached only after the mode/sort/stdin/CRAM guards pass. Byte-identical
-/// to Stage 1's `-b` output: parses `-f` as a `_coord.fa`, builds the
+/// to Stage 1's `-b` output: parses `-c` as a `_coord.fa`, builds the
 /// [`RefKmerFilter`] and sorted gene-interval list, and calls
 /// [`unum_core::bam_extract::extract_from_bam`]. Output file naming
 /// (single-end vs. paired) is decided by the BAM's own sampled
@@ -612,12 +655,14 @@ fn report_no_alignment_metrics(single_end: bool, metrics: &bam_extract::BamExtra
 /// [`unum_core::bam_extract::extract_from_bam`] itself fails (e.g. an
 /// unaligned-template mate-pairing error -- see that function's doc comment).
 fn run_coordinate_alignment(args: &ExtractArgs, mut alignments: Alignments) -> Result<()> {
-    let coord_records = bam_extract::parse_coord_fa(Path::new(&args.ref_seq_fasta))
-        .with_context(|| format!("parsing coord FASTA {}", args.ref_seq_fasta))?;
+    require_no_seq_fasta_in_alignment(args)?;
+    let coord = require_coord_fasta(args)?;
 
-    let mut filter =
-        RefKmerFilter::from_reference_fasta(Path::new(&args.ref_seq_fasta), INITIAL_KMER_LENGTH)
-            .with_context(|| format!("loading coord FASTA sequences {}", args.ref_seq_fasta))?;
+    let coord_records = bam_extract::parse_coord_fa(Path::new(coord))
+        .with_context(|| format!("parsing coord FASTA {coord}"))?;
+
+    let mut filter = RefKmerFilter::from_reference_fasta(Path::new(coord), INITIAL_KMER_LENGTH)
+        .with_context(|| format!("loading coord FASTA sequences {coord}"))?;
 
     let genes = bam_extract::build_genes(&alignments, &coord_records)
         .context("resolving coord FASTA chroms to BAM header chrIds")?;
@@ -781,7 +826,9 @@ mod tests {
     /// override just the fields they need.
     fn args() -> ExtractArgs {
         ExtractArgs {
-            ref_seq_fasta: "ref.fa".into(),
+            ref_seq_fasta: Some("ref.fa".into()),
+            ref_coord_fasta: None,
+            reference: None,
             mate1: None,
             mate2: None,
             single: None,
@@ -796,6 +843,21 @@ mod tests {
         }
     }
 
+    /// [`args`] baseline, unchanged -- for tests that want an explicit
+    /// FASTQ-mode name (mirrors [`extract_args_bam`]'s BAM-mode counterpart).
+    fn extract_args_fastq() -> ExtractArgs {
+        args()
+    }
+
+    /// [`args`] baseline with `-b`/`--bam-mode` set, for tests that want a
+    /// BAM-mode `ExtractArgs` without repeating those two field assignments.
+    fn extract_args_bam(bam_path: &str, mode: BamMode) -> ExtractArgs {
+        let mut a = args();
+        a.bam = Some(bam_path.into());
+        a.bam_mode = Some(mode);
+        a
+    }
+
     /// `resolve_extract_input`'s `Ok` variant contains a [`ReadSource`], which
     /// (via its `FastqReader`/`Box<dyn BufRead>`) does not implement `Debug`,
     /// so `Result::unwrap_err` can't be used directly. This extracts just
@@ -805,6 +867,26 @@ mod tests {
             Ok(_) => panic!("expected resolve_extract_input to fail"),
             Err(e) => e.to_string(),
         }
+    }
+
+    #[test]
+    fn alignment_requires_c_and_rejects_f() {
+        let mut a = extract_args_bam("x.bam", BamMode::Alignment);
+        a.ref_coord_fasta = None;
+        assert!(require_coord_fasta(&a).unwrap_err().to_string().contains("-c"));
+        a.ref_coord_fasta = Some("coord.fa".into());
+        a.ref_seq_fasta = Some("seq.fa".into());
+        assert!(require_no_seq_fasta_in_alignment(&a).unwrap_err().to_string().contains("-f"));
+    }
+
+    #[test]
+    fn fastq_requires_f_and_rejects_c() {
+        let mut a = extract_args_fastq();
+        a.ref_seq_fasta = None;
+        assert!(require_seq_fasta(&a).is_err());
+        a.ref_seq_fasta = Some("seq.fa".into());
+        a.ref_coord_fasta = Some("coord.fa".into());
+        assert!(require_no_coord_fasta(&a).unwrap_err().to_string().contains("-c"));
     }
 
     #[test]
@@ -958,7 +1040,7 @@ mod tests {
         let ref_fasta = write_minimal_ref_fasta(tmp.path());
 
         let mut a = args();
-        a.ref_seq_fasta = ref_fasta;
+        a.ref_seq_fasta = Some(ref_fasta);
         a.prefix = tmp.path().join("out").to_str().unwrap().to_string();
 
         let spec = BamInputSpec::Path(bam_path);
@@ -981,7 +1063,7 @@ mod tests {
         let ref_fasta = write_minimal_ref_fasta(tmp.path());
 
         let mut a = args();
-        a.ref_seq_fasta = ref_fasta;
+        a.ref_seq_fasta = Some(ref_fasta);
         a.prefix = tmp.path().join("out").to_str().unwrap().to_string();
 
         let spec = BamInputSpec::Path(bam_path);
@@ -1000,7 +1082,7 @@ mod tests {
         let ref_fasta = write_minimal_ref_fasta(tmp.path());
 
         let mut a = args();
-        a.ref_seq_fasta = ref_fasta;
+        a.ref_seq_fasta = Some(ref_fasta);
         a.prefix = tmp.path().join("out").to_str().unwrap().to_string();
 
         let spec = BamInputSpec::Path(bam_path);
