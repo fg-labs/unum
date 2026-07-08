@@ -699,6 +699,32 @@ pub fn output_seq(
     Ok(())
 }
 
+/// Classifies a single FASTQ input as single-end or interleaved by
+/// comparing the first two records' (suffix-stripped) ids: equal ⇒
+/// interleaved, distinct (or fewer than two records) ⇒ single-end. The
+/// peeked records are pushed back so extraction sees the full stream. This
+/// is a stream-safe replacement for a rewind-based two-record peek.
+///
+/// # Errors
+///
+/// Returns an error if reading the first two records fails.
+pub fn classify_single_input(mut reader: FastqReader) -> Result<ReadSource> {
+    let first = reader.next_record().context("peeking first record for input classification")?;
+    let Some(first) = first else {
+        // Empty input: treat as single-end; extract_candidates surfaces the
+        // "Read file is empty." error downstream.
+        return Ok(ReadSource::Single(reader));
+    };
+    let second = reader.next_record().context("peeking second record for input classification")?;
+    let interleaved = second.as_ref().is_some_and(|s| s.id == first.id);
+    // Push the peeked records back in order (second first, so first pops first).
+    if let Some(second) = second {
+        reader.push_front(second);
+    }
+    reader.push_front(first);
+    if interleaved { Ok(ReadSource::Interleaved(reader)) } else { Ok(ReadSource::Single(reader)) }
+}
+
 /// Convenience: constructs a [`ReadSource`] for either a single-end file or
 /// a paired pair of files.
 ///
@@ -1238,5 +1264,37 @@ mod tests {
         assert!(check_mate_names("readA", "readA").is_ok());
         let err = check_mate_names("readA", "readB").unwrap_err().to_string();
         assert!(err.contains("readA"), "message should name the mates: {err}");
+    }
+
+    #[test]
+    fn classify_single_input_detects_interleaved_and_single() {
+        let dir = tempfile::tempdir().unwrap();
+        // Interleaved: first two records share a base name after suffix strip.
+        let inter = dir.path().join("inter.fq");
+        write_fastq(&inter, &[("p0/1", "ACGT", "IIII"), ("p0/2", "ACGT", "IIII")]);
+        let src = classify_single_input(crate::fastq::FastqReader::open(&inter).unwrap()).unwrap();
+        assert!(matches!(src, ReadSource::Interleaved(_)));
+
+        // Single-end: first two records are distinct templates.
+        let single = dir.path().join("single.fq");
+        write_fastq(&single, &[("a", "ACGT", "IIII"), ("b", "ACGT", "IIII")]);
+        let src = classify_single_input(crate::fastq::FastqReader::open(&single).unwrap()).unwrap();
+        let ReadSource::Single(mut reader) = src else {
+            panic!("expected Single for distinct-template input");
+        };
+        // The two peeked records must replay in ORIGINAL order ("a" then "b"),
+        // not swapped: draining the returned reader proves the push_front
+        // ordering in classify_single_input is correct (the classification
+        // bool alone doesn't depend on push order, so this is the only
+        // coverage that a future refactor can't silently break).
+        assert_eq!(reader.next_record().unwrap().unwrap().id, "a");
+        assert_eq!(reader.next_record().unwrap().unwrap().id, "b");
+        assert!(reader.next_record().unwrap().is_none());
+
+        // One record only → single-end.
+        let one = dir.path().join("one.fq");
+        write_fastq(&one, &[("a", "ACGT", "IIII")]);
+        let src = classify_single_input(crate::fastq::FastqReader::open(&one).unwrap()).unwrap();
+        assert!(matches!(src, ReadSource::Single(_)));
     }
 }

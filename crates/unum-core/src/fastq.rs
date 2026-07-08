@@ -88,6 +88,9 @@ pub struct FastqReader {
     path: Option<PathBuf>,
     label: String,
     inner: Box<dyn BufRead>,
+    /// Records pushed back via [`Self::push_front`], returned by
+    /// [`Self::next_record`] (LIFO) before any further reads from `inner`.
+    pushback: Vec<FastqRecord>,
 }
 
 impl FastqReader {
@@ -99,7 +102,12 @@ impl FastqReader {
     /// Returns an error if `path` cannot be opened.
     pub fn open(path: &Path) -> Result<Self> {
         let inner = open_reader(path)?;
-        Ok(Self { path: Some(path.to_path_buf()), label: path.display().to_string(), inner })
+        Ok(Self {
+            path: Some(path.to_path_buf()),
+            label: path.display().to_string(),
+            inner,
+            pushback: Vec::new(),
+        })
     }
 
     /// Builds a reader over an already-opened, already-decompressed stream
@@ -107,7 +115,16 @@ impl FastqReader {
     /// NOT rewindable.
     #[must_use]
     pub fn from_bufread(label: String, inner: Box<dyn BufRead>) -> Self {
-        Self { path: None, label, inner }
+        Self { path: None, label, inner, pushback: Vec::new() }
+    }
+
+    /// Pushes a record back so it is returned by a subsequent `next_record`
+    /// before any further reads from the underlying stream. Pushed records are
+    /// returned in LIFO order, so to replay records `[a, b]` in order, push `b`
+    /// then `a`. Used by single-vs-interleaved detection, which peeks records
+    /// it must not consume.
+    pub fn push_front(&mut self, rec: FastqRecord) {
+        self.pushback.push(rec);
     }
 
     /// Re-opens the file from the beginning, matching `ReadFiles::Rewind`'s
@@ -116,6 +133,13 @@ impl FastqReader {
     /// fresh decompressor state (gzip files cannot be seeked-and-resumed
     /// mid-stream the way plain files can, so re-opening is the correct
     /// general-purpose equivalent, not merely a convenient one).
+    ///
+    /// Also discards any pending [`Self::push_front`]-buffered records: a
+    /// "fresh read position at byte 0" should mean exactly that, even though
+    /// no current caller combines `rewind` with pushback (classification via
+    /// [`crate::extract::classify_single_input`] uses `push_front` on a
+    /// freshly-opened reader and never rewinds it; `rewind` itself is only
+    /// otherwise exercised by this module's own tests).
     ///
     /// # Errors
     ///
@@ -127,6 +151,7 @@ impl FastqReader {
             .as_ref()
             .with_context(|| format!("cannot rewind stream-backed reader {}", self.label))?;
         self.inner = open_reader(path)?;
+        self.pushback.clear();
         Ok(())
     }
 
@@ -151,6 +176,10 @@ impl FastqReader {
     /// [`read_line_trimmed`] call in the same iteration cannot return
     /// `None`.
     pub fn next_record(&mut self) -> Result<Option<FastqRecord>> {
+        if let Some(rec) = self.pushback.pop() {
+            return Ok(Some(rec));
+        }
+
         let Some(mut header) = read_line_trimmed(&mut self.inner)? else {
             return Ok(None);
         };
@@ -441,6 +470,23 @@ mod tests {
         let rec = r.next_record().unwrap().unwrap();
         assert_eq!(rec.id, "r1");
         assert_eq!(rec.seq, b"ACGT");
+    }
+
+    #[test]
+    fn push_front_records_are_returned_before_stream() {
+        let f = write_temp("@r3\nAAAA\n+\nIIII\n");
+        let mut r = FastqReader::open(f.path()).unwrap();
+        let r1 =
+            FastqRecord { id: "r1".into(), seq: b"CCCC".to_vec(), qual: Some(b"IIII".to_vec()) };
+        let r2 =
+            FastqRecord { id: "r2".into(), seq: b"GGGG".to_vec(), qual: Some(b"IIII".to_vec()) };
+        // Push so that r1 comes out first, then r2, then the stream's r3.
+        r.push_front(r2);
+        r.push_front(r1);
+        assert_eq!(r.next_record().unwrap().unwrap().id, "r1");
+        assert_eq!(r.next_record().unwrap().unwrap().id, "r2");
+        assert_eq!(r.next_record().unwrap().unwrap().id, "r3");
+        assert!(r.next_record().unwrap().is_none());
     }
 
     #[test]
