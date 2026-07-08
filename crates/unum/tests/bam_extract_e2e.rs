@@ -20,7 +20,8 @@ use rust_htslib::bam::record::{Cigar, CigarString};
 use rust_htslib::bam::{self, Header, Writer};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 use unum_core::bam_extract::{self, CoordRecord};
 
 /// A path under the workspace-level `fixtures/` directory (a sibling of
@@ -634,5 +635,424 @@ fn no_alignment_bam_equals_fastq_cli_grouped_stdin() {
     assert_eq!(
         fastq_out2, bam_out2,
         "no-alignment grouped BAM (stdin) _2.fq diverged from the FASTQ-mode CLI run"
+    );
+}
+
+// -- CRAM input (Stage 2c Task 4) -------------------------------------------
+//
+// Proves `unum extract` accepts CRAM the same way it accepts BAM -- routed
+// through the SAME `--bam-mode` paths (it's just a codec) -- given an
+// explicit `-r` reference, and rejects CRAM outright when `-r` is missing.
+// Reuses the CRAM-writing + `.fai` fixture recipe from
+// `unum-core::alignments::tests` (`write_fasta_with_fai`/`write_cram`,
+// verified there against `samtools faidx`), duplicated here since it's a
+// crate-private test helper there.
+
+/// Writes `ref.fa` + `ref.fa.fai` (contig `chr1`, `len` bytes of a cycled
+/// `ACGT` sequence) and returns the path plus the raw sequence bytes. Used as
+/// BOTH `-r` (the CRAM writer/reader's decode reference) and `-f` (the
+/// `RefKmerFilter` reference-sequence FASTA): the reads
+/// [`write_cram_bam_reads`] builds are an exact substring of this same
+/// sequence, so they trivially clear the filter's default similarity
+/// threshold without needing a second, unrelated reference fixture.
+///
+/// The `.fai` is written by hand as `chr1\t<len>\t<offset>\t<len>\t<len+1>`
+/// (offset 6 = `>chr1\n`; the whole sequence on one line) -- the exact
+/// recipe `unum-core::alignments::tests::write_fasta_with_fai` uses,
+/// independently verified there against `samtools faidx`.
+fn write_ref_and_fai(dir: &Path, len: usize) -> (PathBuf, Vec<u8>) {
+    let ref_fa = dir.join("ref.fa");
+    let seq: Vec<u8> = b"ACGT".iter().copied().cycle().take(len).collect();
+
+    let mut fasta = Vec::new();
+    fasta.push(b'>');
+    fasta.extend_from_slice(b"chr1");
+    fasta.push(b'\n');
+    fasta.extend_from_slice(&seq);
+    fasta.push(b'\n');
+    std::fs::write(&ref_fa, &fasta).unwrap();
+
+    let offset = "chr1".len() + 2; // ">" + "chr1" + "\n"
+    let fai_path = PathBuf::from(format!("{}.fai", ref_fa.display()));
+    let fai_line = format!("chr1\t{}\t{offset}\t{}\t{}\n", seq.len(), seq.len(), seq.len() + 1);
+    std::fs::write(&fai_path, fai_line).unwrap();
+
+    (ref_fa, seq)
+}
+
+/// A single-contig `chr1` header (`LN = ref_len`), shared by the BAM and
+/// CRAM fixtures below so their headers -- and therefore the records read
+/// back from each -- agree exactly.
+fn cram_bam_header(ref_len: usize) -> Header {
+    let mut header = Header::new();
+    let mut sq = HeaderRecord::new(b"SQ");
+    sq.push_tag(b"SN", "chr1");
+    sq.push_tag(b"LN", i64::try_from(ref_len).unwrap());
+    header.push_record(&sq);
+    header
+}
+
+/// RFC 1321 per-round left-rotation amounts, used by [`md5_process_block`].
+const MD5_SHIFTS: [u32; 64] = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9,
+    14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15,
+    21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+];
+
+/// RFC 1321 per-round additive constants (`floor(abs(sin(round+1)) * 2^32)`),
+/// used by [`md5_process_block`].
+const MD5_CONSTANTS: [u32; 64] = [
+    0xd76a_a478,
+    0xe8c7_b756,
+    0x2420_70db,
+    0xc1bd_ceee,
+    0xf57c_0faf,
+    0x4787_c62a,
+    0xa830_4613,
+    0xfd46_9501,
+    0x6980_98d8,
+    0x8b44_f7af,
+    0xffff_5bb1,
+    0x895c_d7be,
+    0x6b90_1122,
+    0xfd98_7193,
+    0xa679_438e,
+    0x49b4_0821,
+    0xf61e_2562,
+    0xc040_b340,
+    0x265e_5a51,
+    0xe9b6_c7aa,
+    0xd62f_105d,
+    0x0244_1453,
+    0xd8a1_e681,
+    0xe7d3_fbc8,
+    0x21e1_cde6,
+    0xc337_07d6,
+    0xf4d5_0d87,
+    0x455a_14ed,
+    0xa9e3_e905,
+    0xfcef_a3f8,
+    0x676f_02d9,
+    0x8d2a_4c8a,
+    0xfffa_3942,
+    0x8771_f681,
+    0x6d9d_6122,
+    0xfde5_380c,
+    0xa4be_ea44,
+    0x4bde_cfa9,
+    0xf6bb_4b60,
+    0xbebf_bc70,
+    0x289b_7ec6,
+    0xeaa1_27fa,
+    0xd4ef_3085,
+    0x0488_1d05,
+    0xd9d4_d039,
+    0xe6db_99e5,
+    0x1fa2_7cf8,
+    0xc4ac_5665,
+    0xf429_2244,
+    0x432a_ff97,
+    0xab94_23a7,
+    0xfc93_a039,
+    0x655b_59c3,
+    0x8f0c_cc92,
+    0xffef_f47d,
+    0x8584_5dd1,
+    0x6fa8_7e4f,
+    0xfe2c_e6e0,
+    0xa301_4314,
+    0x4e08_11a1,
+    0xf753_7e82,
+    0xbd3a_f235,
+    0x2ad7_d2bb,
+    0xeb86_d391,
+];
+
+/// Runs the RFC 1321 MD5 compression function over one 64-byte `block`,
+/// updating the running hash `state` (`[A, B, C, D]`) in place. Split out of
+/// [`md5_hex`] purely to stay under this workspace's clippy
+/// `too_many_lines` pedantic threshold.
+fn md5_process_block(state: &mut [u32; 4], block: &[u8]) {
+    let mut words = [0u32; 16];
+    for (word, bytes) in words.iter_mut().zip(block.chunks_exact(4)) {
+        *word = u32::from_le_bytes(bytes.try_into().unwrap());
+    }
+
+    let (mut aa, mut bb, mut cc, mut dd) = (state[0], state[1], state[2], state[3]);
+    for round in 0..64 {
+        let (mix, word_idx) = if round < 16 {
+            ((bb & cc) | (!bb & dd), round)
+        } else if round < 32 {
+            ((dd & bb) | (!dd & cc), (5 * round + 1) % 16)
+        } else if round < 48 {
+            (bb ^ cc ^ dd, (3 * round + 5) % 16)
+        } else {
+            (cc ^ (bb | !dd), (7 * round) % 16)
+        };
+        let mix =
+            mix.wrapping_add(aa).wrapping_add(MD5_CONSTANTS[round]).wrapping_add(words[word_idx]);
+        aa = dd;
+        dd = cc;
+        cc = bb;
+        bb = bb.wrapping_add(mix.rotate_left(MD5_SHIFTS[round]));
+    }
+
+    state[0] = state[0].wrapping_add(aa);
+    state[1] = state[1].wrapping_add(bb);
+    state[2] = state[2].wrapping_add(cc);
+    state[3] = state[3].wrapping_add(dd);
+}
+
+/// Pads `data` per RFC 1321 (a `0x80` byte, zero-fill, then the original
+/// bit-length as a little-endian `u64`) so the result's length is a
+/// multiple of 64 bytes, ready for [`md5_process_block`].
+fn md5_pad(data: &[u8]) -> Vec<u8> {
+    let mut padded = data.to_vec();
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_le_bytes());
+    padded
+}
+
+/// A minimal, from-scratch MD5 (RFC 1321) implementation, needed ONLY to
+/// compute a SAM-spec `M5` tag (`md5(uppercase(reference bases))`, no
+/// whitespace) for the stdin-CRAM regression test below -- no MD5/digest
+/// crate is otherwise a dependency of this workspace, and pulling one in
+/// for a single test-fixture checksum isn't worth it. Self-checked against
+/// the RFC 1321 test vectors in [`md5_hex_matches_rfc1321_vectors`].
+fn md5_hex(data: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut state = [0x6745_2301u32, 0xefcd_ab89u32, 0x98ba_dcfeu32, 0x1032_5476u32];
+    for block in md5_pad(data).chunks_exact(64) {
+        md5_process_block(&mut state, block);
+    }
+
+    state.iter().flat_map(|word| word.to_le_bytes()).fold(
+        String::with_capacity(32),
+        |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        },
+    )
+}
+
+#[test]
+fn md5_hex_matches_rfc1321_vectors() {
+    // RFC 1321 sec. A.5 test suite (subset).
+    assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
+    assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+    assert_eq!(md5_hex(b"message digest"), "f96b697d7cb7938d525a2f31aaf161d0");
+}
+
+/// Same as [`cram_bam_header`], but with `@HD SO:queryname` and an explicit
+/// `M5` tag on the `@SQ` record (SAM-spec `md5(uppercase(ref_seq))`). Both
+/// are needed for the stdin-CRAM regression test below, for two independent
+/// reasons:
+///
+/// - `SO:queryname`: `no-alignment`'s stdin arm rejects a coordinate/unsorted
+///   (no-`@HD`) input outright, before ever reading a record (a pipe cannot
+///   seek for the 2-pass name-map) -- so reaching actual CRAM record decode
+///   requires an explicitly queryname-sorted header.
+/// - `M5`: without an `M5` tag already present on `@SQ`, htslib's CRAM
+///   *writer* cannot compute one at header-flush time either (rust-htslib's
+///   `Writer::from_path` flushes the header at construction, before this
+///   test's code gets a chance to call `set_reference`), so it silently
+///   falls back to `embed_ref=2` (embedding the full reference in the CRAM
+///   itself) -- which trivially decodes with NO external reference at all,
+///   defeating the whole point of this regression test. A pre-supplied `M5`
+///   skips that fallback, producing a genuinely externally-referenced CRAM.
+///   `M5` is ALSO the field htslib's decode-side `cram_populate_ref` needs
+///   in the header to even consider the `REF_PATH`/EBI network fallback in
+///   the first place (no `M5` or `UR` tag -> immediate local error, never
+///   reaching `REF_PATH` at all) -- so `M5` is what makes this fixture an
+///   honest stand-in for a real-world externally-referenced production CRAM.
+fn cram_bam_header_queryname_with_m5(ref_len: usize, ref_seq: &[u8]) -> Header {
+    let mut header = Header::new();
+    let mut hd = HeaderRecord::new(b"HD");
+    hd.push_tag(b"VN", "1.6");
+    hd.push_tag(b"SO", "queryname");
+    header.push_record(&hd);
+    let mut sq = HeaderRecord::new(b"SQ");
+    sq.push_tag(b"SN", "chr1");
+    sq.push_tag(b"LN", i64::try_from(ref_len).unwrap());
+    sq.push_tag(b"M5", md5_hex(ref_seq));
+    header.push_record(&sq);
+    header
+}
+
+/// Writes two mapped, single-end (unpaired) 100bp reads at reference
+/// positions 0 and 100 to `path` in `format`, whose bases equal the
+/// reference slice they align to (so CRAM's reference-vs-read diff encoding
+/// is trivial and round-trips exactly). When `format` is `Format::Cram`,
+/// `ref_fa` must be `Some` (the writer's own decode reference, distinct from
+/// `-r`, which the READER uses); ignored for `Format::Bam`.
+fn write_cram_bam_reads(
+    path: &Path,
+    header: &Header,
+    format: bam::Format,
+    ref_seq: &[u8],
+    ref_fa: Option<&Path>,
+) {
+    let mut writer = Writer::from_path(path, header, format).expect("bam/cram writer");
+    if let Some(ref_fa) = ref_fa {
+        writer.set_reference(ref_fa).expect("set CRAM writer reference");
+    }
+    let qual = vec![30u8; 100];
+    for (i, pos) in [0i64, 100].into_iter().enumerate() {
+        let start = usize::try_from(pos).unwrap();
+        let seq = &ref_seq[start..start + 100];
+        let mut r = bam::Record::new();
+        r.set(
+            format!("read{i}").as_bytes(),
+            Some(&CigarString(vec![Cigar::Match(100)])),
+            seq,
+            &qual,
+        );
+        r.set_tid(0);
+        r.set_pos(pos);
+        r.set_flags(0); // mapped, unpaired -- general_info's frag_stdev == 0 -> single-end output.
+        writer.write(&r).unwrap();
+    }
+    drop(writer);
+}
+
+/// The single-end candidate output path (`{prefix}.fq`), matching
+/// `FastqFileSink::create`'s non-paired naming -- our fixture reads are
+/// unpaired (see [`write_cram_bam_reads`]), unlike this file's other CLI
+/// e2e tests, which build paired fixtures.
+fn single_end_out(prefix: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.fq", prefix.to_str().unwrap()))
+}
+
+#[test]
+fn cram_no_alignment_matches_bam_byte_for_byte() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ref_fa, ref_seq) = write_ref_and_fai(tmp.path(), 300);
+    let header = cram_bam_header(300);
+
+    let bam_path = tmp.path().join("reads.bam");
+    write_cram_bam_reads(&bam_path, &header, bam::Format::Bam, &ref_seq, None);
+
+    let cram_path = tmp.path().join("reads.cram");
+    write_cram_bam_reads(&cram_path, &header, bam::Format::Cram, &ref_seq, Some(&ref_fa));
+
+    let bam_prefix = tmp.path().join("bam_out");
+    run_extract_ok(&[
+        "-f",
+        s(&ref_fa),
+        "-i",
+        s(&bam_path),
+        "--bam-mode",
+        "no-alignment",
+        "-o",
+        s(&bam_prefix),
+    ]);
+
+    let cram_prefix = tmp.path().join("cram_out");
+    run_extract_ok(&[
+        "-f",
+        s(&ref_fa),
+        "-r",
+        s(&ref_fa),
+        "-i",
+        s(&cram_path),
+        "--bam-mode",
+        "no-alignment",
+        "-o",
+        s(&cram_prefix),
+    ]);
+
+    let bam_out = std::fs::read(single_end_out(&bam_prefix)).unwrap();
+    let cram_out = std::fs::read(single_end_out(&cram_prefix)).unwrap();
+    assert!(
+        !bam_out.is_empty(),
+        "the fixture reads must clear the k-mer filter and emit candidates"
+    );
+    assert_eq!(bam_out, cram_out, "CRAM no-alignment output must be byte-identical to BAM's");
+}
+
+#[test]
+fn cram_without_reference_errors_naming_cram_and_r() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ref_fa, ref_seq) = write_ref_and_fai(tmp.path(), 300);
+    let header = cram_bam_header(300);
+    let cram_path = tmp.path().join("reads.cram");
+    write_cram_bam_reads(&cram_path, &header, bam::Format::Cram, &ref_seq, Some(&ref_fa));
+
+    let out = run_extract_raw(&[
+        "-b",
+        s(&cram_path),
+        "--bam-mode",
+        "no-alignment",
+        "-f",
+        s(&ref_fa),
+        "-o",
+        s(&tmp.path().join("o")),
+    ]);
+    assert!(!out.status.success(), "CRAM without -r must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("CRAM") && err.contains("-r"), "error must name CRAM and -r: {err}");
+}
+
+/// Regression test for the CRITICAL no-network finding: `unum extract -i -`
+/// (stdin) cannot content-sniff BAM vs CRAM (a pipe can't be re-read), so a
+/// CRAM arriving on stdin without `-r` used to fall through to htslib's
+/// default CRAM reference chain, which defaults to a LIVE outbound fetch
+/// against the EBI `REF_PATH` endpoint (`https://www.ebi.ac.uk/ena/cram/md5/...`)
+/// -- a hard violation of this project's no-outbound-network rule. `main`'s
+/// `neutralize_cram_ref_path_network_fallback` now points `REF_PATH` at an
+/// inert local sentinel before `Cli::parse()` ever runs, so the SAME
+/// `-r`-less stdin CRAM must instead fail LOCALLY (no reference resolves
+/// against the sentinel), promptly, with no successful output.
+///
+/// The fixture header is queryname-sorted with an explicit `M5` tag (see
+/// [`cram_bam_header_queryname_with_m5`]): `no-alignment`'s stdin arm rejects
+/// a coordinate/unsorted stdin input before reading any record, which would
+/// trivially "pass" this test for the wrong reason, and an absent `M5` would
+/// (a) make the fixture writer silently embed the reference (defeating the
+/// test) and (b) short-circuit htslib's decode-side reference resolution
+/// before `REF_PATH` is even consulted (also defeating the test). With both
+/// present, this fixture is a genuinely externally-referenced CRAM whose
+/// decode reaches the exact htslib code path the CRITICAL finding flagged.
+#[test]
+fn stdin_cram_without_reference_fails_locally_not_over_network() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ref_fa, ref_seq) = write_ref_and_fai(tmp.path(), 300);
+    let header = cram_bam_header_queryname_with_m5(300, &ref_seq);
+    let cram_path = tmp.path().join("reads.cram");
+    write_cram_bam_reads(&cram_path, &header, bam::Format::Cram, &ref_seq, Some(&ref_fa));
+
+    let out_prefix = tmp.path().join("o");
+    let cram_file = std::fs::File::open(&cram_path).expect("open fixture CRAM for stdin redirect");
+
+    let start = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_unum"))
+        .arg("extract")
+        .args(["-i", "-", "--bam-mode", "no-alignment", "-f", s(&ref_fa), "-o", s(&out_prefix)])
+        .stdin(Stdio::from(cram_file))
+        .output()
+        .expect("run unum extract with stdin redirected from the fixture CRAM");
+    let elapsed = start.elapsed();
+
+    // (c) completes promptly -- does not hang on a network round-trip
+    // (DNS/connect/TLS to a real host would take far longer than a local
+    // reference-resolution failure).
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "must fail locally/promptly rather than hang on an outbound network call: {elapsed:?}"
+    );
+    // (a) exits non-zero.
+    assert!(
+        !output.status.success(),
+        "a -r-less stdin CRAM must fail, not silently succeed via a network reference fetch"
+    );
+    // (b) does not emit a successful extraction.
+    assert!(
+        !single_end_out(&out_prefix).exists(),
+        "a failed run must not emit a successful extraction output file"
     );
 }
