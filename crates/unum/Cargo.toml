@@ -1,9 +1,15 @@
 [package]
 name = "unum"
-version = "0.0.0"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "e pluribus unum - one genotype from many alleles: a Rust HLA/KIR genotyper (a byte-identical port of T1K)."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["science", "command-line-utilities"]
+readme = "../../README.md"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -11,4 +17,4 @@ anyhow = "1"
 rayon = "1"
 mimalloc = "0.1"
 tempfile = "3"
-unum-core = { path = "../unum-core" }
+unum-core = { path = "../unum-core", version = "0.1.0" }

@@ -5,8 +5,10 @@ changelog_config = "cliff.toml"
 dependencies_update = true
 # labels for the release PR
 pr_labels = ["release"]
-# disable git releases (handled by publish workflow)
-git_release_enable = false
+# let release-plz create the GitHub release + tag during `release-plz release`
+# (the publish job runs `command: release`); crates.io auth is OIDC Trusted
+# Publishing, so no CARGO_REGISTRY_TOKEN is needed.
+git_release_enable = true
 # disable running `cargo-semver-checks` until after the first release
 # TODO: flip to `true` once v0.1.0 is published — semver-check is the
 # main reason we chose release-plz, and skipping it forever defeats the
