@@ -995,4 +995,40 @@ mod tests {
         let bare = write_header_bam(dir.path(), &[]);
         assert_eq!(Alignments::open(&bare).unwrap().sort_order(), SortOrder::Unsorted);
     }
+
+    /// Covers the loop's post-scan fallback (`sort_order`'s trailing
+    /// `SortOrder::Unsorted` after the `for line in text.split(...)` loop),
+    /// which is distinct from the in-loop `_ => Unsorted` arm that
+    /// `sort_order_reads_hd_so_and_go`'s "bare" case already exercises for a
+    /// header that HAS an `@HD` line but no `SO`/`GO` tag. Here the header has
+    /// NO `@HD` record at all -- only `@SQ` -- so the loop's `if
+    /// !line.starts_with(b"@HD")` guard skips every line and control falls
+    /// through to the function's final `SortOrder::Unsorted` statement.
+    #[test]
+    fn sort_order_no_hd_line_is_unsorted() {
+        use rust_htslib::bam::header::HeaderRecord;
+        use rust_htslib::bam::{Format, Header, Writer};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_hd.bam");
+
+        // Deliberately do NOT push an `@HD` record -- only `@SQ`.
+        let mut header = Header::new();
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1000);
+        header.push_record(&sq);
+
+        // A header-only (zero-record) BAM without `@HD` is not reliably
+        // readable on every htslib version, so write one minimal unmapped
+        // record after the header to keep the file unambiguously valid.
+        {
+            let mut writer = Writer::from_path(&path, &header, Format::Bam).unwrap();
+            let mut record = bam::Record::new();
+            record.set(b"read1", None, b"ACGT", &[30u8, 30, 30, 30]);
+            writer.write(&record).unwrap();
+        }
+
+        assert_eq!(Alignments::open(&path).unwrap().sort_order(), SortOrder::Unsorted);
+    }
 }
