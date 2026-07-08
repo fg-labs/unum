@@ -198,9 +198,14 @@ pub struct AnalyzeArgs {
     #[arg(short = 'o', long = "prefix", default_value = "t1k", value_name = "STRING")]
     pub prefix: String,
 
-    /// Number of threads. Accepted for CLI compatibility -- this port always runs
-    /// single-threaded internally (mirrors `Analyzer.cpp`'s `threadCnt <= 1` code path, the only
-    /// one this port reproduces; see `crate::stages::genotype`'s identical rationale).
+    /// Number of threads used to parallelize the analyzer's three per-read loops: dedup
+    /// `assign_read` (via `unum_core::genotyper::assign_reads_parallel`), slot-indexed fragment
+    /// assembly (`compute_read_assignment` + `set_all_read_assignments`), and
+    /// `AddFragmentAlignmentInfo`. Output is byte-identical at any `-t` -- each loop is either a
+    /// pure per-slot computation or a per-read-independent mutation, with every order-dependent
+    /// step (coalesce, quantification, `ComputeVariant`) still running sequentially in a fixed,
+    /// thread-count-independent order (see `crate::stages::analyze`'s per-loop comments and
+    /// `crate::stages::genotype`'s identical slot-index rationale).
     #[arg(short = 't', default_value_t = 1)]
     pub threads: u32,
 
