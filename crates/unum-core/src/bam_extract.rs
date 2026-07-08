@@ -93,9 +93,18 @@ use std::collections::HashMap;
 /// Batch size used by the parallel (`threads > 1`) pass-1 candidate-decision
 /// path -- mirrors [`crate::extract::extract_candidates_with_threads`]'s own
 /// batching knob and rationale: purely a throughput/memory bound, with no
-/// effect on output (see [`evaluate_pass1_sites`]'s doc comment for why the
+/// effect on output (see [`evaluate_chunk`]'s doc comment for why the
 /// decisions themselves are computed identically regardless of batch size).
 const PARALLEL_BATCH_SIZE_PER_THREAD: usize = 512;
+
+/// Max [`Pass1Site`]s scanned/evaluated/applied per chunk in
+/// [`run_pass1_chunked`]'s scan-evaluate-apply loop, bounding pass-1 peak
+/// memory to `O(chunk + candidates)` instead of `O(input)` (the whole point
+/// of the chunk loop -- see that function's doc comment). Large enough to
+/// amortize the parallel evaluate step (a multiple of
+/// [`PARALLEL_BATCH_SIZE_PER_THREAD`]) while staying small relative to a WGS
+/// BAM's read count.
+const PASS1_CHUNK_SIZE: usize = PARALLEL_BATCH_SIZE_PER_THREAD * 64;
 
 /// A single reference-coordinate gene interval, mirroring T1K's `_interval`
 /// (`BamExtractor.cpp:49-63`): `chrId` plus an inclusive `[start, end]`
@@ -474,7 +483,7 @@ pub fn extract_from_bam_with_threads(
 ///
 /// Only used by the `#[cfg(test)]`-only reference [`run_pass1`] now (see that
 /// function's doc comment) -- [`run_pass1_with_threads`]'s production path
-/// reproduces this exact logic inline, split across [`scan_pass1`] (record
+/// reproduces this exact logic inline, split across [`scan_pass1_chunk`] (record
 /// reading) and [`evaluate_pass1_site`]'s [`Pass1Site::UnalignedPair`] arm
 /// (the candidate decision).
 ///
@@ -540,7 +549,7 @@ fn handle_unaligned_template_pair(
 }
 
 /// One pass-1 site awaiting a candidate-filter DECISION, captured by
-/// [`scan_pass1`] and resolved by [`evaluate_pass1_sites`] -- see
+/// [`scan_pass1_chunk`] and resolved by [`evaluate_chunk`] -- see
 /// [`run_pass1_with_threads`]'s doc comment for why splitting pass 1 into
 /// scan/evaluate/apply sub-phases is what makes the expensive decision
 /// (`is_low_complexity` + `is_good_candidate_with_scratch`) safely
@@ -549,8 +558,8 @@ fn handle_unaligned_template_pair(
 /// stays exactly as sequential -- and therefore exactly as byte-identical to
 /// the pre-existing single-threaded behavior -- as before.
 ///
-/// Each variant carries only the raw sequence(s) [`evaluate_pass1_sites`]
-/// needs to test, plus whatever bookkeeping [`apply_pass1_sites`] needs to
+/// Each variant carries only the raw sequence(s) [`evaluate_chunk`]
+/// needs to test, plus whatever bookkeeping [`apply_pass1_chunk`] needs to
 /// replay the ORIGINAL branch's side effect once the decision is known.
 enum Pass1Site {
     /// `handle_unaligned_template_pair`'s candidate gate: both mates' raw
@@ -577,14 +586,14 @@ enum Pass1Site {
     PairedNotAlignedCandidate { seq: Vec<u8>, trimmed_name: String },
     /// The single-end on-target-aligned branch (`BamExtractor.cpp:824-850`
     /// single-end half): evaluated as `good(seq)`. `is_low_complexity` has
-    /// ALREADY been checked by [`scan_pass1`] before this site is even
+    /// ALREADY been checked by [`scan_pass1_chunk`] before this site is even
     /// created (`BamExtractor.cpp:812-814` runs that check unconditionally,
     /// before the single-end/paired split), so
     /// [`evaluate_pass1_site`] does not re-check it for this variant.
     SingleEndOnTarget { seq: Vec<u8>, qual: Vec<u8>, name: String },
     /// The paired on-target-aligned branch (`BamExtractor.cpp:824-850` paired
     /// half): resolves unconditionally to `true` (`is_low_complexity` already
-    /// checked by [`scan_pass1`], same as [`Pass1Site::SingleEndOnTarget`]; no
+    /// checked by [`scan_pass1_chunk`], same as [`Pass1Site::SingleEndOnTarget`]; no
     /// candidate-filter call on this path -- see [`evaluate_pass1_site`]'s
     /// doc comment on this variant). Only the trimmed name is needed
     /// (candidates map key; pass 2 re-reads the sequence).
@@ -603,21 +612,33 @@ enum Pass1Site {
 /// comment -- so record reading itself can never be parallelized; only the
 /// DECISION on an already-read sequence can).
 ///
+/// Stops once `limit` sites have been pushed (or at EOF), returning the
+/// (possibly short/empty) chunk -- an empty return means EOF. `tag` (the
+/// monotonic gene-interval-scan pointer) is threaded in/out via `&mut` so its
+/// advance persists across chunks exactly as it would across one
+/// unbounded scan: the caller owns `tag`'s storage and initializes it to `0`
+/// once, before the first chunk. The `sites.len() < limit` check sits at the
+/// LOOP TOP (not inside the unaligned-pair branch), so a chunk boundary can
+/// never land between an unaligned pair's two records -- that branch reads
+/// TWO records in one iteration but pushes exactly ONE site.
+///
 /// Errors (missing/mismatched unaligned mate) are raised here, at the exact
 /// same point in the BAM scan stock would raise them at -- unaffected by
-/// `threads`, since no candidate-filter decision is needed to detect them.
-fn scan_pass1(
+/// `threads` or `limit`, since no candidate-filter decision is needed to
+/// detect them.
+fn scan_pass1_chunk(
     alignments: &mut Alignments,
     genes: &[GeneInterval],
     single_end: bool,
     abnormal_unaligned_flag: bool,
     mate_id_len: i32,
+    tag: &mut usize,
+    limit: usize,
 ) -> Result<Vec<Pass1Site>> {
     let gene_cnt = genes.len();
-    let mut sites: Vec<Pass1Site> = Vec::new();
-    let mut tag: usize = 0;
+    let mut sites: Vec<Pass1Site> = Vec::with_capacity(limit.min(1024));
 
-    while alignments.next().context("pass 1: reading next BAM record")? {
+    while sites.len() < limit && alignments.next().context("pass 1: reading next BAM record")? {
         let template_aligned = alignments.is_template_aligned();
         let chrom_alt = alignments.is_aligned()
             && valid_alternative_chrom(&alignments.chrom_name(alignments.chrom_id()));
@@ -691,18 +712,18 @@ fn scan_pass1(
         #[allow(clippy::cast_possible_truncation)]
         let end_i32 = end as i32;
 
-        while tag < gene_cnt
-            && (chr_id > genes[tag].chr_id
-                || (chr_id == genes[tag].chr_id && start_i32 > genes[tag].end))
+        while *tag < gene_cnt
+            && (chr_id > genes[*tag].chr_id
+                || (chr_id == genes[*tag].chr_id && start_i32 > genes[*tag].end))
         {
-            tag += 1;
+            *tag += 1;
         }
 
-        if tag >= gene_cnt {
+        if *tag >= gene_cnt {
             continue;
         }
-        if chr_id < genes[tag].chr_id
-            || (chr_id == genes[tag].chr_id && end_i32 <= genes[tag].start)
+        if chr_id < genes[*tag].chr_id
+            || (chr_id == genes[*tag].chr_id && end_i32 <= genes[*tag].start)
         {
             continue;
         }
@@ -725,48 +746,41 @@ fn scan_pass1(
     Ok(sites)
 }
 
-/// Resolves every [`Pass1Site`]'s candidate-filter decision, either
-/// sequentially (`threads <= 1`, no rayon pool involved -- direct index-order
-/// iteration) or across `threads` `rayon` worker threads (`threads > 1`, each
-/// worker reusing its own [`Scratch`] via `map_init`, batched
-/// [`PARALLEL_BATCH_SIZE_PER_THREAD`]`* threads` sites at a time). Returns a
-/// `Vec<bool>` PARALLEL to `sites` (same length, same index order) -- `rayon`
-/// preserves input order on `collect()` for an `IndexedParallelIterator`
+/// Resolves every [`Pass1Site`]'s candidate-filter decision for one chunk,
+/// either sequentially (`pool = None`, no rayon pool involved -- direct
+/// index-order iteration) or across the given pre-built `rayon` pool's worker
+/// threads (`Some(pool)`, each worker reusing its own [`Scratch`] via
+/// `map_init`, batched [`PARALLEL_BATCH_SIZE_PER_THREAD`]`* threads` sites at
+/// a time). The pool is built ONCE by the caller ([`run_pass1_chunked`]) and
+/// reused across every chunk, not rebuilt per chunk. Returns a `Vec<bool>`
+/// PARALLEL to `sites` (same length, same index order) -- `rayon` preserves
+/// input order on `collect()` for an `IndexedParallelIterator`
 /// (`Vec::par_iter()`'s `.map_init()` is one), and the sequential fallback is
 /// index-order by construction, so both produce IDENTICAL `Vec<bool>`
-/// contents regardless of `threads` -- the decision function itself
+/// contents regardless of `pool` -- the decision function itself
 /// ([`Pass1Site`]'s per-variant boolean expression, documented on each
 /// variant) has no cross-site dependency, so evaluating sites in any order
 /// (or concurrently) cannot change any individual site's answer.
-///
-/// Returns `Err` only if `threads > 1` and the `rayon` worker pool fails to
-/// build (a bad `threads` value or worker-spawn failure) -- that error is
-/// propagated to the caller rather than aborting the process, matching the
-/// FASTQ extractor's parallel path (`extract::extract_candidates_with_threads`).
-fn evaluate_pass1_sites(
+fn evaluate_chunk(
+    pool: Option<&rayon::ThreadPool>,
     filter: &RefKmerFilter,
     sites: &[Pass1Site],
-    threads: usize,
-) -> Result<Vec<bool>> {
-    if threads <= 1 {
-        let mut scratch = Scratch::default();
-        return Ok(sites
-            .iter()
-            .map(|site| evaluate_pass1_site(filter, site, &mut scratch))
-            .collect());
+) -> Vec<bool> {
+    match pool {
+        None => {
+            let mut scratch = Scratch::default();
+            sites.iter().map(|site| evaluate_pass1_site(filter, site, &mut scratch)).collect()
+        }
+        Some(pool) => pool.install(|| {
+            sites
+                .par_iter()
+                .with_min_len(PARALLEL_BATCH_SIZE_PER_THREAD.max(1))
+                .map_init(Scratch::default, |scratch, site| {
+                    evaluate_pass1_site(filter, site, scratch)
+                })
+                .collect()
+        }),
     }
-
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .context("building rayon thread pool for parallel BAM pass-1 evaluation")?;
-    Ok(pool.install(|| {
-        sites
-            .par_iter()
-            .with_min_len(PARALLEL_BATCH_SIZE_PER_THREAD.max(1))
-            .map_init(Scratch::default, |scratch, site| evaluate_pass1_site(filter, site, scratch))
-            .collect()
-    }))
 }
 
 /// The per-[`Pass1Site`] boolean decision -- see each variant's doc comment
@@ -785,7 +799,7 @@ fn evaluate_pass1_site(filter: &RefKmerFilter, site: &Pass1Site, scratch: &mut S
         }
         // On-target sites resolve unconditionally to `true`: `BamExtractor.cpp:804-851`
         // emits/records on-target reads after ONLY the `IsLowComplexity` check (already
-        // applied by `scan_pass1` before this site was created,
+        // applied by `scan_pass1_chunk` before this site was created,
         // `BamExtractor.cpp:812-814`) -- it never calls `IsGoodCandidate` on the
         // on-target path. The untouched reference `run_pass1` (see its on-target arm)
         // reproduces this faithfully: no candidate-filter call. A prior version of this
@@ -802,23 +816,25 @@ fn evaluate_pass1_site(filter: &RefKmerFilter, site: &Pass1Site, scratch: &mut S
     }
 }
 
-/// Replays every [`Pass1Site`]'s pre-computed `decisions[i]` outcome,
-/// SEQUENTIALLY in the exact scan order [`scan_pass1`] recorded them in --
-/// reproducing `run_pass1`'s original mutation/emit side effects (`tag`
+/// Replays one chunk's [`Pass1Site`] pre-computed `decisions[i]` outcomes,
+/// SEQUENTIALLY in the exact scan order [`scan_pass1_chunk`] recorded them in
+/// -- reproducing `run_pass1`'s original mutation/emit side effects (`tag`
 /// advance is NOT replayed here, since it was already fully resolved during
-/// scanning and does not affect this sub-phase; `used_name`/`candidates` ARE
-/// replayed here, in order, so their contents/emit order are identical to
-/// the original single-loop implementation regardless of `threads`).
-fn apply_pass1_sites(
+/// scanning and does not affect this sub-phase; `used_name`/`candidates`/
+/// `pass1_emitted` ARE replayed here, in order, accumulating into the
+/// caller-owned storage passed by `&mut` -- threaded across chunks by
+/// [`run_pass1_chunked`] rather than recreated per chunk -- so their final
+/// contents/emit order are identical to the original single-loop
+/// implementation regardless of `threads` or chunk boundaries).
+fn apply_pass1_chunk(
     sites: Vec<Pass1Site>,
     decisions: &[bool],
     single_end: bool,
+    candidates: &mut HashMap<String, PendingCandidate>,
+    used_name: &mut std::collections::HashSet<String>,
+    pass1_emitted: &mut u64,
     sink: &mut impl CandidateSink,
-) -> Result<(HashMap<String, PendingCandidate>, u64)> {
-    let mut candidates: HashMap<String, PendingCandidate> = HashMap::new();
-    let mut used_name: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut pass1_emitted: u64 = 0;
-
+) -> Result<()> {
     for (site, &good) in sites.into_iter().zip(decisions) {
         match site {
             Pass1Site::UnalignedPair {
@@ -840,7 +856,7 @@ fn apply_pass1_sites(
                     } else {
                         sink.emit_pair(&rec1, Some(&rec2))?;
                     }
-                    pass1_emitted += 1;
+                    *pass1_emitted += 1;
                 }
             }
             Pass1Site::SingleEndNotAligned { seq, qual, is_aligned, name } => {
@@ -854,7 +870,7 @@ fn apply_pass1_sites(
                     }
                     let rec = ReadRecord { id: name, seq, qual: Some(qual) };
                     sink.emit_pair(&rec, None)?;
-                    pass1_emitted += 1;
+                    *pass1_emitted += 1;
                 }
             }
             Pass1Site::PairedNotAlignedCandidate { trimmed_name, .. } => {
@@ -875,7 +891,7 @@ fn apply_pass1_sites(
                     used_name.insert(name.clone());
                     let rec = ReadRecord { id: name, seq, qual: Some(qual) };
                     sink.emit_pair(&rec, None)?;
-                    pass1_emitted += 1;
+                    *pass1_emitted += 1;
                 }
             }
             Pass1Site::PairedOnTargetCandidate { trimmed_name, .. } => {
@@ -890,18 +906,94 @@ fn apply_pass1_sites(
         }
     }
 
+    Ok(())
+}
+
+/// Pass 1, dispatching on `threads`, as a bounded scan -> evaluate -> apply
+/// CHUNK LOOP: builds the `rayon` thread pool ONCE (`threads > 1`; `None`
+/// otherwise, `evaluate_chunk`'s sequential fallback), then repeatedly (a)
+/// scans up to `chunk_size` sites from wherever [`scan_pass1_chunk`] left off
+/// (`Alignments` is a stateful cursor, and `tag`, the gene-interval-scan
+/// pointer, is threaded across iterations via `&mut` so its monotonic advance
+/// is identical to one unbounded scan), (b) resolves each chunk's candidate
+/// decisions ([`evaluate_chunk`], parallel when `threads > 1`), and (c)
+/// replays that chunk's outcomes in scan order ([`apply_pass1_chunk`]),
+/// accumulating into `candidates`/`used_name`/`pass1_emitted` across chunks
+/// rather than per-chunk-fresh maps -- until a chunk comes back empty (EOF).
+/// This bounds pass-1 peak memory to `O(chunk + candidates)` instead of
+/// `O(input)` (an unbounded `Vec<Pass1Site>` over the whole BAM), while
+/// remaining byte-identical to a single unbounded scan/evaluate/apply pass at
+/// any `threads`/`chunk_size` -- chunk boundaries only ever fall between
+/// sites (see [`scan_pass1_chunk`]'s doc comment on why an unaligned pair can
+/// never be split), so scan order, decisions, and apply-time side effects are
+/// all unaffected by where those boundaries land. Returns the `candidates`
+/// map recorded for pass 2 (empty for single-end input, which never
+/// populates it) and the number of pairs/reads emitted directly during this
+/// pass -- both IDENTICAL to [`run_pass1`]'s output for the same input, at
+/// any `threads`/`chunk_size`.
+#[allow(clippy::too_many_arguments)]
+fn run_pass1_chunked(
+    alignments: &mut Alignments,
+    filter: &RefKmerFilter,
+    genes: &[GeneInterval],
+    single_end: bool,
+    abnormal_unaligned_flag: bool,
+    mate_id_len: i32,
+    threads: usize,
+    chunk_size: usize,
+    sink: &mut impl CandidateSink,
+) -> Result<(HashMap<String, PendingCandidate>, u64)> {
+    // Build the rayon pool ONCE (not per chunk).
+    let pool = if threads > 1 {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .context("building rayon thread pool for parallel BAM pass-1 evaluation")?,
+        )
+    } else {
+        None
+    };
+
+    let mut candidates: HashMap<String, PendingCandidate> = HashMap::new();
+    let mut used_name: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut pass1_emitted: u64 = 0;
+    let mut tag: usize = 0;
+
+    loop {
+        let sites = scan_pass1_chunk(
+            alignments,
+            genes,
+            single_end,
+            abnormal_unaligned_flag,
+            mate_id_len,
+            &mut tag,
+            chunk_size,
+        )?;
+        if sites.is_empty() {
+            break; // EOF
+        }
+        let decisions = evaluate_chunk(pool.as_ref(), filter, &sites);
+        apply_pass1_chunk(
+            sites,
+            &decisions,
+            single_end,
+            &mut candidates,
+            &mut used_name,
+            &mut pass1_emitted,
+            sink,
+        )?;
+    }
+
     Ok((candidates, pass1_emitted))
 }
 
-/// Pass 1, dispatching on `threads` (see [`extract_from_bam_with_threads`]'s
-/// doc comment): scans the BAM once ([`scan_pass1`], always sequential --
-/// `Alignments` is a stateful cursor), resolves every recorded site's
-/// candidate decision ([`evaluate_pass1_sites`], parallel when `threads >
-/// 1`), then replays the outcomes sequentially in scan order
-/// ([`apply_pass1_sites`]). Returns the `candidates` map recorded for pass 2
-/// (empty for single-end input, which never populates it) and the number of
-/// pairs/reads emitted directly during this pass -- both IDENTICAL to
-/// [`run_pass1`]'s output for the same input, at any `threads`.
+/// Pass 1, dispatching on `threads`: [`run_pass1_chunked`] with the
+/// production [`PASS1_CHUNK_SIZE`]. See that function's doc comment for the
+/// bounded scan/evaluate/apply chunk-loop structure and its byte-identity
+/// argument. Tests call [`run_pass1_chunked`] directly with a small
+/// `chunk_size` to exercise cross-chunk-boundary correctness cheaply, without
+/// needing a `PASS1_CHUNK_SIZE`-sized fixture.
 #[allow(clippy::too_many_arguments)]
 fn run_pass1_with_threads(
     alignments: &mut Alignments,
@@ -913,9 +1005,17 @@ fn run_pass1_with_threads(
     threads: usize,
     sink: &mut impl CandidateSink,
 ) -> Result<(HashMap<String, PendingCandidate>, u64)> {
-    let sites = scan_pass1(alignments, genes, single_end, abnormal_unaligned_flag, mate_id_len)?;
-    let decisions = evaluate_pass1_sites(filter, &sites, threads)?;
-    apply_pass1_sites(sites, &decisions, single_end, sink)
+    run_pass1_chunked(
+        alignments,
+        filter,
+        genes,
+        single_end,
+        abnormal_unaligned_flag,
+        mate_id_len,
+        threads,
+        PASS1_CHUNK_SIZE,
+        sink,
+    )
 }
 
 /// Pass 1 (`BamExtractor.cpp:632-851`): the ORIGINAL single-threaded,
@@ -1120,7 +1220,7 @@ mod tests {
     use super::*;
 
     /// On-target padding reads added to the parallel-regression fixtures so
-    /// the `threads > 1` path actually splits work. `evaluate_pass1_sites`
+    /// the `threads > 1` path actually splits work. `evaluate_chunk`
     /// uses `with_min_len(PARALLEL_BATCH_SIZE_PER_THREAD)`, so `rayon` refuses
     /// to split a `par_iter` shorter than that -- the fixtures must carry
     /// MORE than `PARALLEL_BATCH_SIZE_PER_THREAD` sites for the parallel case
@@ -2077,6 +2177,342 @@ mod tests {
             assert_eq!(
                 parallel_sig, reference_sig,
                 "threads={threads}: output diverged from the oracle-matching reference"
+            );
+        }
+    }
+
+    // -- Bounded-chunk pass-1 regression (memory fix): `run_pass1_chunked` at a
+    // SMALL `chunk_size` must match the untouched single-scan `run_pass1` oracle
+    // exactly, proving the `tag`/`candidates`/`used_name`/`pass1_emitted`
+    // cross-chunk threading in `run_pass1_chunked` (see its doc comment) is
+    // correct -- not just at the production `PASS1_CHUNK_SIZE` (~32k, too slow
+    // to exercise boundary-crossing in a unit test), but at a `chunk_size` that
+    // forces several chunk boundaries over a small, cheap fixture.
+
+    /// A small coordinate-sorted paired BAM (~20 records: 8 on-target pairs
+    /// exercising the `candidates` accumulation path, one off-target pair
+    /// dropped before any candidate-filter call, one unaligned-template pair
+    /// exercising the direct-emit path) -- enough sites to cross several
+    /// `chunk_size = 4` chunk boundaries without needing a
+    /// [`PASS1_CHUNK_SIZE`]-scale fixture.
+    fn build_small_paired_test_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "coordinate");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+        // 8 on-target pairs (16 records), each inside the gene interval
+        // [1000, 5000] -- candidates path (`PairedOnTargetCandidate`).
+        for i in 0..8u32 {
+            let off1 = (i as usize * 11) % (ref_bytes.len() - 80);
+            let off2 = (off1 + 13) % (ref_bytes.len() - 80);
+            let seq1 = &ref_bytes[off1..off1 + 80];
+            let seq2 = &ref_bytes[off2..off2 + 80];
+            let name = format!("on_target_{i}");
+            let p1 = 1200 + i64::from(i) * 100;
+            let p2 = p1 + 50;
+            let mut r1 = bam::Record::new();
+            r1.set(name.as_bytes(), Some(&CigarString(vec![Cigar::Match(80)])), seq1, &[30u8; 80]);
+            r1.set_tid(0);
+            r1.set_pos(p1);
+            r1.set_mtid(0);
+            r1.set_mpos(p2);
+            r1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
+            writer.write(&r1).unwrap();
+            let mut r2 = bam::Record::new();
+            r2.set(name.as_bytes(), Some(&CigarString(vec![Cigar::Match(80)])), seq2, &[30u8; 80]);
+            r2.set_tid(0);
+            r2.set_pos(p2);
+            r2.set_mtid(0);
+            r2.set_mpos(p1);
+            r2.set_flags(0x1 | 0x2 | 0x10 | 0x80);
+            writer.write(&r2).unwrap();
+        }
+
+        // Off-target pair (2 records): on chr1 but far outside [1000, 5000] --
+        // dropped before any candidate-filter call.
+        let off_seq = noise(80);
+        let mut off1 = bam::Record::new();
+        off1.set(b"off_target", Some(&CigarString(vec![Cigar::Match(80)])), &off_seq, &[30u8; 80]);
+        off1.set_tid(0);
+        off1.set_pos(50_000);
+        off1.set_mtid(0);
+        off1.set_mpos(50_200);
+        off1.set_flags(0x1 | 0x2 | 0x20 | 0x40);
+        writer.write(&off1).unwrap();
+        let mut off2 = bam::Record::new();
+        off2.set(b"off_target", Some(&CigarString(vec![Cigar::Match(80)])), &off_seq, &[30u8; 80]);
+        off2.set_tid(0);
+        off2.set_pos(50_200);
+        off2.set_mtid(0);
+        off2.set_mpos(50_000);
+        off2.set_flags(0x1 | 0x2 | 0x10 | 0x80);
+        writer.write(&off2).unwrap();
+
+        // Unaligned-template pair (2 records): two consecutive unmapped
+        // records with ref-substring SEQ -- direct-emit path
+        // (`Pass1Site::UnalignedPair`), read as ONE site across TWO records.
+        let um_seq1 = &ref_bytes[0..70];
+        let um_seq2 = &ref_bytes[100..170];
+        let mut um1 = bam::Record::new();
+        um1.set(b"unaligned", None, um_seq1, &[25u8; 70]);
+        um1.set_tid(-1);
+        um1.set_pos(-1);
+        um1.set_mtid(-1);
+        um1.set_mpos(-1);
+        um1.set_flags(0x1 | 0x4 | 0x8 | 0x40);
+        writer.write(&um1).unwrap();
+        let mut um2 = bam::Record::new();
+        um2.set(b"unaligned", None, um_seq2, &[25u8; 70]);
+        um2.set_tid(-1);
+        um2.set_pos(-1);
+        um2.set_mtid(-1);
+        um2.set_mpos(-1);
+        um2.set_flags(0x1 | 0x4 | 0x8 | 0x80);
+        writer.write(&um2).unwrap();
+
+        drop(writer);
+    }
+
+    /// Runs the ORIGINAL single-threaded, single-scan `run_pass1` oracle
+    /// end-to-end (setup + pass 1 only, no pass 2), returning its
+    /// `candidates` key set, `pass1_emitted` count, and the pairs it emitted
+    /// directly during pass 1.
+    fn run_pass1_oracle(
+        bam_path: &std::path::Path,
+        ref_fasta: &std::path::Path,
+    ) -> (std::collections::HashSet<String>, u64, VecSink) {
+        let mut filter =
+            RefKmerFilter::from_reference_fasta(ref_fasta, INITIAL_KMER_LENGTH).unwrap();
+        let mut alignments = Alignments::open(bam_path).unwrap();
+        let genes = build_genes(
+            &alignments,
+            &[CoordRecord {
+                name: "only".to_string(),
+                chrom: "chr1".to_string(),
+                start: 1000,
+                end: 5000,
+                strand: "+".to_string(),
+                seq: PARALLEL_TEST_REF.to_string(),
+            }],
+        )
+        .unwrap();
+
+        let general_info = alignments.general_info(true).unwrap();
+        alignments.rewind().unwrap();
+        let mut hit_len_required =
+            compute_hit_len_required(general_info.frag_stdev, general_info.read_len);
+        filter.set_hit_len_required(hit_len_required);
+        let inferred = filter.infer_kmer_length();
+        if inferred > filter.kmer_length() {
+            filter.update_kmer_length(inferred);
+            if inferred > usize::try_from(hit_len_required).unwrap_or(0) {
+                hit_len_required = i32::try_from(inferred).unwrap_or(i32::MAX);
+                filter.set_hit_len_required(hit_len_required);
+            }
+        }
+        let single_end = general_info.frag_stdev == 0;
+
+        let mut sink = VecSink::default();
+        let (candidates, pass1_emitted) =
+            run_pass1(&mut alignments, &mut filter, &genes, single_end, false, -1, &mut sink)
+                .unwrap();
+        (candidates.into_keys().collect(), pass1_emitted, sink)
+    }
+
+    /// Runs [`run_pass1_chunked`] end-to-end (setup + pass 1 only) at the
+    /// given `threads`/`chunk_size`, returning the same shape as
+    /// [`run_pass1_oracle`] for direct comparison.
+    fn run_pass1_chunked_test(
+        bam_path: &std::path::Path,
+        ref_fasta: &std::path::Path,
+        threads: usize,
+        chunk_size: usize,
+    ) -> (std::collections::HashSet<String>, u64, VecSink) {
+        let mut filter =
+            RefKmerFilter::from_reference_fasta(ref_fasta, INITIAL_KMER_LENGTH).unwrap();
+        let mut alignments = Alignments::open(bam_path).unwrap();
+        let genes = build_genes(
+            &alignments,
+            &[CoordRecord {
+                name: "only".to_string(),
+                chrom: "chr1".to_string(),
+                start: 1000,
+                end: 5000,
+                strand: "+".to_string(),
+                seq: PARALLEL_TEST_REF.to_string(),
+            }],
+        )
+        .unwrap();
+
+        let general_info = alignments.general_info(true).unwrap();
+        alignments.rewind().unwrap();
+        let mut hit_len_required =
+            compute_hit_len_required(general_info.frag_stdev, general_info.read_len);
+        filter.set_hit_len_required(hit_len_required);
+        let inferred = filter.infer_kmer_length();
+        if inferred > filter.kmer_length() {
+            filter.update_kmer_length(inferred);
+            if inferred > usize::try_from(hit_len_required).unwrap_or(0) {
+                hit_len_required = i32::try_from(inferred).unwrap_or(i32::MAX);
+                filter.set_hit_len_required(hit_len_required);
+            }
+        }
+        let single_end = general_info.frag_stdev == 0;
+
+        let mut sink = VecSink::default();
+        let (candidates, pass1_emitted) = run_pass1_chunked(
+            &mut alignments,
+            &filter,
+            &genes,
+            single_end,
+            false,
+            -1,
+            threads,
+            chunk_size,
+            &mut sink,
+        )
+        .unwrap();
+        (candidates.into_keys().collect(), pass1_emitted, sink)
+    }
+
+    #[test]
+    fn bounded_chunk_pass1_matches_oracle_across_chunk_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("chunked.bam");
+        build_small_paired_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (oracle_candidates, oracle_emitted, oracle_sink) =
+            run_pass1_oracle(&bam_path, &ref_fasta);
+        assert_eq!(oracle_candidates.len(), 8, "expected all 8 on-target pairs as candidates");
+        assert_eq!(oracle_emitted, 1, "expected the single unaligned pair to be emitted directly");
+        let oracle_sig = sink_signature(&oracle_sink);
+
+        // `chunk_size = 4` over a 20-record fixture crosses several chunk
+        // boundaries (5+ chunks), at both a sequential (`threads = 1`) and a
+        // parallel (`threads = 4`) evaluate step.
+        for threads in [1usize, 4] {
+            let (candidates, pass1_emitted, sink) =
+                run_pass1_chunked_test(&bam_path, &ref_fasta, threads, 4);
+            assert_eq!(
+                candidates, oracle_candidates,
+                "threads={threads}, chunk_size=4: candidates diverged from the oracle across chunk boundaries"
+            );
+            assert_eq!(
+                pass1_emitted, oracle_emitted,
+                "threads={threads}, chunk_size=4: pass1_emitted diverged from the oracle"
+            );
+            assert_eq!(
+                sink_signature(&sink),
+                oracle_sig,
+                "threads={threads}, chunk_size=4: emitted pairs diverged from the oracle across chunk boundaries"
+            );
+        }
+    }
+
+    /// A small coordinate-sorted SINGLE-END BAM (~20 on-target aligned reads,
+    /// single-end header/flags: `mtid = -1`, no paired/proper-pair flags) with
+    /// a DUPLICATE QNAME (`shared_name`) appearing twice, at read indices 3 and
+    /// 12 -- i.e. in different `chunk_size = 4` chunks (chunk 0 vs chunk 3), so
+    /// the `used_name` dedup decision for the second occurrence depends on
+    /// `used_name` state accumulated in an EARLIER chunk. This is the fixture
+    /// that gives `used_name` cross-chunk threading teeth: a per-chunk
+    /// `used_name` reset would let the second `shared_name` read slip through
+    /// the dedup and be emitted a second time.
+    fn build_small_single_end_test_bam(path: &std::path::Path) {
+        let ref_bytes = PARALLEL_TEST_REF.as_bytes();
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "coordinate");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(path, &header, bam::Format::Bam).expect("create writer");
+
+        // 20 on-target single-end reads inside the gene interval [1000, 5000].
+        // Read indices 3 and 12 share the QNAME `shared_name` (the second one a
+        // secondary alignment, flag 0x100) -- the `used_name` dedup path.
+        for i in 0..20u32 {
+            let off = (i as usize * 11) % (ref_bytes.len() - 80);
+            let seq = &ref_bytes[off..off + 80];
+            let name =
+                if i == 3 || i == 12 { "shared_name".to_string() } else { format!("se_{i}") };
+            // Second occurrence of `shared_name` marked secondary (0x100),
+            // mirroring a realistic duplicate alignment; the dedup itself keys
+            // on the QNAME, not the flag.
+            let flags = if i == 12 { 0x100 } else { 0 };
+            let mut r = bam::Record::new();
+            r.set(name.as_bytes(), Some(&CigarString(vec![Cigar::Match(80)])), seq, &[30u8; 80]);
+            r.set_tid(0);
+            r.set_pos(1100 + i64::from(i) * 100);
+            r.set_mtid(-1);
+            r.set_mpos(-1);
+            r.set_flags(flags);
+            writer.write(&r).unwrap();
+        }
+
+        drop(writer);
+    }
+
+    #[test]
+    fn bounded_chunk_pass1_single_end_matches_oracle_across_chunk_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bam_path = tmp.path().join("chunked_single_end.bam");
+        build_small_single_end_test_bam(&bam_path);
+        let ref_fasta = parallel_test_ref_fasta(tmp.path());
+
+        let (oracle_candidates, oracle_emitted, oracle_sink) =
+            run_pass1_oracle(&bam_path, &ref_fasta);
+        // Single-end never populates `candidates`; all output is emitted
+        // directly in pass 1. 20 reads, one QNAME duplicated -> 19 distinct
+        // names emitted once each (the second `shared_name` is deduped by
+        // `used_name`). If a per-chunk `used_name` reset regression existed,
+        // the second `shared_name` (chunk 3) would not see the chunk-0 entry
+        // and would be emitted a second time -> `oracle_emitted` would be 20
+        // and this fixture-level sanity check pins the deduped count.
+        assert!(oracle_candidates.is_empty(), "single-end input must not populate candidates");
+        assert_eq!(
+            oracle_emitted, 19,
+            "expected 19 emitted reads (one QNAME deduped via used_name)"
+        );
+        let oracle_sig = sink_signature(&oracle_sink);
+
+        // `chunk_size = 4` over 20 reads crosses several boundaries (5 chunks);
+        // the duplicate `shared_name` at read indices 3 and 12 straddles ~3
+        // chunk boundaries, so matching the oracle here proves `used_name`
+        // accumulates across chunks. A per-chunk `used_name` reset would leave
+        // the chunk-3 duplicate undeduped -> higher `pass1_emitted` and an
+        // extra emitted read -> both asserts below would fail.
+        for threads in [1usize, 4] {
+            let (candidates, pass1_emitted, sink) =
+                run_pass1_chunked_test(&bam_path, &ref_fasta, threads, 4);
+            assert_eq!(
+                candidates, oracle_candidates,
+                "threads={threads}, chunk_size=4: single-end candidates diverged from the oracle"
+            );
+            assert_eq!(
+                pass1_emitted, oracle_emitted,
+                "threads={threads}, chunk_size=4: pass1_emitted diverged from the oracle (used_name cross-chunk dedup)"
+            );
+            assert_eq!(
+                sink_signature(&sink),
+                oracle_sig,
+                "threads={threads}, chunk_size=4: emitted reads diverged from the oracle across chunk boundaries"
             );
         }
     }
