@@ -84,7 +84,7 @@
 //! `candidates` map-insertion order.
 
 use crate::alignments::Alignments;
-use crate::extract::{CandidateSink, ReadRecord};
+use crate::extract::{CandidateSink, HIT_LEN_REQUIRED_PAIRED, HIT_LEN_REQUIRED_SINGLE, ReadRecord};
 use crate::ref_kmer_filter::{RefKmerFilter, Scratch, is_low_complexity};
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
@@ -299,6 +299,41 @@ pub fn compute_hit_len_required(frag_stdev: i32, read_len: i32) -> i32 {
         hit_len_required = read_len / 5;
     }
     hit_len_required
+}
+
+/// Computes `--bam-mode no-alignment`'s `hitLenRequired` using the FASTQ
+/// path's formula (`extract.rs`'s `extract_candidates_with_threads` setup,
+/// ~lines 346-368: base [`HIT_LEN_REQUIRED_PAIRED`]/[`HIT_LEN_REQUIRED_SINGLE`]
+/// (27/23), bumped to `sampled_len/(count*5)` when that exceeds the base) --
+/// NOT [`compute_hit_len_required`] (the ALIGNMENT path's formula: 21/17,
+/// `read_len/5`). Pinning to the FASTQ setup, byte-for-byte, is what makes
+/// `no-alignment ≡ FASTQ` exact (an equivalence that holds only under uniform
+/// read length, since `floor(sampled_len/(count*5))` is then
+/// sampling-order-independent -- validated by adversarial review; see the
+/// module docs and the `no_alignment ≡ FASTQ` equivalence test). Assumes
+/// uniform read length: realistic sequencing runs are fixed-length, so this
+/// assumption holds in practice even though it is not checked here.
+///
+/// `sampled_read1_len_sum` is the SUM (not mean) of sampled read-1 sequence
+/// lengths -- the same quantity `extract.rs`'s `sample_head` returns and
+/// [`crate::alignments::Alignments::sample_read1_len_sum`] computes over a
+/// BAM. `sampled_count == 0` (an empty/no-read-1 sample) returns the base
+/// value unchanged, guarding the division against a zero divisor.
+///
+/// Setup-only for now: no `no-alignment` driver wires this in yet (a later
+/// task does), hence `#[allow(dead_code)]`.
+#[allow(dead_code)]
+fn compute_hit_len_required_no_alignment(
+    sampled_read1_len_sum: i64,
+    sampled_count: usize,
+    has_mate: bool,
+) -> i32 {
+    let base = if has_mate { HIT_LEN_REQUIRED_PAIRED } else { HIT_LEN_REQUIRED_SINGLE };
+    if sampled_count == 0 {
+        return base;
+    }
+    let candidate = sampled_read1_len_sum / (i64::try_from(sampled_count).unwrap_or(i64::MAX) * 5);
+    if candidate > i64::from(base) { i32::try_from(candidate).unwrap_or(i32::MAX) } else { base }
 }
 
 /// `BamExtractor.cpp:480`: the literal initial k-mer length the reference is
@@ -1293,6 +1328,16 @@ mod tests {
         assert_eq!(compute_hit_len_required(50, 109), 21);
         // read_len=110 -> 110/5=22 > 21, bumped.
         assert_eq!(compute_hit_len_required(50, 110), 22);
+    }
+
+    #[test]
+    fn no_alignment_hit_len_matches_fastq_formula() {
+        // Uniform 150bp reads, paired: base 27, bumped to 150/5 = 30.
+        assert_eq!(compute_hit_len_required_no_alignment(150 * 1000, 1000, true), 30);
+        // Uniform 100bp reads, paired: 100/5 = 20 < 27 base -> stays 27.
+        assert_eq!(compute_hit_len_required_no_alignment(100 * 1000, 1000, true), 27);
+        // Single-end 90bp: base 23, 90/5 = 18 < 23 -> 23.
+        assert_eq!(compute_hit_len_required_no_alignment(90 * 500, 500, false), 23);
     }
 
     #[test]

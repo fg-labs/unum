@@ -136,12 +136,12 @@ use std::path::Path;
 const PARALLEL_BATCH_SIZE_PER_THREAD: usize = 512;
 
 /// `FastqExtractor.cpp:390`: base `hitLenRequired` for paired input.
-const HIT_LEN_REQUIRED_PAIRED: i32 = 27;
+pub(crate) const HIT_LEN_REQUIRED_PAIRED: i32 = 27;
 /// `FastqExtractor.cpp:392`: base `hitLenRequired` for single-end input.
-const HIT_LEN_REQUIRED_SINGLE: i32 = 23;
+pub(crate) const HIT_LEN_REQUIRED_SINGLE: i32 = 23;
 /// `FastqExtractor.cpp:394`: the sampling pass reads at most this many
 /// read-1 records to compute the data-dependent `hitLenRequired` bump.
-const HIT_LEN_SAMPLE_SIZE: usize = 1000;
+pub(crate) const HIT_LEN_SAMPLE_SIZE: usize = 1000;
 /// `FastqExtractor.cpp:283`: default `-s` (`filterAlignmentSimilarity`).
 pub const DEFAULT_REF_SEQ_SIMILARITY: f64 = 0.8;
 

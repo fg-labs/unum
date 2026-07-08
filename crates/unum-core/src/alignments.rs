@@ -650,6 +650,63 @@ impl Alignments {
     pub fn total_read_cnt(&self) -> u64 {
         self.total_read_cnt
     }
+
+    /// Samples read-1 sequence lengths from this BAM/CRAM's PRIMARY records,
+    /// for [`crate::bam_extract::compute_hit_len_required_no_alignment`] to
+    /// reproduce the FASTQ path's `hitLenRequired` formula
+    /// (`crate::extract`'s `sample_head`) over BAM input instead of a FASTQ
+    /// reader.
+    ///
+    /// Iterates records via [`Alignments::next`], skipping non-primary
+    /// records (`is_primary()`) WITHOUT counting them against `limit` --
+    /// mirroring [`Alignments::general_info`]'s own primary-only gate, where
+    /// secondary/supplementary records are read but neither counted nor
+    /// sampled. Stops once `limit` PRIMARY records have been seen (or at
+    /// EOF); a limit of [`crate::extract::HIT_LEN_SAMPLE_SIZE`] mirrors the
+    /// FASTQ path's own "first 1000" sample size.
+    ///
+    /// For each primary record, `read_seq().len()` is summed into the
+    /// returned total ONLY for a "read-1" record: the first mate
+    /// (`is_first_mate()`) of a paired-flag (`0x1`) template, or ANY record
+    /// of an unpaired (paired-flag unset) template -- generalizing the FASTQ
+    /// path's "read-1 lengths only" rule on a per-record basis, since a BAM
+    /// (unlike a FASTQ pair of files) can in principle mix paired and
+    /// unpaired records. Returns `(sum_of_read1_seq_lengths, count)`, the
+    /// exact two values [`crate::bam_extract::compute_hit_len_required_no_alignment`]
+    /// takes as `sampled_read1_len_sum`/`sampled_count`.
+    ///
+    /// Does NOT rewind: the caller must call [`Alignments::rewind`]
+    /// afterward if it needs to re-read from the start, matching how
+    /// [`Alignments::general_info`] and `sample_head` both leave rewinding to
+    /// their callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying record read fails (a genuine parse
+    /// error, distinct from a clean EOF).
+    pub fn sample_read1_len_sum(&mut self, limit: usize) -> Result<(i64, usize)> {
+        let mut sum: i64 = 0;
+        let mut count: usize = 0;
+        let mut primary_seen: usize = 0;
+
+        while primary_seen < limit && self.next()? {
+            if !self.is_primary() {
+                continue;
+            }
+            primary_seen += 1;
+
+            let is_read1 = !self.current().record.is_paired() || self.is_first_mate();
+            if is_read1 {
+                // `seq_len()` returns `l_qseq` directly (O(1), no allocation);
+                // `read_seq()` would decode every base into a `Vec<u8>` just to
+                // take its length. `general_info` samples lengths the same way.
+                sum += i64::try_from(self.current().record.seq_len()).unwrap_or(i64::MAX);
+                count += 1;
+            }
+        }
+
+        Ok((sum, count))
+    }
 }
 
 /// Decodes an htslib nt16 code the way `GetReadSeq`'s forward-strand branch
@@ -994,6 +1051,152 @@ mod tests {
         // No SO/GO tag at all → Unsorted.
         let bare = write_header_bam(dir.path(), &[]);
         assert_eq!(Alignments::open(&bare).unwrap().sort_order(), SortOrder::Unsorted);
+    }
+
+    /// Builds a small coordinate-sorted paired BAM: 4 pairs, read-1/read-2
+    /// lengths 100bp/80bp respectively (so a read-1-only sampler must ignore
+    /// the 80bp mates), plus one secondary alignment (flag `0x100`) of an
+    /// existing read-1 that must NOT be double-counted (mirrors
+    /// `general_info`'s own primary-only gate).
+    fn write_paired_test_bam(dir: &std::path::Path) -> std::path::PathBuf {
+        use rust_htslib::bam::header::HeaderRecord;
+        use rust_htslib::bam::record::{Cigar, CigarString};
+        use rust_htslib::bam::{Format, Header, Writer};
+
+        let path = dir.join("sample_read1.bam");
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "coordinate");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(&path, &header, Format::Bam).unwrap();
+        let seq100 = vec![b'A'; 100];
+        let seq80 = vec![b'C'; 80];
+        let qual100 = vec![30u8; 100];
+        let qual80 = vec![30u8; 80];
+
+        for i in 0..4i64 {
+            let mut r1 = bam::Record::new();
+            r1.set(
+                format!("pair{i}").as_bytes(),
+                Some(&CigarString(vec![Cigar::Match(100)])),
+                &seq100,
+                &qual100,
+            );
+            r1.set_tid(0);
+            r1.set_pos(1000 + i * 200);
+            r1.set_mtid(0);
+            r1.set_mpos(1100 + i * 200);
+            r1.set_flags(0x1 | 0x2 | 0x40);
+            writer.write(&r1).unwrap();
+
+            let mut r2 = bam::Record::new();
+            r2.set(
+                format!("pair{i}").as_bytes(),
+                Some(&CigarString(vec![Cigar::Match(80)])),
+                &seq80,
+                &qual80,
+            );
+            r2.set_tid(0);
+            r2.set_pos(1100 + i * 200);
+            r2.set_mtid(0);
+            r2.set_mpos(1000 + i * 200);
+            r2.set_flags(0x1 | 0x2 | 0x10 | 0x80);
+            writer.write(&r2).unwrap();
+        }
+
+        // A secondary alignment of pair0's read-1 -- must be skipped (not
+        // primary), so it must not inflate the sampled sum/count.
+        let mut secondary = bam::Record::new();
+        secondary.set(b"pair0", Some(&CigarString(vec![Cigar::Match(100)])), &seq100, &qual100);
+        secondary.set_tid(0);
+        secondary.set_pos(5000);
+        secondary.set_mtid(0);
+        secondary.set_mpos(5100);
+        secondary.set_flags(0x1 | 0x2 | 0x40 | 0x100);
+        writer.write(&secondary).unwrap();
+
+        drop(writer);
+        path
+    }
+
+    #[test]
+    fn sample_read1_len_sum_sums_only_primary_read1_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_paired_test_bam(dir.path());
+        let mut alignments = Alignments::open(&path).unwrap();
+
+        let (sum, count) = alignments.sample_read1_len_sum(1000).unwrap();
+
+        // 4 read-1 records at 100bp each; the 4 read-2 (80bp) records and
+        // the secondary read-1 alignment must be excluded.
+        assert_eq!(count, 4);
+        assert_eq!(sum, 400);
+    }
+
+    #[test]
+    fn sample_read1_len_sum_respects_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_paired_test_bam(dir.path());
+        let mut alignments = Alignments::open(&path).unwrap();
+
+        // limit=2 sites (any record, primary or not, counts against the
+        // limit): the first 2 records scanned are pair0's read-1 (100bp)
+        // and pair0's read-2 (80bp, not sampled since not first-mate).
+        let (sum, count) = alignments.sample_read1_len_sum(2).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(sum, 100);
+    }
+
+    #[test]
+    fn sample_read1_len_sum_on_single_end_samples_every_primary_record() {
+        use rust_htslib::bam::header::HeaderRecord;
+        use rust_htslib::bam::record::{Cigar, CigarString};
+        use rust_htslib::bam::{Format, Header, Writer};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("single_end.bam");
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        hd.push_tag(b"SO", "coordinate");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", 1_000_000);
+        header.push_record(&sq);
+
+        {
+            let mut writer = Writer::from_path(&path, &header, Format::Bam).unwrap();
+            for i in 0..3i64 {
+                let seq = vec![b'A'; 60];
+                let qual = vec![30u8; 60];
+                let mut r = bam::Record::new();
+                r.set(
+                    format!("se{i}").as_bytes(),
+                    Some(&CigarString(vec![Cigar::Match(60)])),
+                    &seq,
+                    &qual,
+                );
+                r.set_tid(0);
+                r.set_pos(1000 + i * 100);
+                r.set_mtid(-1);
+                r.set_mpos(-1);
+                r.set_flags(0);
+                writer.write(&r).unwrap();
+            }
+        }
+
+        let mut alignments = Alignments::open(&path).unwrap();
+        let (sum, count) = alignments.sample_read1_len_sum(1000).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(sum, 180);
     }
 
     /// Covers the loop's post-scan fallback (`sort_order`'s trailing
