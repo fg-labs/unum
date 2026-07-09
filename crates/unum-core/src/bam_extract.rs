@@ -676,9 +676,10 @@ struct GroupedRecord {
     /// positive `mate_id_len` or a single-end name bearing a `/1`/`/2`
     /// suffix, trimming would strip characters the coordinate/FASTQ
     /// reference keeps, diverging from the very path Task 7 proves this one
-    /// equivalent to. Only the genuine single-end lone emit uses this field
-    /// -- the paired arm and the orphan (`0x1`-SET) lone emit both use
-    /// [`Self::trimmed_name`] (see [`flush_grouped_candidate`]).
+    /// equivalent to. Only the genuine single-end lone emit uses this field;
+    /// the paired arm uses [`Self::trimmed_name`], and an orphan (`0x1`-SET,
+    /// mate absent) is DROPPED rather than emitted (see
+    /// [`flush_grouped_candidate`]).
     raw_name: String,
     seq: Vec<u8>,
     qual: Vec<u8>,
@@ -758,10 +759,12 @@ struct GroupedRecord {
 ///   from the `≡FASTQ`/`≡coordinate` reference (see
 ///   [`GroupedRecord::raw_name`]).
 /// - A 1-member group with `0x1` SET (an ORPHAN -- this template's other mate
-///   never arrived, e.g. filtered upstream or genuinely missing from the
-///   file) emits a LONE read iff it passes (the OR-rescue rule degenerates to
-///   "the one read we have"), carrying the TRIMMED id (the coordinate path
-///   emits no orphans at all, so there is no untrimmed reference to match).
+///   never arrived, e.g. filtered upstream or genuinely missing from the file)
+///   is DROPPED, exactly as the coordinate path drops it: a paired candidate
+///   whose mate is absent is recorded in pass 1 but never emitted by pass 2
+///   (which fetches both primary mates). Emitting it lone would break
+///   set-equality with the coordinate path AND hand the fused `run` path an
+///   unequal read-1/read-2 count.
 /// - A group that grows past 2 primary members aborts with an error hint (a
 ///   QNAME group larger than 2 means the input is not actually
 ///   grouped/name-sorted the way this one-pass entry point requires).
@@ -991,21 +994,24 @@ fn flush_grouped_candidate(
     match group {
         [] => Ok(()),
         [lone] => {
-            if filter.is_good_candidate_with_scratch(&lone.seq, scratch) {
-                // A GENUINE single-end record (0x1 UNSET) emits with its RAW,
-                // untrimmed id, matching the coordinate no-alignment path's
-                // single-end emits (which carry `read_id()` untrimmed -- see
-                // `GroupedRecord::raw_name`'s doc comment); this is the
-                // `≡FASTQ`/`≡coordinate` (Task 7) requirement. An ORPHAN
-                // (0x1 SET, mate absent) keeps the trimmed name: the
-                // coordinate path never emits orphans (a paired candidate
-                // whose mate never arrives is simply dropped in pass 2), so
-                // there is no untrimmed single-end reference to match here,
-                // and the trimmed form is what a paired template's id would
-                // otherwise have been.
-                let id = if lone.is_paired { &lone.trimmed_name } else { &lone.raw_name };
+            // Only a GENUINE single-end record (0x1 UNSET) emits lone -- with
+            // its RAW, untrimmed id, matching the coordinate no-alignment path's
+            // single-end emits (which carry `read_id()` untrimmed -- see
+            // `GroupedRecord::raw_name`'s doc comment); this is the
+            // `≡FASTQ`/`≡coordinate` (Task 7) requirement.
+            //
+            // An ORPHAN (0x1 SET, this template's mate never arrived in the
+            // file) is DROPPED, matching the coordinate path exactly: a paired
+            // candidate whose mate is absent is recorded in pass 1 but never
+            // emitted by pass 2 (which fetches BOTH primary mates). Emitting it
+            // lone would (a) break set-equality with the coordinate path on
+            // orphan-containing input and (b) hand the fused `run` path an
+            // unequal read-1/read-2 count, which `run_with_candidate_reads`
+            // rejects. So the drop is required for both correctness and the
+            // fused genotyper's mate-count invariant.
+            if !lone.is_paired && filter.is_good_candidate_with_scratch(&lone.seq, scratch) {
                 let read = ReadRecord {
-                    id: id.clone(),
+                    id: lone.raw_name.clone(),
                     seq: lone.seq.clone(),
                     qual: Some(lone.qual.clone()),
                 };
@@ -1079,7 +1085,7 @@ fn flush_grouped_candidate(
 #[allow(clippy::struct_excessive_bools)]
 struct AlignmentGroupedRecord {
     /// QNAME with `mate_id_len` trimming applied ([`trim_name`]) -- the group
-    /// key, and the id the paired/orphan emits (see [`GroupedRecord::trimmed_name`]).
+    /// key, and the id a 2-primary pair emits (see [`GroupedRecord::trimmed_name`]).
     trimmed_name: String,
     /// Raw, untrimmed QNAME ([`Alignments::read_id`]) -- the id a genuine
     /// single-end (`0x1`-unset) lone read emits (see [`GroupedRecord::raw_name`]).
@@ -1089,8 +1095,8 @@ struct AlignmentGroupedRecord {
     /// `0x40` (READ1) -- orders a 2-primary group's `(mate1, mate2)` emission.
     is_first_mate: bool,
     /// `0x1` (paired) -- a lone record's `0x1`-unset (genuine single-end, emit
-    /// untrimmed id) vs `0x1`-set (orphan, emit trimmed id) dispatch, and the
-    /// non-seekable head's `single_end` majority vote.
+    /// untrimmed id) vs `0x1`-set (orphan, DROPPED to match the coordinate
+    /// path) dispatch, and the non-seekable head's `single_end` majority vote.
     is_paired: bool,
     /// `!(0x900)` -- only primary records are emitted; secondaries/
     /// supplementaries contribute to candidacy but never to output.
@@ -1265,7 +1271,8 @@ fn single_end_coordinate_key(record: &AlignmentGroupedRecord) -> (u8, i32, i32) 
 ///   [`flush_grouped_candidate`]: a 2-primary group emits `(mate1, mate2)`
 ///   ordered by `is_first_mate` on the trimmed name; a 1-primary `0x1`-unset
 ///   group emits a lone read with the UNTRIMMED id; a 1-primary `0x1`-set
-///   orphan emits a lone read with the trimmed id.
+///   orphan is DROPPED (matching the coordinate path, which emits only
+///   complete pairs, and keeping the fused `run` path's mate counts equal).
 ///
 /// # Errors
 ///
@@ -1362,11 +1369,22 @@ fn flush_alignment_grouped_candidate(
     match primaries.as_slice() {
         [] => Ok(()), // candidacy via a non-primary only, with no primary to emit
         [lone] => {
-            let id = if lone.is_paired { &lone.trimmed_name } else { &lone.raw_name };
-            let read =
-                ReadRecord { id: id.clone(), seq: lone.seq.clone(), qual: Some(lone.qual.clone()) };
-            sink.emit_pair(&read, None)?;
-            *emitted += 1;
+            // Reached only in paired mode (single_end == true returned above).
+            // A lone paired primary is an ORPHAN (0x1 SET, mate absent from the
+            // file): DROP it, exactly as the coordinate path does (pass 2 emits
+            // only complete pairs). Emitting it lone would break set-equality
+            // AND the fused `run` path's equal-mate-count invariant. A stray
+            // 0x1-UNSET single-end record in an otherwise-paired file still
+            // emits lone (its untrimmed id), matching the no-alignment flush.
+            if !lone.is_paired {
+                let read = ReadRecord {
+                    id: lone.raw_name.clone(),
+                    seq: lone.seq.clone(),
+                    qual: Some(lone.qual.clone()),
+                };
+                sink.emit_pair(&read, None)?;
+                *emitted += 1;
+            }
             Ok(())
         }
         [a, b] => {
@@ -4292,7 +4310,8 @@ mod tests {
     ///   must be emitted LONE.
     /// - `orphan_ok`: 1 primary record, `0x1` SET (this template's other
     ///   mate never shows up in the file), k-mer-matching SEQ -- must be
-    ///   emitted LONE (orphan OR-rescue degenerates to the single read).
+    ///   DROPPED, matching the coordinate path (which emits only complete
+    ///   pairs) and keeping the fused `run` path's mate counts equal.
     /// - `pair_fail`: 2 adjacent primary records, BOTH `noise` (fail
     ///   individually, so OR-rescue has nothing to rescue with) -- must NOT
     ///   be emitted at all.
@@ -4379,7 +4398,7 @@ mod tests {
     }
 
     #[test]
-    fn grouped_no_alignment_pairs_orphans_and_singles() {
+    fn grouped_no_alignment_pairs_singles_and_drops_orphans() {
         let tmp = tempfile::tempdir().unwrap();
         let bam_path = tmp.path().join("grouped_no_alignment.bam");
         build_grouped_no_alignment_test_bam(&bam_path);
@@ -4406,8 +4425,9 @@ mod tests {
         assert!(!single_end, "majority-paired fixture must not be classified single-end");
         assert_eq!(metrics.single_end, single_end, "returned tuple and metrics field must agree");
         assert_eq!(
-            metrics.pass1_emitted, 3,
-            "pair_ok + single_ok + orphan_ok must be emitted; pair_fail must not"
+            metrics.pass1_emitted, 2,
+            "pair_ok + single_ok must be emitted; orphan_ok (0x1 SET, mate absent) must be DROPPED \
+             to match the coordinate path (which emits only complete pairs); pair_fail must not"
         );
         assert_eq!(
             metrics.candidates_recorded, 0,
@@ -4421,8 +4441,8 @@ mod tests {
         }
         assert_eq!(
             by_id.len(),
-            3,
-            "exactly 3 QNAMEs must be emitted, got {:?}",
+            2,
+            "exactly 2 QNAMEs must be emitted, got {:?}",
             by_id.keys().collect::<Vec<_>>()
         );
 
@@ -4437,11 +4457,12 @@ mod tests {
         assert!(single_r2.is_none(), "single_ok (0x1 unset) must be emitted LONE, not as a pair");
         assert_eq!(single_r1.seq, ref_bytes[100..190]);
 
-        let (orphan_r1, orphan_r2) =
-            by_id.get("orphan_ok").expect("orphan_ok must be emitted (orphan OR-rescue)");
-        assert!(orphan_r2.is_none(), "orphan_ok (mate absent) must be emitted LONE, not as a pair");
-        assert_eq!(orphan_r1.seq, ref_bytes[200..290]);
-
+        assert!(
+            !by_id.contains_key("orphan_ok"),
+            "an orphan (0x1 SET, mate absent) must be DROPPED to match the coordinate path (a paired \
+             candidate whose mate never arrives is not emitted); emitting it lone breaks set-equality \
+             AND the fused `run` path's equal-mate-count invariant"
+        );
         assert!(
             !by_id.contains_key("pair_fail"),
             "pair_fail (both mates noise) must not be emitted"
@@ -4539,9 +4560,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            metrics.pass1_emitted, 3,
+            metrics.pass1_emitted, 2,
             "boundary-straddled pair_ok must still merge into one 2-member group and emit \
-             correctly, exactly like the unbounded-head run (grouped_no_alignment_pairs_orphans_and_singles)"
+             correctly, exactly like the unbounded-head run \
+             (grouped_no_alignment_pairs_singles_and_drops_orphans: pair_ok + single_ok emitted, \
+             orphan_ok dropped)"
         );
         let pair_entry = sink
             .pairs
@@ -5539,6 +5562,12 @@ mod tests {
             ("alt_pair", ref_bytes[100..190].to_vec(), m2, 1, 300, 1, 100),
             ("unaligned_joint", ref_bytes[0..90].to_vec(), u1, -1, -1, -1, -1),
             ("unaligned_joint", ref_bytes[100..190].to_vec(), u2, -1, -1, -1, -1),
+            // orphan: 0x1 SET, on-target, but its mate NEVER appears in the file
+            // (a single row). The coordinate path records it in pass 1 and drops
+            // it in pass 2 (no mate to complete the pair); the grouped one-pass
+            // must DROP it too (a lone paired primary), or set-equality breaks --
+            // this row is the regression guard for the orphan-handling fix.
+            ("orphan", ref_bytes[0..90].to_vec(), m1, 0, 1150, 0, 1350),
         ];
 
         // Coordinate BAM: (tid, pos) ascending with UNMAPPED (tid < 0) sorting
