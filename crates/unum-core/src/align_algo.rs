@@ -334,7 +334,13 @@ pub struct DpCache {
     /// `(lent, lenp, t, p)`-keyed cache of `(score, align)` DP results. The key
     /// frames both lengths and both full sequences so two different `(t, p)`
     /// inputs can never alias to the same key (see [`DpCache::build_key`]).
-    cache: std::collections::HashMap<Vec<u8>, (i32, Vec<i8>)>,
+    ///
+    /// Keyed with [`rustc_hash::FxHashMap`] rather than std's SipHash: the key
+    /// spans both full sequences (tens of bytes) and is hashed on *every* call
+    /// (the ~99% cache-hit path), so per-byte hash speed dominates here. This is
+    /// a pure memoization cache -- the hasher cannot affect which stored value a
+    /// key maps to -- so the swap is byte-identical by construction.
+    cache: rustc_hash::FxHashMap<Vec<u8>, (i32, Vec<i8>)>,
     /// Reused scratch buffer for the lookup key; cleared and rebuilt each call
     /// so a cache hit performs no heap allocation.
     dp_key: Vec<u8>,
