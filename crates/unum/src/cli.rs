@@ -101,6 +101,25 @@ pub struct BuildArgs {
     pub prefix: String,
 }
 
+/// BAM/CRAM extraction-mode selector (`--bam-mode`). Required whenever the
+/// input is a BAM/CRAM (there is no inferred default yet). Chooses the
+/// candidate-*selection* criterion:
+///
+/// - `alignment` (Class B): gather reads by alignment position (on-target
+///   ∪ alt/decoy ∪ unaligned), then k-mer-check — T1K's `bam-extractor`.
+/// - `no-alignment` (Class A): pure k-mer selection on the read sequences,
+///   identical to the FASTQ path (BAM as packaged reads).
+///
+/// (`no-alignment` is not yet implemented; the dispatcher rejects it with a
+/// "later release" message in this stage.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum BamMode {
+    /// Class B: coordinate/position-based selection (`bam-extractor` parity).
+    Alignment,
+    /// Class A: k-mer-only selection, identical to FASTQ (BAM as reads).
+    NoAlignment,
+}
+
 /// Arguments for the `extract` subcommand. Mirrors `fastq-extractor`'s flag names
 /// (`FastqExtractor.cpp:12-33`'s `usage[]`) for the paired/single-end FASTQ-plus-reference-FASTA
 /// candidate-extraction path (the default, when `-b` is absent), OR `bam-extractor`'s flag names
@@ -150,6 +169,12 @@ pub struct ExtractArgs {
     /// trailing `/1` or `/2`). Mirrors `bam-extractor --mateIdSuffixLen`.
     #[arg(long = "mate-id-suffix-len", default_value_t = -1)]
     pub mate_id_suffix_len: i32,
+
+    /// BAM/CRAM extraction mode. REQUIRED whenever the input is a BAM/CRAM
+    /// (via `-i` content-detection or `-b`); ignored for FASTQ input. See
+    /// [`BamMode`].
+    #[arg(long = "bam-mode", value_enum)]
+    pub bam_mode: Option<BamMode>,
 
     /// Prefix of the output file(s).
     #[arg(short = 'o', long = "prefix", default_value = "toassemble", value_name = "STRING")]
@@ -357,6 +382,60 @@ pub struct AnalyzeArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bam_mode_parses_alignment_and_no_alignment() {
+        let cli = Cli::try_parse_from([
+            "unum",
+            "extract",
+            "-f",
+            "ref.fa",
+            "-i",
+            "x.bam",
+            "--bam-mode",
+            "alignment",
+        ])
+        .expect("alignment should parse");
+        let Commands::Extract(args) = cli.command else { panic!("expected extract subcommand") };
+        assert_eq!(args.bam_mode, Some(BamMode::Alignment));
+
+        let cli = Cli::try_parse_from([
+            "unum",
+            "extract",
+            "-f",
+            "ref.fa",
+            "-i",
+            "x.bam",
+            "--bam-mode",
+            "no-alignment",
+        ])
+        .expect("no-alignment should parse");
+        let Commands::Extract(args) = cli.command else { panic!("expected extract subcommand") };
+        assert_eq!(args.bam_mode, Some(BamMode::NoAlignment));
+    }
+
+    #[test]
+    fn bam_mode_absent_is_none_and_bad_value_errors() {
+        let cli = Cli::try_parse_from(["unum", "extract", "-f", "ref.fa", "-u", "reads.fq"])
+            .expect("no --bam-mode should parse");
+        let Commands::Extract(args) = cli.command else { panic!("expected extract subcommand") };
+        assert_eq!(args.bam_mode, None);
+
+        assert!(
+            Cli::try_parse_from([
+                "unum",
+                "extract",
+                "-f",
+                "ref.fa",
+                "-i",
+                "x.bam",
+                "--bam-mode",
+                "bogus",
+            ])
+            .is_err(),
+            "an invalid --bam-mode value must be a clap error"
+        );
+    }
 
     #[test]
     fn parse_finite_non_negative_f64_accepts_valid_weights() {
