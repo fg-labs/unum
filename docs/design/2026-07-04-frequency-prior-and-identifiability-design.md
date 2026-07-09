@@ -72,12 +72,19 @@ build the TSV from CIWD 3.0 / AFND.
   finer DB rows sum. Unit-tested.
 - **Locus absent from DB** → prior is a no-op for that gene (constant f across its candidates → the
   skip rule in "empty-table guarantee" fires, byte-identical).
-- **Null/expression variants** (`N`/`L`/`S`/`C`/`A`/`Q` suffix): a fixed log-penalty biasing the
-  selector away from calling non-expressed alleles. **DEFERRED to a follow-up PR** — the original
-  `--allele-freq-null-penalty` flag shipped here as plumbing only (never read in any objective), and
-  the concrete wiring (detection granularity, injection points, span cap) was never specified. It is
-  designed in `docs/2026-07-08-null-penalty-wiring-design.md` (workspace-level) and will land on top
-  of the merged frequency prior. The flag/field/setter are removed here until then.
+- **Null/expression variants** (`N`/`L`/`S`/`C`/`A`/`Q` suffix): `--allele-freq-null-penalty p`
+  subtracts a fixed, coverage-independent penalty (`p` per null haplotype a candidate calls, `2p`
+  for a homozygous-null) from the selection objective in both Path A and Path B, biasing the caller
+  away from asserting a non-expressed allele on marginal evidence. Detection is **name-driven**
+  (`\d[NLSCAQ]$` on the full allele name, which must contain a `*` so bare gene names are never
+  flagged), so it acts even without `--allele-freq`. When active for a gene (`p > 0` + a null rank)
+  it also enables the `k == j` hom candidate and runs Path B, so the penalty can drive a
+  null-het → expressed-hom call with no frequency table (the HWE term drops to 0). All activation is
+  gated on `p > 0`, so `p == 0` is byte-identical. Bounded to `[0, NULL_PENALTY_MAX = 16]` (half the
+  ~32-read no-override span, since the max per-candidate penalty is `2p`) so the penalty alone can
+  never flip a coverage margin beyond the span. Implemented (scope-full) per
+  `docs/2026-07-08-null-penalty-wiring-design.md` (workspace-level, hardened by adversarial review)
+  on top of the frequency prior. Default `0.0` keeps it inert.
 
 ### Where the prior enters — BOTH selection paths (the injection-coverage call)
 
@@ -194,7 +201,7 @@ coverage margin exceeds the prior span**; concretely, a coverage margin of ≳ 3
 handful of reads at typical `adjust_weight`) can *never* be overridden by any frequency table. Below
 that margin — exact ties, hom-vs-het boundaries, ~1-read differences — the prior *may* tip the call
 (the intended behavior). `w` is a documented CLI knob (`--allele-freq-weight`, default 2.0) so the
-span is auditable; the deferred null-penalty (above) is to be capped at the same span. As coverage → ∞ the
+span is auditable; the null-penalty (above) is capped at half that span (`2p ≤ span`). As coverage → ∞ the
 `covered_read_cnt` margin grows without bound while the HWE term stays O(1), so the call is
 prior-independent in the limit (coverage-vanishing, tested).
 
@@ -342,8 +349,10 @@ skewed abundances < `ln k`);
 1. **#29** (`29/nh/frequency-prior`): freq loader + `--allele-freq`/`--allele-freq-weight`
    + `hwe_log_prior`/`covered_prior_bonus` + Path-A objective injection (:4004) + hom candidate
    (`k==j` guarded, collapses to 1-type on a hom win) + Path-B reconciliation. Larger; touches
-   selection. (`--allele-freq-null-penalty` deferred — see the null/expression note above.)
-2. **#33** (stacked on #29): four identifiability columns in `write_metrics_tsv`. Report-only; small.
+   selection.
+2. **`--allele-freq-null-penalty`** (`nh/allele-freq-null-penalty`, stacked on #29): the name-driven
+   null/expression-variant selection penalty (see the null/expression note above), on top of #29.
+3. **#33** (stacked on #29): four identifiability columns in `write_metrics_tsv`. Report-only; small.
 
 ## Citations
 

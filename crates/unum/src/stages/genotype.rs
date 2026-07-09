@@ -478,8 +478,9 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     // --- #29 opt-in Hardy-Weinberg population-frequency prior ---
     // Configured immediately before selection: when `--allele-freq` is absent
     // the table stays `None` and selection is byte-identical to the oracle. The
-    // weight is always propagated (it is inert when the table is `None` or the
-    // gene is inactive).
+    // weight and null-penalty are always propagated (they are inert at their
+    // `0.0`/default values; the null penalty is name-driven, so it can act even
+    // without a table, but only once set > 0).
     if let Some(freq_path) = args.allele_freq.as_deref() {
         let table = AlleleFreqTable::from_tsv(Path::new(freq_path)).with_context(|| {
             format!("loading allele-frequency table for the HWE prior from {freq_path}")
@@ -487,6 +488,7 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
         genotyper.set_allele_freq(table);
     }
     genotyper.set_allele_freq_weight(args.allele_freq_weight);
+    genotyper.set_allele_freq_null_penalty(args.allele_freq_null_penalty);
 
     genotyper.select_alleles_for_genes(|idx| loaded.weight[idx]);
 
