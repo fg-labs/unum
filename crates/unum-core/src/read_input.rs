@@ -17,9 +17,12 @@ pub enum DetectedFormat {
     Fastq,
     /// FASTA (`>` sentinel).
     Fasta,
-    /// BAM (`BAM\1` magic) -- reserved for Stage 2 (`--bam-mode`).
+    /// SAM (a text `@HD`/`@SQ`/`@RG`/... header line: `@` + two uppercase
+    /// letters + TAB). Read by htslib exactly like BAM/CRAM.
+    Sam,
+    /// BAM (`BAM\1` magic).
     Bam,
-    /// CRAM (`CRAM` magic) -- reserved for Stage 2 (`--bam-mode`).
+    /// CRAM (`CRAM` magic).
     Cram,
 }
 
@@ -45,6 +48,9 @@ const MAGIC_PREFIX_LEN: usize = 4;
 pub enum OpenedInput {
     /// FASTQ/FASTA: a reader positioned at the first record.
     Fastq(FastqReader),
+    /// SAM (`@`-header text) -- route the original input to the BAM extractor
+    /// (htslib reads SAM like BAM; no reference needed, same as BAM).
+    Sam,
     /// BAM (`BAM\1` magic) -- route the original input to the BAM extractor.
     Bam,
     /// CRAM (`CRAM` magic) -- route the original input to the BAM extractor.
@@ -67,6 +73,20 @@ pub fn detect_format(prefix: &[u8]) -> Result<DetectedFormat> {
     }
     if prefix.starts_with(b"BAM\x01") {
         return Ok(DetectedFormat::Bam);
+    }
+    // A SAM header line is `@` + a two-uppercase-letter record type (HD/SQ/RG/
+    // PG/CO) + TAB. FASTQ also begins with `@`, but its id line never has this
+    // exact shape (an id is not two uppercase letters followed by a tab), so
+    // this reliably distinguishes a headered SAM from FASTQ. (Headerless SAM --
+    // a bare record line -- is not detected here; `samtools view -h` always
+    // emits a header, so this covers the practical case.)
+    if prefix.len() >= 4
+        && prefix[0] == b'@'
+        && prefix[1].is_ascii_uppercase()
+        && prefix[2].is_ascii_uppercase()
+        && prefix[3] == b'\t'
+    {
+        return Ok(DetectedFormat::Sam);
     }
     match prefix[0] {
         b'@' => Ok(DetectedFormat::Fastq),
@@ -174,6 +194,7 @@ pub fn open_input(spec: &InputSpec) -> Result<(OpenedInput, DetectedFormat)> {
             let rejoined = std::io::BufReader::new(std::io::Cursor::new(prefix).chain(decoded));
             OpenedInput::Fastq(FastqReader::from_bufread(label, Box::new(rejoined)))
         }
+        DetectedFormat::Sam => OpenedInput::Sam,
         DetectedFormat::Bam => OpenedInput::Bam,
         DetectedFormat::Cram => OpenedInput::Cram,
     };
@@ -194,8 +215,8 @@ pub fn open_fastq_reader(spec: &InputSpec) -> Result<(FastqReader, DetectedForma
     let (opened, fmt) = open_input(spec)?;
     match opened {
         OpenedInput::Fastq(reader) => Ok((reader, fmt)),
-        OpenedInput::Bam | OpenedInput::Cram => bail!(
-            "{label} is a {fmt:?} file; BAM/CRAM input requires --bam-mode, not the FASTQ path"
+        OpenedInput::Sam | OpenedInput::Bam | OpenedInput::Cram => bail!(
+            "{label} is a {fmt:?} file; SAM/BAM/CRAM input requires --bam-mode, not the FASTQ path"
         ),
     }
 }
@@ -212,6 +233,18 @@ mod tests {
     #[test]
     fn detects_fastq_by_at_sign() {
         assert_eq!(detect(b"@r1\nACGT\n+\nIIII\n"), DetectedFormat::Fastq);
+    }
+
+    #[test]
+    fn detects_sam_header_but_not_fastq_at_ids() {
+        // SAM header lines: `@` + two uppercase letters + TAB.
+        assert_eq!(detect(b"@HD\tVN:1.6\n"), DetectedFormat::Sam);
+        assert_eq!(detect(b"@SQ\tSN:chr1\n"), DetectedFormat::Sam);
+        assert_eq!(detect(b"@RG\tID:x\n"), DetectedFormat::Sam);
+        // FASTQ ids that superficially start with `@` + letters are NOT SAM:
+        assert_eq!(detect(b"@r1\n"), DetectedFormat::Fastq);
+        assert_eq!(detect(b"@HD\n"), DetectedFormat::Fastq); // no tab after @HD
+        assert_eq!(detect(b"@Hd\tx"), DetectedFormat::Fastq); // lowercase -> not a SAM type code
     }
 
     #[test]

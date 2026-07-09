@@ -47,8 +47,9 @@ pub struct RunArgs {
     #[arg(short = 'u', value_name = "STRING")]
     pub single: Option<String>,
 
-    /// Path to a BAM/CRAM file (mutually exclusive with `-1`/`-2`/`-u`). NOTE: BAM input is not
-    /// yet wired into the native Rust fused path -- see `crate::stages::run`'s doc comment.
+    /// Path to a BAM/CRAM file (mutually exclusive with `-1`/`-2`/`-u`), fused in-memory into
+    /// extract -> genotype -> analyze via `--bam-mode`; see `crate::stages::run`'s doc comment
+    /// for exactly which `--bam-mode`/sort-order combinations are currently supported.
     #[arg(short = 'b', value_name = "STRING")]
     pub bam: Option<String>,
 
@@ -56,9 +57,25 @@ pub struct RunArgs {
     #[arg(short = 'f', value_name = "STRING")]
     pub ref_seq_fasta: String,
 
-    /// Path to the gene coordinate file (only required for BAM input; unused on this path).
+    /// Gene coordinate FASTA (`*_coord.fa`: headers `name chrom start end
+    /// strand` + sequence). REQUIRED for `--bam-mode alignment`; rejected for
+    /// FASTQ / `--bam-mode no-alignment`.
     #[arg(short = 'c', value_name = "STRING")]
     pub ref_coord_fasta: Option<String>,
+
+    /// Reference genome FASTA for decoding CRAM (a `.fai` sibling is required;
+    /// build with `samtools faidx`). REQUIRED for CRAM input; ignored for a
+    /// file-backed BAM and for FASTQ. NOTE: a BAM/SAM piped on **stdin** cannot
+    /// be format-sniffed before decode, so a supplied `-r` still runs the `@SQ`
+    /// coverage preflight there — on stdin, pass `-r` only for CRAM. Used
+    /// exclusively — no REF_PATH/REF_CACHE/network fallback.
+    #[arg(short = 'r', long = "reference", value_name = "STRING")]
+    pub reference: Option<String>,
+
+    /// BAM/CRAM extraction mode. REQUIRED whenever the input (`-b`) is a
+    /// BAM/CRAM; ignored for FASTQ input. See [`BamMode`].
+    #[arg(long = "bam-mode", value_enum)]
+    pub bam_mode: Option<BamMode>,
 
     /// Prefix of output files.
     #[arg(short = 'o', value_name = "STRING")]
@@ -107,14 +124,21 @@ pub struct BuildArgs {
 ///
 /// - `alignment` (Class B): gather reads by alignment position (on-target
 ///   ∪ alt/decoy ∪ unaligned), then k-mer-check — T1K's `bam-extractor`.
+///   Reads gene intervals + the k-mer seed reference from `-c` (the
+///   `_coord.fa` gene-coordinate FASTA); `-f` is unused in this mode.
 /// - `no-alignment` (Class A): pure k-mer selection on the read sequences,
-///   identical to the FASTQ path (BAM as packaged reads).
+///   identical to the FASTQ path (BAM as packaged reads). Builds its k-mer
+///   filter from `-f`; `-c` is unused (and rejected) in this mode.
 ///
-/// (`alignment` is only implemented for a coordinate-sorted BAM as of this
-/// stage; grouped/name-sorted or stdin `alignment` input is rejected with a
-/// "later release" message. `no-alignment` is fully routed -- coordinate/
-/// unsorted takes a 2-pass name-map, grouped/name-sorted (including stdin)
-/// takes a one-pass -- see `crate::stages::extract::run_bam_no_alignment`.)
+/// (Both modes are fully routed by `@HD` sort order. `alignment`:
+/// coordinate-sorted takes the seekable 2-pass name-map, grouped/name-sorted
+/// (including stdin) takes the one-pass interval matcher, unsorted is rejected
+/// -- see `crate::stages::extract::run_bam_alignment`. `no-alignment`:
+/// coordinate/unsorted takes a 2-pass name-map, grouped/name-sorted (including
+/// stdin) takes a one-pass -- see
+/// `crate::stages::extract::run_bam_no_alignment`. CRAM decodes in either mode
+/// via `-r` (required for CRAM; the reference is used exclusively, with no
+/// REF_PATH/REF_CACHE/network fallback).)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum BamMode {
     /// Class B: coordinate/position-based selection (`bam-extractor` parity).
@@ -134,10 +158,27 @@ pub enum BamMode {
 /// `-1`/`-2`/`-u`/`-b`.
 #[derive(Args, Debug)]
 pub struct ExtractArgs {
-    /// Path to the reference sequence FASTA file (FASTQ mode) or the `_coord.fa` gene-coordinate
-    /// reference (BAM mode, i.e. when `-b` is given).
+    /// Path to the reference sequence FASTA. Required for FASTQ and
+    /// `--bam-mode no-alignment`; NOT used by `extract --bam-mode alignment`
+    /// (which reads sequences from `-c`). Per-mode requirement validated in
+    /// `crate::stages::extract`.
     #[arg(short = 'f', value_name = "STRING")]
-    pub ref_seq_fasta: String,
+    pub ref_seq_fasta: Option<String>,
+
+    /// Gene coordinate FASTA (`*_coord.fa`: headers `name chrom start end
+    /// strand` + sequence). REQUIRED for `--bam-mode alignment` (gene
+    /// intervals + k-mer seed reference); rejected for FASTQ / no-alignment.
+    #[arg(short = 'c', value_name = "STRING")]
+    pub ref_coord_fasta: Option<String>,
+
+    /// Reference genome FASTA for decoding CRAM (a `.fai` sibling is required;
+    /// build with `samtools faidx`). REQUIRED for CRAM input; ignored for a
+    /// file-backed BAM and for FASTQ. NOTE: a BAM/SAM piped on **stdin** cannot
+    /// be format-sniffed before decode, so a supplied `-r` still runs the `@SQ`
+    /// coverage preflight there — on stdin, pass `-r` only for CRAM. Used
+    /// exclusively — no REF_PATH/REF_CACHE/network fallback.
+    #[arg(short = 'r', long = "reference", value_name = "STRING")]
+    pub reference: Option<String>,
 
     /// Path to the first-mate FASTQ file (paired FASTQ-mode input; requires `-2`).
     #[arg(short = '1', value_name = "STRING")]
@@ -463,6 +504,51 @@ mod tests {
     #[test]
     fn parse_finite_non_negative_f64_rejects_garbage() {
         assert!(parse_finite_non_negative_f64("abc").is_err());
+    }
+
+    #[test]
+    fn extract_accepts_coord_and_reference_and_optional_f() {
+        let cli = Cli::try_parse_from([
+            "unum",
+            "extract",
+            "-b",
+            "x.bam",
+            "--bam-mode",
+            "alignment",
+            "-c",
+            "coord.fa",
+            "-r",
+            "hg38.fa",
+        ])
+        .expect("parse");
+        let Commands::Extract(a) = cli.command else { panic!("expected extract subcommand") };
+        assert_eq!(a.ref_coord_fasta.as_deref(), Some("coord.fa"));
+        assert_eq!(a.reference.as_deref(), Some("hg38.fa"));
+        assert_eq!(a.ref_seq_fasta, None);
+    }
+
+    #[test]
+    fn run_accepts_bam_mode_and_reference() {
+        let cli = Cli::try_parse_from([
+            "unum",
+            "run",
+            "-b",
+            "x.bam",
+            "--bam-mode",
+            "alignment",
+            "-f",
+            "seq.fa",
+            "-c",
+            "coord.fa",
+            "-r",
+            "hg38.fa",
+            "-o",
+            "out",
+        ])
+        .expect("parse");
+        let Commands::Run(a) = cli.command else { panic!("expected run subcommand") };
+        assert_eq!(a.bam_mode, Some(BamMode::Alignment));
+        assert_eq!(a.reference.as_deref(), Some("hg38.fa"));
     }
 
     #[test]

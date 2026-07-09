@@ -51,7 +51,7 @@
 //! `GetFieldZ`) are being dropped in the downstream BamExtractor port (Task
 //! 3.3b), so this module does not implement it.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rust_htslib::bam::{self, Read as _, record::Cigar};
 use std::path::{Path, PathBuf};
 
@@ -133,6 +133,15 @@ pub struct Alignments {
     path: Option<PathBuf>,
     reader: bam::Reader,
     header: bam::HeaderView,
+    /// `Some(path)` when an explicit CRAM reference was supplied
+    /// ([`Alignments::open_with_reference`] /
+    /// [`Alignments::from_stdin_with_reference`]); `None` otherwise. Held so
+    /// [`Alignments::rewind`] can re-apply it after reopening the file (a
+    /// reopen rebuilds the reader from scratch and would otherwise decode
+    /// CRAM against htslib's default reference chain, including the forbidden
+    /// EBI network fallback). See [`apply_reference`] for the no-network
+    /// coverage preflight this reference goes through on every apply.
+    reference: Option<PathBuf>,
     current: Option<CurrentRecord>,
     /// Mirrors `Alignments::totalReadCnt`: counts every PRIMARY record
     /// (`(flag & 0x900) == 0`) seen so far by [`Alignments::next`] since the
@@ -153,11 +162,39 @@ impl Alignments {
     /// Returns an error if the file cannot be opened or its header cannot be
     /// parsed.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::open_with_reference(path, None::<&Path>)
+    }
+
+    /// Opens `path` like [`Alignments::open`], but additionally binds an
+    /// explicit reference FASTA for decoding CRAM (via
+    /// `rust_htslib::bam::Reader::set_reference`). BAM/SAM inputs ignore the
+    /// reference (they carry their own sequence), but supplying it is
+    /// harmless.
+    ///
+    /// When `reference` is `Some`, decoding goes through a HARD no-network
+    /// preflight ([`apply_reference`]): the reference's `.fai` sibling must
+    /// exist and must cover every `@SQ` contig in the header, or opening
+    /// fails outright -- htslib's default CRAM reference chain (which can fall
+    /// back to an `M5`/`REF_PATH` lookup against the EBI network endpoint) is
+    /// never consulted. The reference is remembered so [`Alignments::rewind`]
+    /// can re-apply it after reopening the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened, its header cannot be
+    /// parsed, or (when `reference` is `Some`) the no-network coverage
+    /// preflight in [`apply_reference`] fails.
+    pub fn open_with_reference<P: AsRef<Path>, Q: AsRef<Path>>(
+        path: P,
+        reference: Option<Q>,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let reader = bam::Reader::from_path(&path)
+        let reference = reference.map(|r| r.as_ref().to_path_buf());
+        let mut reader = bam::Reader::from_path(&path)
             .with_context(|| format!("opening alignment file {}", path.display()))?;
         let header = bam::HeaderView::from_header(&bam::Header::from_template(reader.header()));
-        Ok(Self { path: Some(path), reader, header, current: None, total_read_cnt: 0 })
+        apply_reference(&mut reader, &header, reference.as_deref())?;
+        Ok(Self { path: Some(path), reader, header, reference, current: None, total_read_cnt: 0 })
     }
 
     /// Opens standard input as a BAM/CRAM stream, for a pipe-fed source
@@ -187,9 +224,28 @@ impl Alignments {
     /// Returns an error if stdin cannot be opened as a BAM/CRAM stream or its
     /// header cannot be parsed.
     pub fn from_stdin() -> Result<Self> {
-        let reader = bam::Reader::from_stdin().context("opening alignment stream from stdin")?;
+        Self::from_stdin_with_reference(None::<&Path>)
+    }
+
+    /// Opens standard input like [`Alignments::from_stdin`], but additionally
+    /// binds an explicit reference FASTA for decoding a CRAM stream, going
+    /// through the same HARD no-network preflight as
+    /// [`Alignments::open_with_reference`] (see [`apply_reference`]). As with
+    /// [`Alignments::from_stdin`], the returned reader is **not rewindable**:
+    /// [`Alignments::rewind`] returns an error rather than reopening.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stdin cannot be opened as a BAM/CRAM stream, its
+    /// header cannot be parsed, or (when `reference` is `Some`) the no-network
+    /// coverage preflight in [`apply_reference`] fails.
+    pub fn from_stdin_with_reference<Q: AsRef<Path>>(reference: Option<Q>) -> Result<Self> {
+        let reference = reference.map(|r| r.as_ref().to_path_buf());
+        let mut reader =
+            bam::Reader::from_stdin().context("opening alignment stream from stdin")?;
         let header = bam::HeaderView::from_header(&bam::Header::from_template(reader.header()));
-        Ok(Self { path: None, reader, header, current: None, total_read_cnt: 0 })
+        apply_reference(&mut reader, &header, reference.as_deref())?;
+        Ok(Self { path: None, reader, header, reference, current: None, total_read_cnt: 0 })
     }
 
     /// Returns the BAM/CRAM's declared sort/group order from its `@HD` line.
@@ -257,9 +313,15 @@ impl Alignments {
                  a stdin source"
             );
         };
-        let reader = bam::Reader::from_path(&path)
+        let mut reader = bam::Reader::from_path(&path)
             .with_context(|| format!("rewinding alignment file {}", path.display()))?;
-        self.header = bam::HeaderView::from_header(&bam::Header::from_template(reader.header()));
+        let header = bam::HeaderView::from_header(&bam::Header::from_template(reader.header()));
+        // Reopening builds a fresh reader with no reference; re-apply the
+        // explicit CRAM reference (if any) so pass 2 of a coordinate-CRAM
+        // 2-pass extract decodes THROUGH the supplied reference, never
+        // htslib's default (network-capable) reference chain.
+        apply_reference(&mut reader, &header, self.reference.as_deref())?;
+        self.header = header;
         self.reader = reader;
         self.current = None;
         // C++ `Rewind` does NOT reset `totalReadCnt`; instead the first `Next`
@@ -768,6 +830,97 @@ impl Alignments {
 
         Ok((sum, count))
     }
+}
+
+/// Parses the contig NAME column (first tab-separated field per line) from
+/// the `.fai` index sibling of `ref_path` (i.e. `<ref_path>.fai`), returning
+/// the set of contig names it declares.
+///
+/// # Errors
+///
+/// Returns an error if `<ref_path>.fai` does not exist (naming the missing
+/// index and suggesting `samtools faidx`) or cannot be read. htslib's
+/// `set_reference` loads the reference THROUGH this `.fai` and does NOT build
+/// a missing one, so its absence is a hard error here rather than something to
+/// paper over.
+fn fai_contig_names(ref_path: &Path) -> Result<std::collections::HashSet<String>> {
+    let fai = PathBuf::from(format!("{}.fai", ref_path.display()));
+    ensure!(
+        fai.exists(),
+        "CRAM reference {} has no .fai index ({}); run `samtools faidx {}`",
+        ref_path.display(),
+        fai.display(),
+        ref_path.display()
+    );
+    let text =
+        std::fs::read_to_string(&fai).with_context(|| format!("reading {}", fai.display()))?;
+    Ok(text
+        .lines()
+        .filter_map(|line| line.split('\t').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Parses the `SN:` (sequence name) values of every `@SQ` line in `header`,
+/// using the same raw byte-line scan [`Alignments::sort_order`] uses on the
+/// already-parsed header text (no I/O).
+fn header_sq_names(header: &bam::HeaderView) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in header.as_bytes().split(|&b| b == b'\n') {
+        if !line.starts_with(b"@SQ") {
+            continue;
+        }
+        for field in line.split(|&b| b == b'\t') {
+            if let Some(v) = field.strip_prefix(b"SN:") {
+                out.push(String::from_utf8_lossy(v).into_owned());
+            }
+        }
+    }
+    out
+}
+
+/// Binds an explicit CRAM decoding reference onto `reader`, gated by a HARD
+/// no-network preflight. When `reference` is `Some(path)`:
+///
+/// 1. `<path>.fai` must exist (see [`fai_contig_names`]).
+/// 2. Every `@SQ SN:` contig in `header` must appear in the `.fai`'s contig
+///    set; if ANY is absent, this errors instead of letting htslib fall back
+///    to its default CRAM reference chain -- which can resolve an `M5`
+///    checksum against the EBI `REF_PATH` network endpoint. THIS coverage
+///    check is the no-network guarantee (the crate is `#![forbid(unsafe_code)]`
+///    and edition 2024, so `std::env::set_var` to neutralize `REF_PATH` is not
+///    available; the guarantee is enforced purely here).
+/// 3. `reader.set_reference(path)` is called (which appends `.fai` and loads
+///    the reference through that index).
+///
+/// A `None` reference is a no-op (BAM/SAM carry their own sequence, and a CRAM
+/// opened without an explicit reference is the pre-existing behavior).
+///
+/// # Errors
+///
+/// Returns an error if the `.fai` is missing/unreadable, if any header `@SQ`
+/// contig is not covered by the reference, or if `set_reference` itself fails.
+fn apply_reference(
+    reader: &mut bam::Reader,
+    header: &bam::HeaderView,
+    reference: Option<&Path>,
+) -> Result<()> {
+    if let Some(path) = reference {
+        let names = fai_contig_names(path)?;
+        for sn in header_sq_names(header) {
+            ensure!(
+                names.contains(&sn),
+                "CRAM reference {} does not cover @SQ contig `{sn}` (no REF_PATH/network fallback \
+                 is used); pass the matching reference genome via -r",
+                path.display()
+            );
+        }
+        reader
+            .set_reference(path)
+            .with_context(|| format!("setting CRAM reference {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Decodes an htslib nt16 code the way `GetReadSeq`'s forward-strand branch
@@ -1294,5 +1447,146 @@ mod tests {
         }
 
         assert_eq!(Alignments::open(&path).unwrap().sort_order(), SortOrder::Unsorted);
+    }
+
+    // -- CRAM explicit-reference wiring --------------------------------
+
+    /// Writes a single-contig FASTA (`>{contig}\n{seq}\n`) plus a hand-built
+    /// `.fai` sibling. The `.fai` columns are NAME, LENGTH, OFFSET (byte
+    /// offset of the first base = `>` + contig + `\n` = `contig.len() + 2`),
+    /// LINEBASES (`seq.len()`, single-line sequence) and LINEWIDTH
+    /// (`seq.len() + 1`, bases plus the trailing newline). Only the NAME
+    /// column is consulted by the preflight, but the offset/linebase columns
+    /// are written correctly so htslib can actually load the reference through
+    /// the index (`set_reference` appends `.fai` and reads THROUGH it; it does
+    /// not build a missing index).
+    fn write_fasta_with_fai(ref_fa: &std::path::Path, contig: &str, seq: &[u8]) {
+        let mut fasta = Vec::new();
+        fasta.push(b'>');
+        fasta.extend_from_slice(contig.as_bytes());
+        fasta.push(b'\n');
+        fasta.extend_from_slice(seq);
+        fasta.push(b'\n');
+        std::fs::write(ref_fa, &fasta).unwrap();
+
+        let offset = contig.len() + 2; // ">" + contig + "\n"
+        let linebases = seq.len();
+        let linewidth = seq.len() + 1; // bases + "\n"
+        let fai_path = std::path::PathBuf::from(format!("{}.fai", ref_fa.display()));
+        let fai_line = format!("{contig}\t{}\t{offset}\t{linebases}\t{linewidth}\n", seq.len());
+        std::fs::write(&fai_path, fai_line).unwrap();
+    }
+
+    /// Builds a CRAM with the given single-contig header and two aligned
+    /// 100bp reads (at reference positions 0 and 100), reference-compressed
+    /// against `ref_fa` (which must already have its `.fai` sibling written).
+    fn write_cram(cram: &std::path::Path, ref_fa: &std::path::Path, contig: &str, ref_seq: &[u8]) {
+        use rust_htslib::bam::header::HeaderRecord;
+        use rust_htslib::bam::record::{Cigar, CigarString};
+        use rust_htslib::bam::{Format, Header, Writer};
+
+        let mut header = Header::new();
+        let mut hd = HeaderRecord::new(b"HD");
+        hd.push_tag(b"VN", "1.6");
+        header.push_record(&hd);
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", contig);
+        sq.push_tag(b"LN", i64::try_from(ref_seq.len()).unwrap());
+        header.push_record(&sq);
+
+        let mut writer = Writer::from_path(cram, &header, Format::Cram).unwrap();
+        writer.set_reference(ref_fa).expect("set CRAM writer reference");
+
+        let qual = vec![30u8; 100];
+        for (i, pos) in [0i64, 100].into_iter().enumerate() {
+            // Read bases equal to the reference slice they align to, so the
+            // CRAM reference-vs-read features are trivial and round-trip.
+            let start = usize::try_from(pos).unwrap();
+            let seq = &ref_seq[start..start + 100];
+            let mut r = bam::Record::new();
+            r.set(
+                format!("read{i}").as_bytes(),
+                Some(&CigarString(vec![Cigar::Match(100)])),
+                seq,
+                &qual,
+            );
+            r.set_tid(0);
+            r.set_pos(pos);
+            r.set_flags(0); // mapped, unpaired
+            writer.write(&r).unwrap();
+        }
+        drop(writer);
+    }
+
+    /// Writes `ref.fa` + `ref.fa.fai` (contig `chr1`, 200bp) and a CRAM of two
+    /// aligned reads against it. The `.fai` is written by hand as
+    /// `chr1\t200\t6\t200\t201` (offset 6 = `>chr1\n`; 200 bases on one line;
+    /// linewidth 201).
+    fn write_ref_fai_and_cram(ref_fa: &std::path::Path, cram: &std::path::Path) {
+        let ref_seq: Vec<u8> = b"ACGT".iter().copied().cycle().take(200).collect();
+        write_fasta_with_fai(ref_fa, "chr1", &ref_seq);
+        write_cram(cram, ref_fa, "chr1", &ref_seq);
+    }
+
+    /// Builds a CRAM whose `@SQ` is `chr1` but returns a DIFFERENT reference
+    /// (contig `chr2`) whose `.fai` does not cover `chr1`, for the no-network
+    /// preflight test. The CRAM itself is built against a correct `chr1`
+    /// reference (so writing succeeds); the returned reference is the
+    /// mismatched one the preflight must reject.
+    fn write_cram_and_mismatched_reference(
+        dir: &std::path::Path,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let build_ref = dir.join("build_ref.fa");
+        let cram = dir.join("x.cram");
+        write_ref_fai_and_cram(&build_ref, &cram);
+
+        // A reference covering only `chr2` -- its `.fai` contig set does not
+        // contain the CRAM's `@SQ SN:chr1`.
+        let mismatch_ref = dir.join("mismatch_ref.fa");
+        let mismatch_seq: Vec<u8> = b"TTTT".iter().copied().cycle().take(200).collect();
+        write_fasta_with_fai(&mismatch_ref, "chr2", &mismatch_seq);
+
+        (mismatch_ref, cram)
+    }
+
+    #[test]
+    fn cram_with_reference_reads_and_survives_rewind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ref_fa = tmp.path().join("ref.fa");
+        let cram = tmp.path().join("x.cram");
+        write_ref_fai_and_cram(&ref_fa, &cram);
+
+        let mut a = Alignments::open_with_reference(&cram, Some(&ref_fa)).expect("open CRAM");
+        let mut n = 0;
+        while a.next().unwrap() {
+            n += 1;
+        }
+        assert_eq!(n, 2);
+
+        a.rewind().expect("rewind");
+        let mut m = 0;
+        while a.next().unwrap() {
+            m += 1;
+        }
+        assert_eq!(m, 2);
+    }
+
+    #[test]
+    fn cram_reference_missing_contig_errors_without_network() {
+        // A ref.fa/.fai whose contig set does NOT cover the CRAM's @SQ must
+        // error at open (preflight), never attempting htslib's M5/REF_PATH
+        // network fallback.
+        let tmp = tempfile::tempdir().unwrap();
+        let (ref_fa, cram) = write_cram_and_mismatched_reference(tmp.path());
+        // `.map(|_| ())` discards the `Ok(Alignments)` (which is not `Debug`)
+        // so `unwrap_err` can format the error path on failure.
+        let err = Alignments::open_with_reference(&cram, Some(&ref_fa))
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("reference") && (err.contains("contig") || err.contains("@SQ")),
+            "unexpected error message: {err}"
+        );
     }
 }

@@ -15,14 +15,22 @@
 //!    against the paired/single-end/interleaved [`ReadSource`] the router
 //!    already resolved.
 //! 3. BAM mode ([`run_bam_mode`]) dispatches on `--bam-mode`:
-//!    - `alignment` ([`run_bam_alignment`] → [`run_coordinate_alignment`]):
-//!      Stage 2a implements only coordinate-sorted input; grouped/name-sorted,
-//!      unsorted, and stdin all error as reserved for Stage 2c. Parses `-f`
-//!      as a `_coord.fa` (via [`unum_core::bam_extract::parse_coord_fa`]),
-//!      builds the [`RefKmerFilter`] from its sequences and the sorted
-//!      gene-interval list (via [`unum_core::bam_extract::build_genes`]), and
-//!      calls [`unum_core::bam_extract::extract_from_bam_with_threads`] with
-//!      `-t`.
+//!    - `alignment` ([`run_bam_alignment`]) routes by `@HD` sort order,
+//!      mirroring `no-alignment`'s dispatch: a coordinate-sorted FILE takes
+//!      the seekable 2-pass ([`run_coordinate_alignment`] →
+//!      [`unum_core::bam_extract::extract_from_bam_with_threads`]); a
+//!      grouped/name-sorted input, FILE **or STDIN**, takes the
+//!      stdin-capable one-pass interval matcher
+//!      ([`run_grouped_alignment`] →
+//!      [`unum_core::bam_extract::extract_from_bam_alignment_grouped`]). An
+//!      unsorted/coordinate BAM from stdin is still rejected (that path
+//!      needs a seekable 2-pass; a pipe cannot seek), and an unsorted FILE is
+//!      rejected outright (`alignment` has no order-independent fallback,
+//!      unlike `no-alignment`). Both alignment routes parse `-c` as a
+//!      `_coord.fa` (via [`unum_core::bam_extract::parse_coord_fa`]) and
+//!      build the [`RefKmerFilter`] from its sequences and the sorted
+//!      gene-interval list (via [`unum_core::bam_extract::build_genes`]).
+//!      `-f` is unused (and rejected) in this mode.
 //!    - `no-alignment` ([`run_bam_no_alignment`]): routes by `@HD` sort
 //!      order instead of requiring coordinate-sort -- a coordinate/unsorted
 //!      FILE takes the seekable 2-pass name-map
@@ -32,7 +40,7 @@
 //!      ([`unum_core::bam_extract::extract_from_bam_no_alignment_grouped`]).
 //!      The [`RefKmerFilter`] is built directly from `-f`, same as the FASTQ
 //!      path (no coord-FASTA/gene-interval step -- no-alignment has no
-//!      aligned intervals).
+//!      aligned intervals). `-c` is unused (and rejected) in this mode.
 //!
 //! `-t` controls how many worker threads parallelize the per-read candidate
 //! DECISION in both modes; output is byte-identical at any `-t` -- see
@@ -90,17 +98,16 @@ pub fn run(args: &ExtractArgs) -> Result<()> {
     }
 }
 
-/// The reserved-for-a-later-release error for CRAM input. CRAM needs the
-/// reference wiring (`-r`) that Stage 2c introduces; until then a detected
-/// CRAM is rejected at routing time (in both the `-b` and `-i` arms) with
-/// this message so a `BamInputSpec` only ever denotes a real BAM.
-const CRAM_RESERVED_MSG: &str = "CRAM input requires reference wiring (-r) that is not yet available (later release); \
-     convert to BAM (samtools view -b) or use a BAM input";
-
-/// Where a BAM input comes from, once routing has decided it IS a BAM
-/// (CRAM is rejected earlier, at routing time -- see [`CRAM_RESERVED_MSG`]).
+/// Where a BAM/CRAM input comes from, once routing has decided it IS one of
+/// the two (never FASTQ/FASTA -- that's rejected earlier, at routing time).
+/// `is_cram` carries the content-sniffed format forward so the runners know
+/// whether to require `-r` and thread it into [`Alignments::open_with_reference`]
+/// (see [`require_reference_for_cram`]); a path can be either container, but
+/// `Stdin` can't be sniffed (a pipe can't be re-read), so it's treated as
+/// BAM-or-CRAM and always passed `-r` if given -- see [`run_bam_no_alignment`]'s
+/// `Stdin` arm and [`run_bam_alignment`]'s stdin rejection.
 enum BamInputSpec {
-    Path(String),
+    Path { path: String, is_cram: bool },
     Stdin,
 }
 
@@ -111,29 +118,30 @@ enum ResolvedExtractInput {
     Bam { spec: BamInputSpec, mode: BamMode },
 }
 
-/// Routes `-i`/`-b`/legacy flags to FASTQ or BAM, enforcing the
-/// `--bam-mode`-required-for-BAM and `--bam-mode`-forbidden-for-FASTQ rules.
-/// CRAM is content-sniffed and rejected as reserved for a later release (it
-/// needs the `-r` reference wiring Stage 2c adds) in both the `-b` and `-i`
-/// arms, so a resolved BAM is always a real BAM.
+/// Routes `-i`/`-b`/legacy flags to FASTQ or BAM/CRAM, enforcing the
+/// `--bam-mode`-required-for-BAM/CRAM and `--bam-mode`-forbidden-for-FASTQ
+/// rules. CRAM is content-sniffed in both the `-b` and `-i` arms and routed
+/// through the SAME BAM paths (it's just a codec) with `is_cram = true`
+/// carried on [`BamInputSpec::Path`]; the runners require `-r` for it (see
+/// [`require_reference_for_cram`]) before opening.
 ///
-/// - `-b <path>` → BAM (requires `--bam-mode`); content-sniffed to reject
-///   CRAM (reserved) and a mistaken FASTQ/FASTA `-b`. `-b -` (stdin) is
-///   special-cased to `BamInputSpec::Stdin` without sniffing (a pipe can't be
-///   opened as a file), reaching the same curated stdin-reserved error as
-///   `-i - --bam-mode`.
+/// - `-b <path>` → BAM/CRAM (requires `--bam-mode`); content-sniffed to
+///   route CRAM as `is_cram = true` and reject a mistaken FASTQ/FASTA `-b`.
+///   `-b -` (stdin) is special-cased to `BamInputSpec::Stdin` without
+///   sniffing (a pipe can't be opened as a file), reaching the same curated
+///   stdin-reserved error as `-i - --bam-mode`.
 /// - `-i` with 2 paths → paired FASTQ (rejects `--bam-mode`).
 /// - `-i` with 1 path: `-` (stdin) routes by `--bam-mode` presence
-///   (present → BAM stdin; absent → FASTQ stdin); a file is content-sniffed
-///   via [`open_input`] (BAM → BAM, requires `--bam-mode`; CRAM → reserved
-///   error; FASTQ/FASTA → FASTQ, rejects `--bam-mode`).
+///   (present → BAM/CRAM stdin; absent → FASTQ stdin); a file is
+///   content-sniffed via [`open_input`] (BAM/CRAM → `BamInputSpec::Path`
+///   with the sniffed `is_cram`, requires `--bam-mode`; FASTQ/FASTA →
+///   FASTQ, rejects `--bam-mode`).
 /// - legacy `-1`/`-2`/`-u` → FASTQ (rejects `--bam-mode`).
 ///
 /// # Errors
 ///
 /// Returns an error on a `--bam-mode`/input mismatch, a missing `--bam-mode`
-/// for BAM, a detected CRAM (reserved), or any underlying open/detection
-/// failure.
+/// for BAM/CRAM, or any underlying open/detection failure.
 fn resolve_extract_input(args: &ExtractArgs) -> Result<ResolvedExtractInput> {
     // -b takes the BAM path directly.
     if let Some(bam_path) = args.bam.as_deref() {
@@ -154,20 +162,22 @@ fn resolve_extract_input(args: &ExtractArgs) -> Result<ResolvedExtractInput> {
         if bam_path == "-" {
             return Ok(ResolvedExtractInput::Bam { spec: BamInputSpec::Stdin, mode });
         }
-        // Content-sniff (cheap magic-byte peek) to reject CRAM (reserved) and
-        // a mistaken FASTQ/FASTA `-b` before `Alignments::open` is reached; a
-        // `BamInputSpec::Path` must only ever denote a real BAM.
+        // Content-sniff (cheap magic-byte peek) to distinguish BAM from CRAM
+        // and reject a mistaken FASTQ/FASTA `-b` before `Alignments::open` is
+        // reached; both BAM and CRAM route to `BamInputSpec::Path`, carrying
+        // the sniffed format via `is_cram`.
         let (opened, _fmt) = open_input(&InputSpec::Path(std::path::PathBuf::from(bam_path)))
             .with_context(|| format!("opening input {bam_path}"))?;
-        match opened {
-            OpenedInput::Bam => {}
-            OpenedInput::Cram => bail!("{CRAM_RESERVED_MSG}"),
+        let is_cram = match opened {
+            // SAM is read by htslib exactly like BAM (no reference needed).
+            OpenedInput::Sam | OpenedInput::Bam => false,
+            OpenedInput::Cram => true,
             OpenedInput::Fastq(_) => {
-                bail!("-b expects a BAM/CRAM file, but {bam_path} is FASTQ/FASTA input")
+                bail!("-b expects a SAM/BAM/CRAM file, but {bam_path} is FASTQ/FASTA input")
             }
-        }
+        };
         return Ok(ResolvedExtractInput::Bam {
-            spec: BamInputSpec::Path(bam_path.to_string()),
+            spec: BamInputSpec::Path { path: bam_path.to_string(), is_cram },
             mode,
         });
     }
@@ -228,11 +238,21 @@ fn resolve_i_input(args: &ExtractArgs) -> Result<ResolvedExtractInput> {
                     );
                     Ok(ResolvedExtractInput::Fastq(classify_single_input(reader)?))
                 }
-                OpenedInput::Bam => {
+                // SAM is read by htslib exactly like BAM (no reference needed).
+                OpenedInput::Sam | OpenedInput::Bam => {
                     let mode = require_bam_mode(args)?;
-                    Ok(ResolvedExtractInput::Bam { spec: BamInputSpec::Path(a.clone()), mode })
+                    Ok(ResolvedExtractInput::Bam {
+                        spec: BamInputSpec::Path { path: a.clone(), is_cram: false },
+                        mode,
+                    })
                 }
-                OpenedInput::Cram => bail!("{CRAM_RESERVED_MSG}"),
+                OpenedInput::Cram => {
+                    let mode = require_bam_mode(args)?;
+                    Ok(ResolvedExtractInput::Bam {
+                        spec: BamInputSpec::Path { path: a.clone(), is_cram: true },
+                        mode,
+                    })
+                }
             }
         }
         _ => bail!("-i/--input takes 1 or 2 paths, got {}", args.input.len()),
@@ -245,6 +265,70 @@ fn require_bam_mode(args: &ExtractArgs) -> Result<BamMode> {
         "BAM/CRAM input requires --bam-mode {alignment|no-alignment}; \
          e.g. --bam-mode alignment (coordinate-sorted bam-extractor parity)",
     )
+}
+
+/// Resolves the CRAM decoding reference to pass into
+/// [`Alignments::open_with_reference`]/[`Alignments::from_stdin_with_reference`]:
+/// `Some(-r)` when `is_cram` is true (erroring if `-r` was not given), else
+/// `None` unconditionally -- a BAM (`is_cram = false`) never gets a
+/// reference threaded through, even if `-r` was (harmlessly, for a real BAM
+/// header) also passed, so the BAM path stays behaviorally identical to the
+/// pre-CRAM `Alignments::open`.
+///
+/// # Errors
+///
+/// Returns an error if `is_cram` is true and `-r` was not given, naming both
+/// CRAM and `-r` plus the `.fai` sibling it requires.
+fn require_reference_for_cram(args: &ExtractArgs, is_cram: bool) -> Result<Option<&str>> {
+    if is_cram {
+        Ok(Some(args.reference.as_deref().context(
+            "CRAM input requires -r <reference genome FASTA> (with a .fai sibling); the \
+             reference is used exclusively -- no REF_PATH/REF_CACHE/network fallback",
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Extracts the required `-f` reference-sequence FASTA path, erroring if
+/// absent. Used by FASTQ mode and `--bam-mode no-alignment`, both of which
+/// build their [`RefKmerFilter`] directly from `-f` (see this module's docs).
+fn require_seq_fasta(args: &ExtractArgs) -> Result<&str> {
+    args.ref_seq_fasta.as_deref().context(
+        "this input requires -f <reference-sequence FASTA> (FASTQ / --bam-mode no-alignment)",
+    )
+}
+
+/// Extracts the required `-c` gene-coordinate FASTA path, erroring if absent.
+/// Used by `--bam-mode alignment`, which parses `-c` for both the gene
+/// intervals ([`bam_extract::parse_coord_fa`]) and the k-mer seed reference
+/// ([`RefKmerFilter::from_reference_fasta`]).
+fn require_coord_fasta(args: &ExtractArgs) -> Result<&str> {
+    args.ref_coord_fasta
+        .as_deref()
+        .context("--bam-mode alignment requires -c <gene coordinate FASTA (*_coord.fa)>")
+}
+
+/// Rejects `-c` outside `--bam-mode alignment`: FASTQ and `--bam-mode
+/// no-alignment` have no aligned intervals to build gene records from, so a
+/// coordinate FASTA passed there is a mistake, not a no-op.
+fn require_no_coord_fasta(args: &ExtractArgs) -> Result<()> {
+    ensure!(
+        args.ref_coord_fasta.is_none(),
+        "-c (coord FASTA) applies only to --bam-mode alignment, not FASTQ / no-alignment input"
+    );
+    Ok(())
+}
+
+/// Rejects `-f` under `--bam-mode alignment`: that mode reads its sequences
+/// from `-c` instead (see this module's docs), so a `-f` passed there is a
+/// mistake, not a no-op.
+fn require_no_seq_fasta_in_alignment(args: &ExtractArgs) -> Result<()> {
+    ensure!(
+        args.ref_seq_fasta.is_none(),
+        "-f (reference-sequence FASTA) is unused by extract --bam-mode alignment; pass the coordinate FASTA via -c"
+    );
+    Ok(())
 }
 
 /// Opens one FASTQ/FASTA input (path or `-` for stdin) with content-based
@@ -308,9 +392,10 @@ fn resolve_legacy_fastq_source(args: &ExtractArgs) -> Result<ReadSource> {
 /// read-1 file or mismatched mate-pair counts -- see that function's doc
 /// comment).
 fn run_fastq_with_source(args: &ExtractArgs, mut source: ReadSource) -> Result<()> {
-    let mut filter =
-        RefKmerFilter::from_reference_fasta(Path::new(&args.ref_seq_fasta), INITIAL_KMER_LENGTH)
-            .with_context(|| format!("loading reference FASTA {}", args.ref_seq_fasta))?;
+    require_no_coord_fasta(args)?;
+    let seq = require_seq_fasta(args)?;
+    let mut filter = RefKmerFilter::from_reference_fasta(Path::new(seq), INITIAL_KMER_LENGTH)
+        .with_context(|| format!("loading reference FASTA {seq}"))?;
 
     let paired = matches!(source, ReadSource::Paired(_, _) | ReadSource::Interleaved(_));
 
@@ -340,8 +425,8 @@ fn run_fastq_with_source(args: &ExtractArgs, mut source: ReadSource) -> Result<(
     Ok(())
 }
 
-/// Dispatches BAM extraction on the resolved `mode` (CRAM is already
-/// rejected at routing time, so `spec` only ever denotes a BAM).
+/// Dispatches BAM/CRAM extraction on the resolved `mode` (`spec` may denote
+/// either container -- see [`BamInputSpec`]).
 ///
 /// # Errors
 ///
@@ -354,46 +439,138 @@ fn run_bam_mode(args: &ExtractArgs, spec: &BamInputSpec, mode: BamMode) -> Resul
     }
 }
 
-/// Executes `--bam-mode alignment` extraction. Stage 2a implements only
-/// coordinate-sorted input; grouped/name-sorted, unsorted, and stdin are all
-/// a loud reserved-for-a-later-release error (Stage 2c adds the one-pass
-/// interval matcher these need).
+/// Executes `--bam-mode alignment` extraction: routes by `@HD` sort order,
+/// mirroring [`run_bam_no_alignment`]'s dispatch (NOT by requiring
+/// coordinate-sort unconditionally, like the pre-Stage-2c behavior). A
+/// coordinate-sorted FILE takes the seekable 2-pass
+/// ([`run_coordinate_alignment`]); a grouped/name-sorted input -- FILE **or
+/// STDIN** -- takes the stdin-capable one-pass interval matcher
+/// ([`run_grouped_alignment`]). Unlike `no-alignment`, an unsorted BAM has no
+/// order-independent fallback for `alignment` (the coordinate 2-pass and the
+/// grouped one-pass both rely on sort order to reunite mates efficiently), so
+/// it is rejected outright for both FILE and STDIN input; a coordinate/
+/// unsorted BAM from stdin is also rejected (the coordinate path needs a
+/// seekable 2-pass, which a pipe cannot supply).
 ///
 /// # Errors
 ///
-/// Returns an error for grouped/name-sorted or unsorted input, or stdin
-/// (all reserved for Stage 2c), or any extraction failure.
+/// Returns an error for unsorted input (FILE or STDIN), for coordinate input
+/// from stdin, or any extraction failure.
 fn run_bam_alignment(args: &ExtractArgs, spec: &BamInputSpec) -> Result<()> {
-    // Stage 2a alignment == the existing coordinate 2-pass, which needs a
-    // seekable file. stdin is reserved here (CRAM was already rejected at
-    // routing time, so `spec` is always a BAM).
-    let bam_path = match spec {
-        BamInputSpec::Path(p) => p.as_str(),
-        BamInputSpec::Stdin => bail!(
-            "coordinate-sorted BAM extraction needs a seekable file; a BAM from stdin \
-             requires the grouped/name-sorted one-pass (available in a later release) -- \
-             redirect to a file, or pass a grouped BAM once supported"
-        ),
-    };
+    match spec {
+        BamInputSpec::Stdin => {
+            // Use from_stdin_with_reference() (NOT open("-")) -- see
+            // run_bam_no_alignment's Stdin arm doc comment for why (no-network
+            // CRAM guarantee, `Alignments::from_stdin`'s FileNotFound
+            // footgun).
+            //
+            // Unlike the file-backed arm (which passes the reference only for a
+            // content-sniffed CRAM via `require_reference_for_cram`), `-r` is
+            // threaded through UNCONDITIONALLY here: a piped stream cannot be
+            // format-sniffed before decode, so a supplied `-r` also runs the
+            // `@SQ` coverage preflight for a stdin BAM/SAM. This divergence is
+            // documented on the `-r` flag -- on stdin, pass `-r` only for CRAM.
+            let mut alignments = Alignments::from_stdin_with_reference(args.reference.as_deref())
+                .context("opening BAM/CRAM stream from stdin")?;
+            // Guard on the header BEFORE the one-pass, same rationale as
+            // `ensure_stdin_no_alignment_sort_order` (unit-testable without a
+            // real stdin stream).
+            ensure_stdin_alignment_sort_order(alignments.sort_order())?;
+            run_grouped_alignment(args, &mut alignments, false)
+        }
+        BamInputSpec::Path { path, is_cram } => {
+            let mut alignments =
+                Alignments::open_with_reference(path, require_reference_for_cram(args, *is_cram)?)
+                    .with_context(|| format!("opening BAM/CRAM {path}"))?;
+            match alignments.sort_order() {
+                SortOrder::Coordinate => run_coordinate_alignment(args, alignments),
+                SortOrder::QueryName | SortOrder::QueryGrouped => {
+                    run_grouped_alignment(args, &mut alignments, true)
+                }
+                SortOrder::Unsorted => bail!(
+                    "--bam-mode alignment requires a coordinate-sorted BAM (@HD SO:coordinate); \
+                     this input is unsorted/unstated -- run `samtools sort`"
+                ),
+            }
+        }
+    }
+}
 
-    let alignments =
-        Alignments::open(bam_path).with_context(|| format!("opening BAM/CRAM {bam_path}"))?;
-
-    // Sort-order guard: alignment (coordinate 2-pass) requires SO:coordinate.
-    match alignments.sort_order() {
-        SortOrder::Coordinate => {}
-        SortOrder::QueryName | SortOrder::QueryGrouped => bail!(
-            "--bam-mode alignment on a grouped/name-sorted BAM uses a one-pass interval \
-             matcher that is not yet available (later release); coordinate-sort the BAM \
-             (samtools sort) to use the current alignment path"
-        ),
-        SortOrder::Unsorted => bail!(
-            "--bam-mode alignment requires a coordinate-sorted BAM (@HD SO:coordinate); \
-             this input is unsorted/unstated -- run `samtools sort`"
+/// Guards a stdin-sourced BAM's `sort_order` for `--bam-mode alignment`: only
+/// grouped/name-sorted input can be matched in one streaming pass
+/// ([`run_grouped_alignment`]); coordinate/unsorted still needs the seekable
+/// 2-pass name-map ([`run_coordinate_alignment`]), which a pipe cannot
+/// supply (no `rewind`). Mirrors [`ensure_stdin_no_alignment_sort_order`]
+/// (same rejected variants, same reasoning), extracted out of
+/// [`run_bam_alignment`]'s `Stdin` arm purely so this routing decision is
+/// unit-testable on a plain [`SortOrder`] value, without needing a real
+/// stdin stream.
+///
+/// # Errors
+///
+/// Returns an error for `SortOrder::Coordinate`/`SortOrder::Unsorted`.
+fn ensure_stdin_alignment_sort_order(sort_order: SortOrder) -> Result<()> {
+    match sort_order {
+        SortOrder::QueryName | SortOrder::QueryGrouped => Ok(()),
+        SortOrder::Coordinate | SortOrder::Unsorted => bail!(
+            "--bam-mode alignment on a coordinate/unsorted BAM/CRAM from stdin needs a seekable \
+             file for the 2-pass; redirect to a file, or pipe a grouped/name-sorted BAM (@HD \
+             SO:queryname or GO:query)"
         ),
     }
+}
 
-    run_coordinate_alignment(args, alignments)
+/// Runs the grouped/name-sorted one-pass `alignment` extraction (stdin-
+/// capable) -- [`bam_extract::extract_from_bam_alignment_grouped`], the
+/// `alignment`-mode twin of [`run_no_alignment_grouped`]. Parses `-c` for
+/// both the gene intervals and the k-mer seed reference, exactly like
+/// [`run_coordinate_alignment`] (this is still `alignment` mode -- `-f`
+/// remains rejected). `single_end` -- hence the output filename(s) -- is not
+/// knowable up front on the `!seekable` (stdin) path, so [`FastqFileSink`]
+/// is created via a factory closure the extractor calls itself the moment
+/// `single_end` is known, same as [`run_no_alignment_grouped`]'s factory.
+///
+/// # Errors
+///
+/// Returns an error if `-f` was given (rejected), `-c` is missing or cannot
+/// be opened/parsed, the coord FASTA's chroms cannot be resolved against the
+/// BAM header, the output FASTQ file(s) cannot be created, or the underlying
+/// extraction fails.
+fn run_grouped_alignment(
+    args: &ExtractArgs,
+    alignments: &mut Alignments,
+    seekable: bool,
+) -> Result<()> {
+    require_no_seq_fasta_in_alignment(args)?;
+    let coord = require_coord_fasta(args)?;
+
+    let coord_records = bam_extract::parse_coord_fa(Path::new(coord))
+        .with_context(|| format!("parsing coord FASTA {coord}"))?;
+    let mut filter = RefKmerFilter::from_reference_fasta(Path::new(coord), INITIAL_KMER_LENGTH)
+        .with_context(|| format!("loading coord FASTA sequences {coord}"))?;
+    let genes = bam_extract::build_genes(alignments, &coord_records)
+        .context("resolving coord FASTA chroms to BAM header chrIds")?;
+
+    let threads = resolve_threads(args.threads);
+    let (metrics, single_end, mut sink) = bam_extract::extract_from_bam_alignment_grouped(
+        alignments,
+        &mut filter,
+        &genes,
+        args.abnormal_unmapped,
+        args.mate_id_suffix_len,
+        threads,
+        seekable,
+        |single_end| {
+            FastqFileSink::create(&args.prefix, !single_end).with_context(|| {
+                format!("creating output FASTQ file(s) for prefix {}", args.prefix)
+            })
+        },
+    )
+    .context("extracting candidate reads from BAM (grouped alignment)")?;
+    sink.flush()?;
+
+    report_alignment_metrics(single_end, &metrics);
+    Ok(())
 }
 
 /// Executes `--bam-mode no-alignment` extraction: routes by `@HD` sort
@@ -420,18 +597,36 @@ fn run_bam_alignment(args: &ExtractArgs, spec: &BamInputSpec) -> Result<()> {
 /// extraction ([`bam_extract::extract_from_bam_no_alignment`]/
 /// [`bam_extract::extract_from_bam_no_alignment_grouped`]) itself fails.
 fn run_bam_no_alignment(args: &ExtractArgs, spec: &BamInputSpec) -> Result<()> {
-    let mut filter =
-        RefKmerFilter::from_reference_fasta(Path::new(&args.ref_seq_fasta), INITIAL_KMER_LENGTH)
-            .with_context(|| format!("loading reference FASTA {}", args.ref_seq_fasta))?;
+    require_no_coord_fasta(args)?;
+    let seq = require_seq_fasta(args)?;
+    let mut filter = RefKmerFilter::from_reference_fasta(Path::new(seq), INITIAL_KMER_LENGTH)
+        .with_context(|| format!("loading reference FASTA {seq}"))?;
     let similarity = args.similarity;
     let threads = resolve_threads(args.threads);
 
     match spec {
         BamInputSpec::Stdin => {
-            // Use from_stdin() (NOT open("-")), which fails FileNotFound --
-            // see Alignments::from_stdin's doc comment).
-            let mut alignments =
-                Alignments::from_stdin().context("opening BAM/CRAM stream from stdin")?;
+            // Use from_stdin_with_reference() (NOT open("-")), which fails
+            // FileNotFound -- see Alignments::from_stdin's doc comment. Stdin
+            // can't be content-sniffed (a pipe can't be re-read), so it's
+            // treated as BAM-or-CRAM and `-r` (if given) is always threaded
+            // through. Unlike the path arm below, there is no `@SQ`-vs-`.fai`
+            // preflight to catch a `-r`-less CRAM here (that check only runs
+            // when a reference IS supplied). No-network is instead guaranteed
+            // process-wide: `main` sets `REF_PATH` to a fresh, empty, private
+            // (`0700`) per-process directory before this ever runs, so
+            // htslib's default (network-capable) CRAM reference chain is
+            // neutralized regardless of format. A `-r`-less stdin CRAM
+            // therefore fails LOCALLY (no reference resolves against the
+            // empty private directory) rather than reaching the network --
+            // see `main::neutralize_cram_ref_path_network_fallback`.
+            //
+            // Same `-r` caveat as run_bam_alignment's Stdin arm: threaded
+            // unconditionally (a piped stream can't be format-sniffed), so a
+            // stdin BAM/SAM with `-r` also hits the `@SQ` coverage preflight.
+            // Documented on the `-r` flag -- on stdin, pass `-r` only for CRAM.
+            let mut alignments = Alignments::from_stdin_with_reference(args.reference.as_deref())
+                .context("opening BAM/CRAM stream from stdin")?;
             // Guard on the header BEFORE the one-pass: Coordinate/Unsorted
             // from a pipe cannot be reunited in one pass (no seek for a
             // 2-pass name-map). Extracted into its own function so the
@@ -440,9 +635,10 @@ fn run_bam_no_alignment(args: &ExtractArgs, spec: &BamInputSpec) -> Result<()> {
             ensure_stdin_no_alignment_sort_order(alignments.sort_order())?;
             run_no_alignment_grouped(args, &mut alignments, &mut filter, similarity, threads)
         }
-        BamInputSpec::Path(p) => {
+        BamInputSpec::Path { path, is_cram } => {
             let mut alignments =
-                Alignments::open(p).with_context(|| format!("opening BAM/CRAM {p}"))?;
+                Alignments::open_with_reference(path, require_reference_for_cram(args, *is_cram)?)
+                    .with_context(|| format!("opening BAM/CRAM {path}"))?;
             match alignments.sort_order() {
                 SortOrder::QueryName | SortOrder::QueryGrouped => run_no_alignment_grouped(
                     args,
@@ -596,7 +792,7 @@ fn report_no_alignment_metrics(single_end: bool, metrics: &bam_extract::BamExtra
 
 /// The coordinate-sorted `alignment` extraction -- the former `run_bam` body,
 /// now reached only after the mode/sort/stdin/CRAM guards pass. Byte-identical
-/// to Stage 1's `-b` output: parses `-f` as a `_coord.fa`, builds the
+/// to Stage 1's `-b` output: parses `-c` as a `_coord.fa`, builds the
 /// [`RefKmerFilter`] and sorted gene-interval list, and calls
 /// [`unum_core::bam_extract::extract_from_bam`]. Output file naming
 /// (single-end vs. paired) is decided by the BAM's own sampled
@@ -612,12 +808,14 @@ fn report_no_alignment_metrics(single_end: bool, metrics: &bam_extract::BamExtra
 /// [`unum_core::bam_extract::extract_from_bam`] itself fails (e.g. an
 /// unaligned-template mate-pairing error -- see that function's doc comment).
 fn run_coordinate_alignment(args: &ExtractArgs, mut alignments: Alignments) -> Result<()> {
-    let coord_records = bam_extract::parse_coord_fa(Path::new(&args.ref_seq_fasta))
-        .with_context(|| format!("parsing coord FASTA {}", args.ref_seq_fasta))?;
+    require_no_seq_fasta_in_alignment(args)?;
+    let coord = require_coord_fasta(args)?;
 
-    let mut filter =
-        RefKmerFilter::from_reference_fasta(Path::new(&args.ref_seq_fasta), INITIAL_KMER_LENGTH)
-            .with_context(|| format!("loading coord FASTA sequences {}", args.ref_seq_fasta))?;
+    let coord_records = bam_extract::parse_coord_fa(Path::new(coord))
+        .with_context(|| format!("parsing coord FASTA {coord}"))?;
+
+    let mut filter = RefKmerFilter::from_reference_fasta(Path::new(coord), INITIAL_KMER_LENGTH)
+        .with_context(|| format!("loading coord FASTA sequences {coord}"))?;
 
     let genes = bam_extract::build_genes(&alignments, &coord_records)
         .context("resolving coord FASTA chroms to BAM header chrIds")?;
@@ -652,7 +850,16 @@ fn run_coordinate_alignment(args: &ExtractArgs, mut alignments: Alignments) -> R
     .context("extracting candidate reads from BAM")?;
     sink.flush()?;
 
-    if metrics.single_end {
+    report_alignment_metrics(metrics.single_end, &metrics);
+    Ok(())
+}
+
+/// Shared metrics `eprintln`, mirroring [`report_no_alignment_metrics`]'s
+/// style (kept un-prefixed -- "no-alignment" -- since this is the
+/// `alignment`-mode wording) -- used by both [`run_coordinate_alignment`]
+/// and [`run_grouped_alignment`].
+fn report_alignment_metrics(single_end: bool, metrics: &bam_extract::BamExtractMetrics) {
+    if single_end {
         eprintln!(
             "extracted {} candidate reads (single-end, kmer_length={}, hit_len_required={})",
             metrics.pass1_emitted, metrics.kmer_length, metrics.hit_len_required,
@@ -669,8 +876,6 @@ fn run_coordinate_alignment(args: &ExtractArgs, mut alignments: Alignments) -> R
             metrics.candidates_recorded,
         );
     }
-
-    Ok(())
 }
 
 /// Writes candidate pairs/reads to FASTQ file(s), ported from
@@ -781,7 +986,9 @@ mod tests {
     /// override just the fields they need.
     fn args() -> ExtractArgs {
         ExtractArgs {
-            ref_seq_fasta: "ref.fa".into(),
+            ref_seq_fasta: Some("ref.fa".into()),
+            ref_coord_fasta: None,
+            reference: None,
             mate1: None,
             mate2: None,
             single: None,
@@ -796,6 +1003,21 @@ mod tests {
         }
     }
 
+    /// [`args`] baseline, unchanged -- for tests that want an explicit
+    /// FASTQ-mode name (mirrors [`extract_args_bam`]'s BAM-mode counterpart).
+    fn extract_args_fastq() -> ExtractArgs {
+        args()
+    }
+
+    /// [`args`] baseline with `-b`/`--bam-mode` set, for tests that want a
+    /// BAM-mode `ExtractArgs` without repeating those two field assignments.
+    fn extract_args_bam(bam_path: &str, mode: BamMode) -> ExtractArgs {
+        let mut a = args();
+        a.bam = Some(bam_path.into());
+        a.bam_mode = Some(mode);
+        a
+    }
+
     /// `resolve_extract_input`'s `Ok` variant contains a [`ReadSource`], which
     /// (via its `FastqReader`/`Box<dyn BufRead>`) does not implement `Debug`,
     /// so `Result::unwrap_err` can't be used directly. This extracts just
@@ -805,6 +1027,26 @@ mod tests {
             Ok(_) => panic!("expected resolve_extract_input to fail"),
             Err(e) => e.to_string(),
         }
+    }
+
+    #[test]
+    fn alignment_requires_c_and_rejects_f() {
+        let mut a = extract_args_bam("x.bam", BamMode::Alignment);
+        a.ref_coord_fasta = None;
+        assert!(require_coord_fasta(&a).unwrap_err().to_string().contains("-c"));
+        a.ref_coord_fasta = Some("coord.fa".into());
+        a.ref_seq_fasta = Some("seq.fa".into());
+        assert!(require_no_seq_fasta_in_alignment(&a).unwrap_err().to_string().contains("-f"));
+    }
+
+    #[test]
+    fn fastq_requires_f_and_rejects_c() {
+        let mut a = extract_args_fastq();
+        a.ref_seq_fasta = None;
+        assert!(require_seq_fasta(&a).is_err());
+        a.ref_seq_fasta = Some("seq.fa".into());
+        a.ref_coord_fasta = Some("coord.fa".into());
+        assert!(require_no_coord_fasta(&a).unwrap_err().to_string().contains("-c"));
     }
 
     #[test]
@@ -857,16 +1099,32 @@ mod tests {
     }
 
     #[test]
-    fn alignment_from_stdin_is_reserved() {
-        // Unchanged Stage 2a behavior: `alignment` needs a seekable file
-        // (the coordinate 2-pass), so BAM-from-stdin is still reserved for
-        // Stage 2c regardless of the no-alignment routing this task adds.
-        // `run_bam_alignment`'s `Stdin` arm `bail!`s before touching any
-        // real I/O, so this is a real unit test (no stdin stream needed).
-        let err = run_bam_alignment(&args(), &BamInputSpec::Stdin).unwrap_err().to_string();
+    fn alignment_stdin_sort_order_guard_allows_grouped_rejects_coordinate() {
+        // `run_bam_alignment`'s `Stdin` arm must call `Alignments::from_stdin()`
+        // (which needs a real stdin stream) just to read the header's sort
+        // order -- so this exercises the extracted
+        // `ensure_stdin_alignment_sort_order` guard directly on a plain
+        // `SortOrder` value instead, proving the routing decision itself
+        // (grouped/name-sorted allowed, coordinate/unsorted rejected)
+        // without needing a real pipe. Mirrors
+        // `no_alignment_stdin_sort_order_guard_allows_grouped_rejects_coordinate`.
+        ensure_stdin_alignment_sort_order(SortOrder::QueryName)
+            .expect("name-sorted BAM from stdin must be allowed (grouped one-pass)");
+        ensure_stdin_alignment_sort_order(SortOrder::QueryGrouped)
+            .expect("grouped BAM from stdin must be allowed (grouped one-pass)");
+
+        let coord_err =
+            ensure_stdin_alignment_sort_order(SortOrder::Coordinate).unwrap_err().to_string();
         assert!(
-            err.contains("stdin") || err.contains("seekable"),
-            "BAM from stdin must be reserved with a file-redirect hint: {err}"
+            coord_err.contains("seekable") || coord_err.contains("stdin"),
+            "coordinate BAM from stdin must be rejected with a file-redirect hint: {coord_err}"
+        );
+
+        let unsorted_err =
+            ensure_stdin_alignment_sort_order(SortOrder::Unsorted).unwrap_err().to_string();
+        assert!(
+            unsorted_err.contains("seekable") || unsorted_err.contains("stdin"),
+            "unsorted BAM from stdin must be rejected with a file-redirect hint: {unsorted_err}"
         );
     }
 
@@ -958,10 +1216,10 @@ mod tests {
         let ref_fasta = write_minimal_ref_fasta(tmp.path());
 
         let mut a = args();
-        a.ref_seq_fasta = ref_fasta;
+        a.ref_seq_fasta = Some(ref_fasta);
         a.prefix = tmp.path().join("out").to_str().unwrap().to_string();
 
-        let spec = BamInputSpec::Path(bam_path);
+        let spec = BamInputSpec::Path { path: bam_path, is_cram: false };
         let result = run_bam_mode(&a, &spec, BamMode::NoAlignment);
         assert!(
             result.is_ok(),
@@ -981,10 +1239,10 @@ mod tests {
         let ref_fasta = write_minimal_ref_fasta(tmp.path());
 
         let mut a = args();
-        a.ref_seq_fasta = ref_fasta;
+        a.ref_seq_fasta = Some(ref_fasta);
         a.prefix = tmp.path().join("out").to_str().unwrap().to_string();
 
-        let spec = BamInputSpec::Path(bam_path);
+        let spec = BamInputSpec::Path { path: bam_path, is_cram: false };
         let result = run_bam_mode(&a, &spec, BamMode::NoAlignment);
         assert!(
             result.is_ok(),
@@ -1000,10 +1258,10 @@ mod tests {
         let ref_fasta = write_minimal_ref_fasta(tmp.path());
 
         let mut a = args();
-        a.ref_seq_fasta = ref_fasta;
+        a.ref_seq_fasta = Some(ref_fasta);
         a.prefix = tmp.path().join("out").to_str().unwrap().to_string();
 
-        let spec = BamInputSpec::Path(bam_path);
+        let spec = BamInputSpec::Path { path: bam_path, is_cram: false };
         let result = run_bam_mode(&a, &spec, BamMode::NoAlignment);
         assert!(
             result.is_ok(),
@@ -1023,30 +1281,63 @@ mod tests {
     }
 
     #[test]
-    fn i_flag_cram_file_is_reserved() {
+    fn i_flag_cram_file_resolves_to_bam_with_is_cram_true() {
         // `CRAM\x03` + padding (>= 12 bytes so niffler doesn't FileTooShort).
+        // CRAM now routes through the SAME BAM path as a real BAM (it's just
+        // a codec) -- routing itself succeeds; the `-r` requirement is
+        // enforced later, at open time (see `require_reference_for_cram`
+        // and `cram_without_reference_errors_naming_cram_and_r` in
+        // `unum/tests/bam_extract_e2e.rs`).
         let (_dir, path) = write_temp_input(b"CRAM\x03padding-bytes", "x.cram");
         let mut a = args();
-        a.input = vec![path];
+        a.input = vec![path.clone()];
         a.bam_mode = Some(BamMode::Alignment);
-        let err = resolve_extract_input_err_message(&a);
+        let resolved = resolve_extract_input(&a).unwrap();
+        match resolved {
+            ResolvedExtractInput::Bam {
+                spec: BamInputSpec::Path { path: p, is_cram: true },
+                mode: BamMode::Alignment,
+            } => assert_eq!(p, path),
+            _ => panic!("a CRAM-magic -i file must resolve to a BAM path with is_cram = true"),
+        }
+    }
+
+    #[test]
+    fn b_flag_cram_file_resolves_to_bam_with_is_cram_true() {
+        let (_dir, path) = write_temp_input(b"CRAM\x03padding-bytes", "x.cram");
+        let mut a = args();
+        a.bam = Some(path.clone());
+        a.bam_mode = Some(BamMode::Alignment);
+        let resolved = resolve_extract_input(&a).unwrap();
+        match resolved {
+            ResolvedExtractInput::Bam {
+                spec: BamInputSpec::Path { path: p, is_cram: true },
+                mode: BamMode::Alignment,
+            } => assert_eq!(p, path),
+            _ => panic!("a CRAM-magic -b file must resolve to a BAM path with is_cram = true"),
+        }
+    }
+
+    #[test]
+    fn require_reference_for_cram_errors_naming_cram_and_r_when_missing() {
+        let mut a = args();
+        a.reference = None;
+        let err = require_reference_for_cram(&a, true).unwrap_err().to_string();
         assert!(
-            err.contains("CRAM") && err.contains("later release"),
-            "CRAM via -i must be reserved: {err}"
+            err.contains("CRAM") && err.contains("-r"),
+            "missing -r for CRAM must be named in the error: {err}"
         );
     }
 
     #[test]
-    fn b_flag_cram_file_is_reserved() {
-        let (_dir, path) = write_temp_input(b"CRAM\x03padding-bytes", "x.cram");
+    fn require_reference_for_cram_passes_through_r_for_cram_and_ignores_it_for_bam() {
         let mut a = args();
-        a.bam = Some(path);
-        a.bam_mode = Some(BamMode::Alignment);
-        let err = resolve_extract_input_err_message(&a);
-        assert!(
-            err.contains("CRAM") && err.contains("later release"),
-            "CRAM via -b must be reserved: {err}"
-        );
+        a.reference = Some("ref.fa".into());
+        assert_eq!(require_reference_for_cram(&a, true).unwrap(), Some("ref.fa"));
+        // A BAM (is_cram = false) never gets the reference threaded through,
+        // even if -r was (harmlessly) also passed -- keeps the BAM path
+        // behaviorally identical to the pre-CRAM `Alignments::open`.
+        assert_eq!(require_reference_for_cram(&a, false).unwrap(), None);
     }
 
     #[test]
@@ -1057,10 +1348,13 @@ mod tests {
         a.bam_mode = Some(BamMode::Alignment);
         let resolved = resolve_extract_input(&a).unwrap();
         match resolved {
-            ResolvedExtractInput::Bam { spec: BamInputSpec::Path(p), mode: BamMode::Alignment } => {
+            ResolvedExtractInput::Bam {
+                spec: BamInputSpec::Path { path: p, is_cram: false },
+                mode: BamMode::Alignment,
+            } => {
                 assert_eq!(p, path);
             }
-            _ => panic!("a BAM-magic -i file must resolve to a BAM path"),
+            _ => panic!("a BAM-magic -i file must resolve to a BAM path with is_cram = false"),
         }
     }
 
