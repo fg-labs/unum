@@ -96,7 +96,6 @@ use crate::overlap::{self, OverlapHit};
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -324,7 +323,11 @@ pub struct Scratch {
     overlap_hits: Vec<OverlapHit>,
     /// Reused `(tag, seqIdx) -> count` bucket map for `has_hit_in_set`'s
     /// add02ca touched-buckets bucket sort (see that function's doc comment).
-    buckets: HashMap<(i8, u32), u32>,
+    /// Keyed with [`FxHashMap`] (not std SipHash): this map is populated and
+    /// scanned once per read end on the hot `get_hits_from_read` path, and
+    /// [`select_best_bucket`] sorts the keys before scanning, so the hasher
+    /// choice cannot affect which bucket is selected (byte-identical output).
+    buckets: FxHashMap<(i8, u32), u32>,
     /// Per-thread memoization cache for the DP alignment path
     /// (`global_alignment`). `assign_reads_parallel`'s `map_init` gives one
     /// `Scratch` -- hence one `DpCache` -- per rayon worker, which is the
@@ -1435,7 +1438,7 @@ impl RefKmerFilter {
 /// every one of those `2 * seqCnt` slots regardless of how many of them are
 /// actually non-empty; a read only ever touches `hitCnt` distinct buckets
 /// (`hitCnt` = the number of k-mer hits collected, independent of `seqCnt`),
-/// so tracking only the touched buckets in a `HashMap` and scanning those is
+/// so tracking only the touched buckets in an `FxHashMap` and scanning those is
 /// `O(hitCnt)` instead of `O(seqCnt)`.
 ///
 /// # Ordering and tie-breaking are what make this byte-identical to stock
@@ -1471,7 +1474,7 @@ impl RefKmerFilter {
 /// identity is computed and returned here anyway, both because it costs
 /// nothing extra and because a future `GetOverlapsFromHits` port will need
 /// it.)
-fn select_best_bucket(buckets: &HashMap<(i8, u32), u32>) -> Option<((i8, u32), u32)> {
+fn select_best_bucket(buckets: &FxHashMap<(i8, u32), u32>) -> Option<((i8, u32), u32)> {
     let mut keys: Vec<(i8, u32)> = buckets.keys().copied().collect();
     keys.sort_unstable();
 
