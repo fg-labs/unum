@@ -123,6 +123,12 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
 
     let (reads1, reads2) = sink.into_reads();
 
+    // Free the extract-phase k-mer index (~2 GB on the genomic HLA reference,
+    // where `infer_kmer_length` picks k=15) before the genotyper builds its own
+    // index -- otherwise two full reference indices are resident at once.
+    // `filter` is not read after extraction, so dropping it is byte-neutral.
+    drop(filter);
+
     // --- Genotype directly from the in-memory candidate reads ---
     let genotype_args = genotype_args_for(args, &prefix);
     genotype::run_with_candidate_reads(&genotype_args, reads1, reads2, has_mate)

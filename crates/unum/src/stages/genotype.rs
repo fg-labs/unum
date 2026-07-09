@@ -328,7 +328,7 @@ pub fn run_with_candidate_reads(
     }
 
     // --- Reference loading (Genotyper.hpp:706-727) ---
-    let loaded = load_reference(Path::new(&args.ref_seq_fasta))?;
+    let mut loaded = load_reference(Path::new(&args.ref_seq_fasta))?;
     let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus)?;
     filter.set_ref_seq_similarity(args.similarity);
 
@@ -344,6 +344,13 @@ pub fn run_with_candidate_reads(
         &mut effective_len,
         GENE_SIMILARITY_KMER_LENGTH,
     );
+
+    // `loaded.consensus` (~77 MB) is dead past this point: the aligner reads the
+    // reference through `filter.seqs`, and per-allele lengths come from
+    // `allele_refs[].consensus`. Free the redundant copy before read processing.
+    // (The deeper de-dup of `filter.seqs` vs `allele_refs.consensus` is tracked
+    // separately with the struct-of-arrays fan-out work.)
+    drop(std::mem::take(&mut loaded.consensus));
 
     // Build the per-read `GenotypeRead`s (`has_n = seq.contains(&b'N')`,
     // `Genotyper.cpp:59-81`) from the provided records, mate 1 then mate 2.
