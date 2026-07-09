@@ -576,7 +576,17 @@ fn write_genotype_tsv(genotyper: &Genotyper, prefix: &str) -> Result<()> {
 ///
 /// `gene`, `allele_rank`, `allele`, `abundance`, `balance_ratio`, `cov_min`,
 /// `cov_p10`, `cov_median`, `frac_bases_covered`, `missing_cov`, `gt_quality`,
-/// `runnerup_abundance`, `q_gap`, `q_min`, `locus_gq_min`.
+/// `runnerup_abundance`, `q_gap`, `q_min`, `locus_gq_min`, `ec_set_size`,
+/// `identifiability`, `ec_ambiguity_entropy`, `series_set`.
+///
+/// The final four columns (issue #33, report-only) describe the called
+/// allele's post-prune equivalence class: `ec_set_size` is its member count
+/// (1 = read-distinguishable), `identifiability` is `1 / ec_set_size`
+/// (∈ (0,1]), `ec_ambiguity_entropy` is the Shannon entropy over the EC
+/// members' `ec_abundance`, and `series_set` is the semicolon-joined
+/// major-allele series of the EC members. Like the rest of this panel they are
+/// read from already-retained genotyper state and never touch the byte-frozen
+/// `_genotype.tsv`/`_allele.tsv`.
 ///
 /// Every value is read from ALREADY-COMPUTED genotyper state or derived from
 /// `allele_refs`' retained per-base coverage ([`genotyper::allele_coverage_stats`]);
@@ -599,7 +609,7 @@ fn write_metrics_tsv(
         out,
         "gene\tallele_rank\tallele\tabundance\tbalance_ratio\tcov_min\tcov_p10\tcov_median\t\
          frac_bases_covered\tmissing_cov\tgt_quality\trunnerup_abundance\tq_gap\tq_min\t\
-         locus_gq_min"
+         locus_gq_min\tec_set_size\tidentifiability\tec_ambiguity_entropy\tseries_set"
     )
     .with_context(|| format!("writing {path}"))?;
 
@@ -676,11 +686,19 @@ fn write_metrics_tsv(
             let stats = genotyper::allele_coverage_stats(&allele_refs[idx]);
             let q_gap = info.discriminative_quality;
             let q_min = info.genotype_quality.min(q_gap);
+            // Issue #33 report-only identifiability columns, derived from the
+            // called allele's already-retained post-prune equivalence class.
+            let ec_set_size = genotyper.ec_set_size(idx);
+            #[allow(clippy::cast_precision_loss)]
+            let identifiability = 1.0 / ec_set_size as f64;
+            let ec_ambiguity_entropy = genotyper.ec_ambiguity_entropy(idx);
+            let series_set = genotyper.ec_series_set(idx);
             writeln!(
                 out,
                 "{gene}\t{rank}\t{allele}\t{abundance:.6}\t{balance_ratio:.6}\t{cov_min}\t\
                  {cov_p10}\t{cov_median}\t{frac:.6}\t{missing}\t{gt}\t{runnerup:.6}\t{q_gap}\t\
-                 {q_min}\t{locus_gq}",
+                 {q_min}\t{locus_gq}\t{ec_set_size}\t{identifiability:.6}\t\
+                 {ec_ambiguity_entropy:.6}\t{series_set}",
                 gene = genotyper.gene_idx_to_name[gene_idx],
                 allele = names[idx],
                 abundance = info.abundance,

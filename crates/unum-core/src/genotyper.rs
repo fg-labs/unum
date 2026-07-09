@@ -5201,6 +5201,97 @@ impl Genotyper {
             }
         }
     }
+
+    /// Number of member alleles in the post-prune equivalence class of the
+    /// allele at `allele_idx` (issue #33, report-only). `1` means the allele is
+    /// read-distinguishable in this sample; `> 1` means it is non-identifiable
+    /// within its equivalence class (the kallisto/RSEM identifiability notion,
+    /// computed over the retained, post-prune EC state
+    /// [`Genotyper::equivalent_class_to_alleles`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `allele_idx` is out of range for `self.allele_info`, or if the
+    /// allele's `equivalent_class` is negative or out of range for
+    /// `self.equivalent_class_to_alleles`.
+    #[must_use]
+    pub fn ec_set_size(&self, allele_idx: usize) -> usize {
+        let ec = usize::try_from(self.allele_info[allele_idx].equivalent_class)
+            .expect("equivalent_class is non-negative");
+        self.equivalent_class_to_alleles[ec].len()
+    }
+
+    /// Shannon entropy `H = -Σ p_i ln p_i` over the members of the allele's
+    /// post-prune equivalence class, with `p_i = ec_abundance_i / Σ ec_abundance`
+    /// (issue #33, report-only). A singleton EC yields `0.0`; a `k`-member EC
+    /// with uniform member `ec_abundance` yields `ln k`; skewed abundances yield
+    /// strictly less than `ln k`. If the members' `ec_abundance` sum is not
+    /// positive, returns `0.0` (no distributional information).
+    ///
+    /// NOTE: on the normal computation path this is a **reparameterization of
+    /// [`Genotyper::ec_set_size`]**, not an independent signal.
+    /// [`Genotyper::set_allele_abundance`] (and the `quantify_allele_equivalent_class`
+    /// EM that precedes it) assign every member of an equivalence class the SAME
+    /// `ec_abundance` -- the members of one EC are, by construction, the alleles
+    /// the reads cannot tell apart -- so `p_i = 1/k` uniformly and the entropy
+    /// collapses to exactly `ln(ec_set_size)`. The skewed `< ln k` branch is only
+    /// reachable with synthetic non-uniform `ec_abundance` (the unit-test
+    /// fixtures); it adds nothing over `ec_set_size` on real data. The column is
+    /// kept as an `ln`-scaled, report-only view of set size.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`Genotyper::ec_set_size`].
+    #[must_use]
+    pub fn ec_ambiguity_entropy(&self, allele_idx: usize) -> f64 {
+        let ec = usize::try_from(self.allele_info[allele_idx].equivalent_class)
+            .expect("equivalent_class is non-negative");
+        let members = &self.equivalent_class_to_alleles[ec];
+        let total: f64 = members
+            .iter()
+            .map(|&m| self.allele_info[usize::try_from(m).unwrap()].ec_abundance)
+            .sum();
+        if total <= 0.0 {
+            return 0.0;
+        }
+        let mut entropy = 0.0f64;
+        for &m in members {
+            let abund = self.allele_info[usize::try_from(m).unwrap()].ec_abundance;
+            if abund > 0.0 {
+                let p = abund / total;
+                entropy -= p * p.ln();
+            }
+        }
+        entropy
+    }
+
+    /// Semicolon-joined major-allele *series* strings of the members of the
+    /// allele's post-prune equivalence class (issue #33, report-only), in the
+    /// members' stored order via
+    /// [`Genotyper::major_allele_idx_to_name`]. This is the "compatible set" at
+    /// the resolution unum actually retains (series, not G-group). Duplicate
+    /// series (distinct alleles sharing a major allele) are kept as-is.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`Genotyper::ec_set_size`], or if a
+    /// member's `major_allele_idx` is out of range for
+    /// `self.major_allele_idx_to_name`.
+    #[must_use]
+    pub fn ec_series_set(&self, allele_idx: usize) -> String {
+        let ec = usize::try_from(self.allele_info[allele_idx].equivalent_class)
+            .expect("equivalent_class is non-negative");
+        self.equivalent_class_to_alleles[ec]
+            .iter()
+            .map(|&m| {
+                let major_idx =
+                    usize::try_from(self.allele_info[usize::try_from(m).unwrap()].major_allele_idx)
+                        .expect("major_allele_idx is non-negative");
+                self.major_allele_idx_to_name[major_idx].as_str()
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    }
 }
 
 #[cfg(test)]
@@ -5995,6 +6086,112 @@ mod tests {
         let locus_b_gene_idx = usize::try_from(g.allele_info[2].gene_idx).unwrap();
         assert!((g.gene_abundance[locus_a_gene_idx] - 150.0).abs() < 1e-9); // 100 + 50
         assert!((g.gene_abundance[locus_b_gene_idx] - 50.0).abs() < 1e-9);
+    }
+
+    // ---- #33 identifiability helpers (report-only) --------------------------
+
+    /// Builds a bare `Genotyper` with fully-specified equivalence-class state
+    /// for the #33 identifiability helpers: one `AlleleInfo` per
+    /// `(equivalent_class, ec_abundance)` pair, `equivalent_class_to_alleles`
+    /// assembled from those class ids, and `major_allele_idx_to_name` /
+    /// per-allele `major_allele_idx` from `series`. This exercises the helpers
+    /// directly on retained EC state without running the full pipeline.
+    fn identifiability_genotyper(members: &[(i32, f64)], series: &[&str]) -> Genotyper {
+        assert_eq!(members.len(), series.len());
+        let mut g = Genotyper::new();
+        g.major_allele_idx_to_name = series.iter().map(|s| (*s).to_string()).collect();
+        g.allele_info = members
+            .iter()
+            .enumerate()
+            .map(|(idx, &(ec, ec_abundance))| AlleleInfo {
+                major_allele_idx: i32::try_from(idx).unwrap(),
+                equivalent_class: ec,
+                ec_abundance,
+                ..AlleleInfo::default()
+            })
+            .collect();
+        let ec_cnt = members.iter().map(|&(ec, _)| ec).max().map_or(0, |m| m + 1);
+        let mut ec_to_alleles = vec![Vec::new(); usize::try_from(ec_cnt).unwrap()];
+        for (idx, &(ec, _)) in members.iter().enumerate() {
+            ec_to_alleles[usize::try_from(ec).unwrap()].push(i32::try_from(idx).unwrap());
+        }
+        g.equivalent_class_to_alleles = ec_to_alleles;
+        g
+    }
+
+    #[test]
+    fn ec_set_size_singleton_is_one() {
+        let g = identifiability_genotyper(&[(0, 10.0)], &["A*01:01"]);
+        assert_eq!(g.ec_set_size(0), 1);
+    }
+
+    #[test]
+    fn ec_set_size_k_member_is_k() {
+        // EC 0 has three members (alleles 0,1,2); allele 3 is a singleton EC 1.
+        let g = identifiability_genotyper(
+            &[(0, 30.0), (0, 30.0), (0, 30.0), (1, 5.0)],
+            &["A*01:01", "A*01:02", "A*01:03", "B*07:02"],
+        );
+        assert_eq!(g.ec_set_size(0), 3);
+        assert_eq!(g.ec_set_size(1), 3);
+        assert_eq!(g.ec_set_size(2), 3);
+        assert_eq!(g.ec_set_size(3), 1);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, clippy::cast_precision_loss)]
+    fn identifiability_is_reciprocal_of_ec_set_size() {
+        let g = identifiability_genotyper(
+            &[(0, 30.0), (0, 30.0), (0, 30.0), (1, 5.0)],
+            &["A*01:01", "A*01:02", "A*01:03", "B*07:02"],
+        );
+        // `identifiability = 1.0 / ec_set_size as f64`.
+        assert_eq!(1.0 / g.ec_set_size(0) as f64, 1.0 / 3.0);
+        assert_eq!(1.0 / g.ec_set_size(3) as f64, 1.0);
+    }
+
+    #[test]
+    fn ec_ambiguity_entropy_singleton_is_zero() {
+        let g = identifiability_genotyper(&[(0, 10.0)], &["A*01:01"]);
+        assert!(g.ec_ambiguity_entropy(0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ec_ambiguity_entropy_uniform_k_is_ln_k() {
+        // Uniform three-member EC -> entropy = ln 3.
+        let g = identifiability_genotyper(
+            &[(0, 30.0), (0, 30.0), (0, 30.0)],
+            &["A*01:01", "A*01:02", "A*01:03"],
+        );
+        assert!((g.ec_ambiguity_entropy(0) - 3.0f64.ln()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ec_ambiguity_entropy_skewed_is_less_than_ln_k() {
+        // Skewed abundances over a three-member EC -> strictly below ln 3.
+        let g = identifiability_genotyper(
+            &[(0, 90.0), (0, 5.0), (0, 5.0)],
+            &["A*01:01", "A*01:02", "A*01:03"],
+        );
+        let h = g.ec_ambiguity_entropy(0);
+        assert!(h > 0.0, "skewed entropy should be positive: {h}");
+        assert!(h < 3.0f64.ln(), "skewed entropy should be below ln 3: {h}");
+    }
+
+    #[test]
+    fn ec_ambiguity_entropy_zero_total_abundance_is_zero() {
+        let g = identifiability_genotyper(&[(0, 0.0), (0, 0.0)], &["A*01:01", "A*01:02"]);
+        assert!(g.ec_ambiguity_entropy(0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ec_series_set_joins_member_series() {
+        let g = identifiability_genotyper(
+            &[(0, 30.0), (0, 30.0), (0, 30.0), (1, 5.0)],
+            &["A*01:01", "A*01:02", "A*01:03", "B*07:02"],
+        );
+        assert_eq!(g.ec_series_set(0), "A*01:01;A*01:02;A*01:03");
+        assert_eq!(g.ec_series_set(3), "B*07:02");
     }
 
     /// Builds a `Genotyper` with 2 alleles of the SAME gene/major-allele

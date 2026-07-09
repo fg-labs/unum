@@ -4,8 +4,8 @@
 //! oracle needed) and asserts:
 //!
 //! - with `--emit-metrics`, a well-formed `{prefix}_metrics.tsv` is written
-//!   (exact header, 15 columns per row, one row per called allele, values in
-//!   their documented ranges);
+//!   (exact header, 19 columns per row, one row per called allele, values in
+//!   their documented ranges -- including the #33 identifiability columns);
 //! - without the flag, NO `_metrics.tsv` is written;
 //! - the byte-frozen `_genotype.tsv`/`_allele.tsv` are byte-identical with vs
 //!   without the flag (the metrics panel is purely additive).
@@ -14,7 +14,7 @@ use std::process::Command;
 
 const HEADER: &str = "gene\tallele_rank\tallele\tabundance\tbalance_ratio\tcov_min\tcov_p10\t\
 cov_median\tfrac_bases_covered\tmissing_cov\tgt_quality\trunnerup_abundance\tq_gap\tq_min\t\
-locus_gq_min";
+locus_gq_min\tec_set_size\tidentifiability\tec_ambiguity_entropy\tseries_set";
 
 /// Resolves a path under the workspace-level `fixtures/` directory relative to
 /// this crate's manifest, independent of the process's working directory.
@@ -62,7 +62,7 @@ fn emit_metrics_writes_well_formed_panel() {
     for line in lines {
         row_cnt += 1;
         let cols: Vec<&str> = line.split('\t').collect();
-        assert_eq!(cols.len(), 15, "each metrics row must have 15 columns: {line}");
+        assert_eq!(cols.len(), 19, "each metrics row must have 19 columns: {line}");
 
         let allele_rank: i32 = cols[1].parse().unwrap();
         assert!(allele_rank == 0 || allele_rank == 1, "allele_rank must be 0 or 1");
@@ -90,6 +90,37 @@ fn emit_metrics_writes_well_formed_panel() {
 
         let locus_gq_min: i32 = cols[14].parse().unwrap();
         assert!(locus_gq_min <= gt_quality, "locus_gq_min <= this row's gt_quality: {line}");
+
+        // #33 identifiability columns.
+        let ec_set_size: usize = cols[15].parse().unwrap();
+        assert!(ec_set_size >= 1, "ec_set_size >= 1: {line}");
+
+        let identifiability: f64 = cols[16].parse().unwrap();
+        assert!(
+            identifiability > 0.0 && identifiability <= 1.0,
+            "identifiability in (0,1]: {line}"
+        );
+        #[allow(clippy::cast_precision_loss)]
+        let expected_identifiability = 1.0 / ec_set_size as f64;
+        assert!(
+            (identifiability - expected_identifiability).abs() < 1e-9,
+            "identifiability == 1/ec_set_size: {line}"
+        );
+
+        let ec_ambiguity_entropy: f64 = cols[17].parse().unwrap();
+        assert!(ec_ambiguity_entropy >= 0.0, "ec_ambiguity_entropy >= 0: {line}");
+        // A singleton EC (read-distinguishable) has zero ambiguity entropy.
+        if ec_set_size == 1 {
+            assert!(ec_ambiguity_entropy.abs() < 1e-9, "singleton EC has zero entropy: {line}");
+        }
+
+        let series_set = cols[18];
+        assert!(!series_set.is_empty(), "series_set non-empty: {line}");
+        assert_eq!(
+            series_set.split(';').count(),
+            ec_set_size,
+            "series_set has one entry per EC member: {line}"
+        );
     }
     assert!(row_cnt > 0, "expected at least one called-allele row");
 }
