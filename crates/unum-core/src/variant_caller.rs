@@ -1155,6 +1155,18 @@ impl VariantCaller {
                     if usize::try_from(ref_pos).unwrap() >= self.base_variants[seq_idx].len() {
                         break;
                     }
+                    // Symmetric read-side guard: a trailing `EDIT_DELETE`
+                    // advances `ref_pos` (onto a candidate) without advancing
+                    // `read_pos`, which can leave `read_pos` at the read end.
+                    // C++ reads `r[readPos]` == the C-string `'\0'` terminator
+                    // there, adding an empty/non-A/C/G/T nucleotide edge that
+                    // is INERT in `enumerate_variants` scoring (it never
+                    // matches a real A/C/G/T nucleotide, so it contributes no
+                    // ref/alt coverage). Skipping it is byte-identical -- the
+                    // same rationale as the `ref_pos` guard above.
+                    if usize::try_from(read_pos).unwrap() >= r.len() {
+                        break;
+                    }
                     let p = usize::try_from(ref_pos).unwrap();
                     let cid = self.base_variants[seq_idx][p].candidate_id;
                     if cid != -1 {
@@ -1907,6 +1919,57 @@ mod tests {
         vc.update_base_variant_from_overlap(read, 1.0, true, &o, &consensus[0]);
         // Position 1 should be entirely skipped (filtered as low-qual).
         assert_eq!(vc.base_variants[0][1].all_count_sum(), 0.0);
+    }
+
+    // ---- BuildFragmentCandidateVarGraph: read-position overrun -------------
+
+    /// Regression for the SECOND fused-pipeline panic. A trailing
+    /// `EDIT_DELETE` advances `ref_pos` (consuming a reference base) without
+    /// advancing `read_pos`, so `ref_pos` can still point at a candidate
+    /// position while `read_pos` has reached the read end. C++
+    /// `BuildFragmentCandidateVarGraph` (`VariantCaller.hpp:643`) then reads
+    /// `r[readPos]` == the C-string `'\0'` terminator, yielding an
+    /// empty/non-A/C/G/T nucleotide edge that is INERT in `EnumerateVariants`
+    /// scoring (it never equals a real A/C/G/T nucleotide, contributing
+    /// neither ref nor alt coverage). The port must skip such positions
+    /// rather than index a bounds-checked slice out of range.
+    #[test]
+    fn build_fragment_candidate_var_graph_handles_read_end_at_deletion() {
+        // consensus len 5, read len 4: the overlap spans all 5 ref bases via
+        // four matches plus a trailing deletion, so at the deletion op
+        // ref_pos == 4 (a candidate) while read_pos == 4 == read length.
+        let refs = vec![allele_ref("AAAAA")];
+        let mut vc = VariantCaller::new(&refs);
+        vc.base_variants[0][4].candidate_id = 0; // candidate at the deleted ref position
+
+        let read = b"AAAA";
+        let mut align = vec![crate::align_algo::EDIT_MATCH; 4];
+        align.push(crate::align_algo::EDIT_DELETE); // trailing deletion
+        let frag = FragmentOverlap {
+            seq_idx: 0,
+            has_mate_pair: false,
+            o1_from_r2: false,
+            overlap1: Overlap {
+                seq_idx: 0,
+                read_start: 0,
+                read_end: 3,
+                seq_start: 0,
+                seq_end: 4,
+                strand: 1,
+                match_cnt: 8,
+                similarity: 1.0,
+                align: Some(align),
+            },
+            overlap2: Overlap::none(),
+        };
+        let mut adj_frag = vec![AdjFragToVar { nuc: 0, next: -1 }];
+        let mut adj_var = vec![AdjVarToFrag { frag_idx: -1, nuc: 0, next: -1 }];
+
+        // Must not panic on the read-end deletion; the inert '\0' edge C++
+        // would add contributes nothing, so no real edge is expected.
+        vc.build_fragment_candidate_var_graph(read, None, 0, &[frag], &mut adj_frag, &mut adj_var);
+        assert_eq!(adj_frag.len(), 1, "no real frag->var edge should be added");
+        assert_eq!(adj_var.len(), 1, "no real var->frag edge should be added");
     }
 
     // ---- end-to-end ComputeVariant regression scenarios --------------------

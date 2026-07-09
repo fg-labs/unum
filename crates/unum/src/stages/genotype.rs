@@ -53,7 +53,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::Path;
 use unum_core::allele_freq::AlleleFreqTable;
-use unum_core::fastq::FastqReader;
+use unum_core::fastq::{FastqReader, FastqRecord};
 use unum_core::genotyper::{self, AlleleRef, ExtendedOverlap, Genotyper, ReadAssignment};
 use unum_core::ref_kmer_filter::RefKmerFilter;
 
@@ -198,24 +198,16 @@ struct GenotypeRead {
     has_n: bool,
 }
 
-/// Both mates' loaded reads, in file order (mate 1, mate 2) -- the payload
-/// produced by the FASTQ-reading thread spawned in [`run`]'s reference-setup
-/// overlap (see that function's doc comment).
-type ReadsPair = (Vec<GenotypeRead>, Vec<GenotypeRead>);
-
-/// Everything [`run`]'s reference-setup-vs-FASTQ-read overlap produces,
-/// bundled so `std::thread::scope` can return it as a single value.
-#[allow(clippy::type_complexity)]
-type RunSetup =
-    (LoadedRef, RefKmerFilter, Genotyper, Vec<i32>, Vec<GenotypeRead>, Vec<GenotypeRead>);
-
-fn read_all(reader: &mut FastqReader) -> Result<Vec<GenotypeRead>> {
-    let mut reads = Vec::new();
-    while let Some(record) = reader.next_record()? {
+impl GenotypeRead {
+    /// Builds a [`GenotypeRead`] from a parsed [`FastqRecord`], recomputing
+    /// `has_n = seq.contains(&b'N')` (`Genotyper.cpp:59-81`). Used for both the
+    /// file-based path (records read from `_candidate_*.fq`) and the fused
+    /// in-memory path (records handed over by
+    /// [`unum_core::extract::InMemoryCandidateSink`]) -- identical either way.
+    fn from_record(record: FastqRecord) -> Self {
         let has_n = record.seq.contains(&b'N');
-        reads.push(GenotypeRead { id: record.id, seq: record.seq, has_n });
+        Self { id: record.id, seq: record.seq, has_n }
     }
-    Ok(reads)
 }
 
 /// Runs the `genotype` subcommand for `args`.
@@ -225,13 +217,6 @@ fn read_all(reader: &mut FastqReader) -> Result<Vec<GenotypeRead>> {
 /// Returns an error if the reference/candidate-read files cannot be
 /// opened/parsed, if neither `-u` nor both `-1`/`-2` are given, or if output
 /// files cannot be created.
-// Long by construction: mirrors Genotyper.cpp:main's single linear driver
-// (reference load -> read load -> alignment -> fragment assembly ->
-// quantify/select -> output) -- splitting this into several tiny functions
-// would scatter closely-related sequential setup across the file for no
-// readability benefit (same rationale as the vendored source's own
-// single-function `main`).
-#[allow(clippy::too_many_lines)]
 pub fn run(args: &GenotypeArgs) -> Result<()> {
     let mate2_path = args.mate2.as_deref();
     let paired = args.mate1.is_some() || mate2_path.is_some();
@@ -255,70 +240,82 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
     };
     let has_mate = mate2_path.is_some();
 
-    // --- Reference loading (Genotyper.hpp:706-727), overlapped with candidate
-    // FASTQ reading (Genotyper.cpp:362-443) ---
-    //
-    // Reference setup (`load_reference` + `build_ref_kmer_filter` +
-    // `init_allele_info`) and reading the candidate FASTQ(s) are independent:
-    // the former only touches `args.ref_seq_fasta` and a uniquely-named
-    // scratch file under `std::env::temp_dir` (see `build_ref_kmer_filter`),
-    // the latter only touches `mate1_path`/`mate2_path`. So the FASTQ read is
-    // moved onto a scoped thread that runs concurrently with reference setup
-    // on the main thread, joined immediately before `reads1`/`reads2` are
-    // first consumed. `std::thread::scope` keeps the reader thread's `Result`
-    // propagating through `?` exactly as before (just resolved after the
-    // join rather than inline), and each mate is still read in its own file
-    // order into its own `Vec`, so output is byte-identical regardless of
-    // which side finishes first.
-    let (loaded, filter, mut genotyper, effective_len, reads1, reads2): RunSetup =
-        std::thread::scope(|scope| -> Result<RunSetup> {
-            let read_handle = scope.spawn(move || -> Result<ReadsPair> {
-                let mut reader1 = FastqReader::open(Path::new(mate1_path))
-                    .with_context(|| format!("opening candidate read file {mate1_path}"))?;
-                let reads1 = read_all(&mut reader1)?;
-                let reads2 = if let Some(mate2_path) = mate2_path {
-                    let mut reader2 = FastqReader::open(Path::new(mate2_path))
-                        .with_context(|| format!("opening candidate read file {mate2_path}"))?;
-                    read_all(&mut reader2)?
-                } else {
-                    Vec::new()
-                };
-                Ok((reads1, reads2))
-            });
+    // --- Candidate FASTQ reading (Genotyper.cpp:362-443) ---
+    // Each mate is read in its own file order into its own `Vec<FastqRecord>`,
+    // then handed to [`run_with_candidate_reads`] (the shared driver from
+    // reference-load onward), which is exactly what the fused in-memory `run`
+    // path (issue #28) also feeds -- so the file-based and in-memory paths run
+    // byte-identical downstream logic on byte-identical read vectors.
+    let reads1 = read_records(Path::new(mate1_path))
+        .with_context(|| format!("reading candidate read file {mate1_path}"))?;
+    let reads2 = if let Some(mate2_path) = mate2_path {
+        read_records(Path::new(mate2_path))
+            .with_context(|| format!("reading candidate read file {mate2_path}"))?
+    } else {
+        Vec::new()
+    };
 
-            let ref_setup_result: Result<_> = (|| {
-                let loaded = load_reference(Path::new(&args.ref_seq_fasta))?;
+    run_with_candidate_reads(args, reads1, reads2, has_mate)
+}
 
-                let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus)?;
-                filter.set_ref_seq_similarity(args.similarity);
+/// Reads every record from the FASTA/FASTQ at `path` into a `Vec<FastqRecord>`
+/// (id whitespace-truncated + `/1`/`/2`-stripped, seq/qual verbatim -- exactly
+/// what the fused in-memory candidate sink also produces after extract has
+/// already normalized ids on the way in; see [`run_with_candidate_reads`]).
+fn read_records(path: &Path) -> Result<Vec<FastqRecord>> {
+    let mut reader =
+        FastqReader::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut out = Vec::new();
+    while let Some(record) = reader.next_record()? {
+        out.push(record);
+    }
+    Ok(out)
+}
 
-                let mut genotyper = Genotyper::new();
-                genotyper.set_filter_frac(args.filter_frac);
-                genotyper.set_filter_cov(args.filter_cov);
-                genotyper.set_cross_gene_rate(args.cross_gene_rate);
-                let mut effective_len = loaded.effective_len.clone();
-                genotyper.init_allele_info(
-                    &loaded.names,
-                    &loaded.consensus,
-                    &loaded.weight,
-                    &mut effective_len,
-                    GENE_SIMILARITY_KMER_LENGTH,
-                );
-                Ok((loaded, filter, genotyper, effective_len))
-            })();
-
-            // Join the reader before propagating either side's error, so the
-            // spawned thread is never left detached-but-still-running on an
-            // early return (`?` on `ref_setup_result` alone would drop
-            // `read_handle` without joining it).
-            let read_result = read_handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("candidate read loading thread panicked"))?;
-            let (loaded, filter, genotyper, effective_len) = ref_setup_result?;
-            let (reads1, reads2) = read_result?;
-            Ok((loaded, filter, genotyper, effective_len, reads1, reads2))
-        })?;
-    let allele_cnt = loaded.names.len();
+/// Runs the genotyper driver from reference-load onward on candidate reads
+/// already present in memory as `Vec<FastqRecord>` -- the seam the fused
+/// single-process `run` pipeline (issue #28) feeds directly from
+/// [`unum_core::extract::InMemoryCandidateSink`], with NO intermediate
+/// `{prefix}_candidate_*.fq` written and re-read.
+///
+/// `reads1`/`reads2` are the mate-1/mate-2 candidate records in strict input
+/// order (index-aligned: `reads1[i]`/`reads2[i]` are the two ends of fragment
+/// `i`). For paired input (`has_mate == true`) both vectors must have equal
+/// length; for single-end input `reads2` is empty. Every mate-2 record must
+/// already carry its pair's MATE-1 id (both the file path -- via extract's
+/// `_candidate_2.fq` writing mate-1's id and genotype re-reading it -- and the
+/// in-memory `InMemoryCandidateSink` guarantee this), so `_aligned_2.fa`'s
+/// `>{id}` lines are byte-identical across both paths.
+///
+/// This is byte-identical to the previous inlined driver: it performs the same
+/// reference load, builds the same `GenotypeRead`s (recomputing `has_n` as
+/// `seq.contains(&b'N')`), and runs the identical alignment/fragment-assembly/
+/// quantify/select/output sequence.
+///
+/// # Errors
+///
+/// Returns an error if the `has_mate`/`reads2` invariant is violated (paired
+/// mate counts differ, or a single-end call carries mate-2 records), if the
+/// reference cannot be loaded/parsed, or if output files cannot be created.
+// Long by construction: mirrors Genotyper.cpp:main's single linear driver
+// (reference load -> read load -> alignment -> fragment assembly ->
+// quantify/select -> output) -- splitting this into several tiny functions
+// would scatter closely-related sequential setup across the file for no
+// readability benefit (same rationale as the vendored source's own
+// single-function `main`).
+#[allow(clippy::too_many_lines)]
+pub fn run_with_candidate_reads(
+    args: &GenotypeArgs,
+    reads1: Vec<FastqRecord>,
+    reads2: Vec<FastqRecord>,
+    has_mate: bool,
+) -> Result<()> {
+    // Enforce the `has_mate`/`reads2` invariant at the seam, before any
+    // reference load or shared-sequence processing: `has_mate == false` with a
+    // non-empty `reads2` is an inconsistent single-end call whose mate-2
+    // sequences would still feed shared read processing yet be dropped during
+    // fragment assembly/output. In-tree callers always uphold this, but this is
+    // a `pub` entrypoint, so guard it here.
     if has_mate {
         ensure!(
             reads1.len() == reads2.len(),
@@ -326,7 +323,34 @@ pub fn run(args: &GenotypeArgs) -> Result<()> {
             reads1.len(),
             reads2.len()
         );
+    } else {
+        ensure!(reads2.is_empty(), "single-end candidate reads must not include mate-2 records");
     }
+
+    // --- Reference loading (Genotyper.hpp:706-727) ---
+    let loaded = load_reference(Path::new(&args.ref_seq_fasta))?;
+    let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus)?;
+    filter.set_ref_seq_similarity(args.similarity);
+
+    let mut genotyper = Genotyper::new();
+    genotyper.set_filter_frac(args.filter_frac);
+    genotyper.set_filter_cov(args.filter_cov);
+    genotyper.set_cross_gene_rate(args.cross_gene_rate);
+    let mut effective_len = loaded.effective_len.clone();
+    genotyper.init_allele_info(
+        &loaded.names,
+        &loaded.consensus,
+        &loaded.weight,
+        &mut effective_len,
+        GENE_SIMILARITY_KMER_LENGTH,
+    );
+
+    // Build the per-read `GenotypeRead`s (`has_n = seq.contains(&b'N')`,
+    // `Genotyper.cpp:59-81`) from the provided records, mate 1 then mate 2.
+    let reads1: Vec<GenotypeRead> = reads1.into_iter().map(GenotypeRead::from_record).collect();
+    let reads2: Vec<GenotypeRead> = reads2.into_iter().map(GenotypeRead::from_record).collect();
+
+    let allele_cnt = loaded.names.len();
     let read_cnt = reads1.len();
     let max_read_length =
         reads1.iter().chain(reads2.iter()).map(|r| r.seq.len()).max().unwrap_or(0);
@@ -771,6 +795,74 @@ mod tests {
         assert_eq!(compute_effective_len(b"ACNNNNGT"), 5); // NNNN collapses to 1
         assert_eq!(compute_effective_len(b"NNAC"), 2); // leading NN collapses to 1, but that 1 is never counted (i==0 case is always excluded when seq[0]=='N')
         assert_eq!(compute_effective_len(b"ACNNGTNN"), 6);
+    }
+
+    /// Builds a [`GenotypeArgs`] whose `ref_seq_fasta` points at a path that
+    /// does not exist, so a test that reaches `load_reference` fails with a
+    /// reference-load error rather than the seam guard we are exercising --
+    /// letting the two be told apart by error text.
+    fn args_with_missing_reference() -> GenotypeArgs {
+        GenotypeArgs {
+            ref_seq_fasta: "/nonexistent/reference/for/seam/guard/test.fa".to_string(),
+            mate1: None,
+            mate2: None,
+            single: None,
+            prefix: "t1k".to_string(),
+            threads: 1,
+            max_assign_cnt: 2000,
+            similarity: 0.8,
+            filter_frac: 0.15,
+            filter_cov: 1.0,
+            cross_gene_rate: 0.04,
+            emit_metrics: false,
+            allele_freq: None,
+            allele_freq_weight: 2.0,
+            allele_freq_null_penalty: 0.0,
+        }
+    }
+
+    fn record(id: &str, seq: &[u8]) -> FastqRecord {
+        FastqRecord { id: id.to_string(), seq: seq.to_vec(), qual: None }
+    }
+
+    #[test]
+    fn run_with_candidate_reads_rejects_single_end_carrying_mate2() {
+        // `has_mate == false` but a non-empty `reads2` is an inconsistent
+        // single-end call: the mate-2 sequences would leak into shared read
+        // processing yet be dropped from fragment assembly. The seam must
+        // reject it up front, before any reference load is attempted.
+        let args = args_with_missing_reference();
+        let err = run_with_candidate_reads(
+            &args,
+            vec![record("r1", b"ACGT")],
+            vec![record("r1", b"ACGT")],
+            false,
+        )
+        .expect_err("single-end call with non-empty reads2 must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("single-end") && msg.contains("mate-2"),
+            "expected the seam guard's single-end message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_with_candidate_reads_rejects_paired_count_mismatch() {
+        // Mismatched paired mate counts must also be rejected at the seam,
+        // before the reference is loaded.
+        let args = args_with_missing_reference();
+        let err = run_with_candidate_reads(
+            &args,
+            vec![record("r1", b"ACGT"), record("r2", b"ACGT")],
+            vec![record("r1", b"ACGT")],
+            true,
+        )
+        .expect_err("paired call with differing mate counts must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("candidate read counts differ"),
+            "expected the seam guard's paired-mismatch message, got: {msg}"
+        );
     }
 
     #[test]
