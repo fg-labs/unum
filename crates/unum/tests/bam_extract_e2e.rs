@@ -72,6 +72,18 @@ fn kir2dl1_sequence() -> String {
 /// record is read, so a single pair (order-independent) is sufficient for
 /// every test in this file, including the name-sorted guard test.
 fn build_bam(dir: &Path, filename: &str, sort_order_tag: &str) -> PathBuf {
+    build_alignment_file(dir, filename, sort_order_tag, bam::Format::Bam)
+}
+
+/// [`build_bam`] parameterized on the on-disk container so the same on-target
+/// pair can be written as BAM or plain-text SAM (the latter exercises the
+/// content-sniffer's SAM detection and the SAM-reads-like-BAM routing).
+fn build_alignment_file(
+    dir: &Path,
+    filename: &str,
+    sort_order_tag: &str,
+    format: bam::Format,
+) -> PathBuf {
     let path = dir.join(filename);
     let kir_seq = kir2dl1_sequence();
     let kir_bytes = kir_seq.as_bytes();
@@ -86,7 +98,7 @@ fn build_bam(dir: &Path, filename: &str, sort_order_tag: &str) -> PathBuf {
     sq.push_tag(b"LN", 58_617_616);
     header.push_record(&sq);
 
-    let mut writer = Writer::from_path(&path, &header, bam::Format::Bam).expect("bam writer");
+    let mut writer = Writer::from_path(&path, &header, format).expect("alignment writer");
 
     let mut r1 = bam::Record::new();
     r1.set(
@@ -302,6 +314,65 @@ fn i_and_b_flag_coordinate_alignment_match_and_are_nonempty() {
     assert_eq!(a2, b2, "-i and -b coordinate alignment must be byte-identical (mate 2)");
     assert!(!a1.is_empty(), "coordinate alignment should emit mate-1 candidates");
     assert!(!a2.is_empty(), "coordinate alignment should emit mate-2 candidates");
+}
+
+#[test]
+#[allow(clippy::similar_names)] // sam/bam-derived binding pairs are intentional
+fn sam_input_extracts_and_matches_bam() {
+    // A plain-text SAM (`@HD` header) must be accepted by `-b`/`-i`: the
+    // content-sniffer now recognizes a SAM header and routes it to the BAM
+    // extractor (htslib reads SAM like BAM, no reference needed). Its extracted
+    // candidates must be byte-identical to the equivalent BAM's.
+    let tmp = tempfile::tempdir().unwrap();
+    let coord_fa = coord_fasta_path();
+    let sam = build_alignment_file(tmp.path(), "coordinate.sam", "coordinate", bam::Format::Sam);
+    let bam = build_coordinate_bam(tmp.path());
+
+    let from_sam = tmp.path().join("al_sam");
+    run_extract_ok(&[
+        "-c",
+        s(&coord_fa),
+        "-b",
+        s(&sam),
+        "--bam-mode",
+        "alignment",
+        "-o",
+        s(&from_sam),
+    ]);
+    let from_bam = tmp.path().join("al_bam");
+    run_extract_ok(&[
+        "-c",
+        s(&coord_fa),
+        "-b",
+        s(&bam),
+        "--bam-mode",
+        "alignment",
+        "-o",
+        s(&from_bam),
+    ]);
+
+    let sam_reads = std::fs::read(paired_out_1(&from_sam)).unwrap();
+    let bam_reads = std::fs::read(paired_out_1(&from_bam)).unwrap();
+    assert_eq!(
+        sam_reads, bam_reads,
+        "SAM alignment extraction must be byte-identical to the equivalent BAM"
+    );
+    assert!(!sam_reads.is_empty(), "SAM alignment should emit candidates");
+
+    // Cover the `-i` arm's SAM detection too (the same sniffer routes it) --
+    // it must be accepted, not rejected as FASTQ.
+    let via_i = tmp.path().join("al_sam_i");
+    run_extract_ok(&[
+        "-c",
+        s(&coord_fa),
+        "-i",
+        s(&sam),
+        "--bam-mode",
+        "alignment",
+        "-o",
+        s(&via_i),
+    ]);
+    assert_eq!(std::fs::read(paired_out_1(&via_i)).unwrap(), sam_reads);
 }
 
 #[test]
@@ -1552,6 +1623,34 @@ fn run_bam_no_alignment_with_coord_fasta_is_rejected() {
         .output()
         .unwrap();
     assert!(!out.status.success(), "-c under --bam-mode no-alignment must fail, not be ignored");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("-c"), "expected a -c-specific error, got: {stderr}");
+}
+
+/// `-c` (coord FASTA) applies only to `run -b --bam-mode alignment`; the FASTQ path (`-b` absent)
+/// must reject it rather than silently ignore it, mirroring the `--bam-mode no-alignment` guard
+/// above. The guard fires before any read source is opened, so a dummy `-u` path is sufficient.
+#[test]
+fn run_fastq_with_coord_fasta_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ref_fa = write_run_no_alignment_ref_fasta(tmp.path());
+    let coord_fa = coord_fasta_path();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_unum"))
+        .arg("run")
+        .args([
+            "-f",
+            s(&ref_fa),
+            "-u",
+            "reads.fq",
+            "-c",
+            s(&coord_fa),
+            "-o",
+            s(&tmp.path().join("o")),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "-c on the FASTQ path must fail, not be silently ignored");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("-c"), "expected a -c-specific error, got: {stderr}");
 }

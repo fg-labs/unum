@@ -169,10 +169,11 @@ fn resolve_extract_input(args: &ExtractArgs) -> Result<ResolvedExtractInput> {
         let (opened, _fmt) = open_input(&InputSpec::Path(std::path::PathBuf::from(bam_path)))
             .with_context(|| format!("opening input {bam_path}"))?;
         let is_cram = match opened {
-            OpenedInput::Bam => false,
+            // SAM is read by htslib exactly like BAM (no reference needed).
+            OpenedInput::Sam | OpenedInput::Bam => false,
             OpenedInput::Cram => true,
             OpenedInput::Fastq(_) => {
-                bail!("-b expects a BAM/CRAM file, but {bam_path} is FASTQ/FASTA input")
+                bail!("-b expects a SAM/BAM/CRAM file, but {bam_path} is FASTQ/FASTA input")
             }
         };
         return Ok(ResolvedExtractInput::Bam {
@@ -237,7 +238,8 @@ fn resolve_i_input(args: &ExtractArgs) -> Result<ResolvedExtractInput> {
                     );
                     Ok(ResolvedExtractInput::Fastq(classify_single_input(reader)?))
                 }
-                OpenedInput::Bam => {
+                // SAM is read by htslib exactly like BAM (no reference needed).
+                OpenedInput::Sam | OpenedInput::Bam => {
                     let mode = require_bam_mode(args)?;
                     Ok(ResolvedExtractInput::Bam {
                         spec: BamInputSpec::Path { path: a.clone(), is_cram: false },
@@ -461,6 +463,13 @@ fn run_bam_alignment(args: &ExtractArgs, spec: &BamInputSpec) -> Result<()> {
             // run_bam_no_alignment's Stdin arm doc comment for why (no-network
             // CRAM guarantee, `Alignments::from_stdin`'s FileNotFound
             // footgun).
+            //
+            // Unlike the file-backed arm (which passes the reference only for a
+            // content-sniffed CRAM via `require_reference_for_cram`), `-r` is
+            // threaded through UNCONDITIONALLY here: a piped stream cannot be
+            // format-sniffed before decode, so a supplied `-r` also runs the
+            // `@SQ` coverage preflight for a stdin BAM/SAM. This divergence is
+            // documented on the `-r` flag -- on stdin, pass `-r` only for CRAM.
             let mut alignments = Alignments::from_stdin_with_reference(args.reference.as_deref())
                 .context("opening BAM/CRAM stream from stdin")?;
             // Guard on the header BEFORE the one-pass, same rationale as
@@ -611,6 +620,11 @@ fn run_bam_no_alignment(args: &ExtractArgs, spec: &BamInputSpec) -> Result<()> {
             // therefore fails LOCALLY (no reference resolves against the
             // empty private directory) rather than reaching the network --
             // see `main::neutralize_cram_ref_path_network_fallback`.
+            //
+            // Same `-r` caveat as run_bam_alignment's Stdin arm: threaded
+            // unconditionally (a piped stream can't be format-sniffed), so a
+            // stdin BAM/SAM with `-r` also hits the `@SQ` coverage preflight.
+            // Documented on the `-r` flag -- on stdin, pass `-r` only for CRAM.
             let mut alignments = Alignments::from_stdin_with_reference(args.reference.as_deref())
                 .context("opening BAM/CRAM stream from stdin")?;
             // Guard on the header BEFORE the one-pass: Coordinate/Unsorted

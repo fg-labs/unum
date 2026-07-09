@@ -111,6 +111,15 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
         return run_bam_fused(args, &prefix, bam);
     }
 
+    // `-c` (gene coordinate FASTA) is only meaningful for `-b --bam-mode alignment`; its doc
+    // comment declares it rejected for FASTQ input. Without this guard the FASTQ path below would
+    // silently ignore it, mirroring `run_bam_no_alignment_fused`'s reject rather than falling
+    // through. (`-r`/`--bam-mode` are documented as *ignored* for FASTQ, so they are not rejected.)
+    ensure!(
+        args.ref_coord_fasta.is_none(),
+        "-c (coord FASTA) applies only to run -b --bam-mode alignment, not FASTQ input"
+    );
+
     let source_desc = resolve_fastq_source(args)?;
 
     // --- Extract candidates in memory (fastq-extractor port) ---
@@ -214,10 +223,11 @@ fn run_bam_fused(args: &RunArgs, prefix: &str, bam: &str) -> anyhow::Result<()> 
     let (opened, _fmt) = open_input(&InputSpec::Path(std::path::PathBuf::from(bam)))
         .with_context(|| format!("opening input {bam}"))?;
     let is_cram = match opened {
-        OpenedInput::Bam => false,
+        // SAM is read by htslib exactly like BAM (no reference needed).
+        OpenedInput::Sam | OpenedInput::Bam => false,
         OpenedInput::Cram => true,
         OpenedInput::Fastq(_) => {
-            bail!("-b expects a BAM/CRAM file, but {bam} is FASTQ/FASTA input")
+            bail!("-b expects a SAM/BAM/CRAM file, but {bam} is FASTQ/FASTA input")
         }
     };
     let reference = require_reference_for_cram_run(args, is_cram)?;
