@@ -45,16 +45,16 @@
 //!
 //! T1K opens every read file via `gzopen`/`gzread` (`ReadFiles.hpp:9,90-91`),
 //! which transparently reads both plain and gzip-compressed input (zlib
-//! auto-detects the gzip magic bytes). This reader mirrors that by sniffing
-//! the gzip magic (`0x1f 0x8b`) at the start of the file and wrapping in a
-//! [`flate2::read::MultiGzDecoder`] only when present, otherwise reading the
-//! file directly -- functionally equivalent auto-detection, without needing
-//! to inspect the file extension.
+//! auto-detects the gzip magic bytes). This reader mirrors that by routing
+//! every open through [`niffler::get_reader`], which sniffs the compression
+//! format from the stream's leading bytes and returns a transparently
+//! decoding reader (chaining the sniffed bytes back in, so nothing is lost)
+//! -- functionally equivalent auto-detection, without needing to inspect the
+//! file extension or open the file twice.
 
 use anyhow::{Context, Result};
-use flate2::read::MultiGzDecoder;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 /// A single parsed FASTA/FASTQ record: `id` is the header token up to the
@@ -82,8 +82,15 @@ pub struct FastqRecord {
 /// interleaved input is explicitly deferred (see [`crate::extract`]'s module
 /// docs).
 pub struct FastqReader {
-    path: PathBuf,
+    /// The source path for a file-backed reader (re-opened on `rewind`), or
+    /// `None` for a stream-backed reader (stdin / pre-decoded pipe), which
+    /// cannot rewind.
+    path: Option<PathBuf>,
+    label: String,
     inner: Box<dyn BufRead>,
+    /// Records pushed back via [`Self::push_front`], returned by
+    /// [`Self::next_record`] (LIFO) before any further reads from `inner`.
+    pushback: Vec<FastqRecord>,
 }
 
 impl FastqReader {
@@ -95,7 +102,29 @@ impl FastqReader {
     /// Returns an error if `path` cannot be opened.
     pub fn open(path: &Path) -> Result<Self> {
         let inner = open_reader(path)?;
-        Ok(Self { path: path.to_path_buf(), inner })
+        Ok(Self {
+            path: Some(path.to_path_buf()),
+            label: path.display().to_string(),
+            inner,
+            pushback: Vec::new(),
+        })
+    }
+
+    /// Builds a reader over an already-opened, already-decompressed stream
+    /// (e.g. stdin). `label` appears only in error messages. This reader is
+    /// NOT rewindable.
+    #[must_use]
+    pub fn from_bufread(label: String, inner: Box<dyn BufRead>) -> Self {
+        Self { path: None, label, inner, pushback: Vec::new() }
+    }
+
+    /// Pushes a record back so it is returned by a subsequent `next_record`
+    /// before any further reads from the underlying stream. Pushed records are
+    /// returned in LIFO order, so to replay records `[a, b]` in order, push `b`
+    /// then `a`. Used by single-vs-interleaved detection, which peeks records
+    /// it must not consume.
+    pub fn push_front(&mut self, rec: FastqRecord) {
+        self.pushback.push(rec);
     }
 
     /// Re-opens the file from the beginning, matching `ReadFiles::Rewind`'s
@@ -105,11 +134,24 @@ impl FastqReader {
     /// mid-stream the way plain files can, so re-opening is the correct
     /// general-purpose equivalent, not merely a convenient one).
     ///
+    /// Also discards any pending [`Self::push_front`]-buffered records: a
+    /// "fresh read position at byte 0" should mean exactly that, even though
+    /// no current caller combines `rewind` with pushback (classification via
+    /// [`crate::extract::classify_single_input`] uses `push_front` on a
+    /// freshly-opened reader and never rewinds it; `rewind` itself is only
+    /// otherwise exercised by this module's own tests).
+    ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be re-opened.
+    /// Returns an error if the file cannot be re-opened, or if this reader is
+    /// stream-backed (no path to re-open).
     pub fn rewind(&mut self) -> Result<()> {
-        self.inner = open_reader(&self.path)?;
+        let path = self
+            .path
+            .as_ref()
+            .with_context(|| format!("cannot rewind stream-backed reader {}", self.label))?;
+        self.inner = open_reader(path)?;
+        self.pushback.clear();
         Ok(())
     }
 
@@ -134,6 +176,10 @@ impl FastqReader {
     /// [`read_line_trimmed`] call in the same iteration cannot return
     /// `None`.
     pub fn next_record(&mut self) -> Result<Option<FastqRecord>> {
+        if let Some(rec) = self.pushback.pop() {
+            return Ok(Some(rec));
+        }
+
         let Some(mut header) = read_line_trimmed(&mut self.inner)? else {
             return Ok(None);
         };
@@ -153,7 +199,7 @@ impl FastqReader {
             Some(b'>') => false,
             _ => anyhow::bail!(
                 "malformed record in {}: expected '@' or '>' header, got {header:?}",
-                self.path.display()
+                self.label
             ),
         };
         let header_body = &header[1..];
@@ -187,29 +233,26 @@ impl FastqReader {
             let Some(plus_line) = read_line_trimmed(&mut self.inner)? else {
                 anyhow::bail!(
                     "truncated FASTQ record in {} (missing '+' line for {id})",
-                    self.path.display()
+                    self.label
                 );
             };
             anyhow::ensure!(
                 plus_line.starts_with('+'),
                 "malformed FASTQ record in {}: expected '+' separator for {id}, got {plus_line:?}",
-                self.path.display()
+                self.label
             );
 
             let mut q: Vec<u8> = Vec::new();
             while q.len() < seq.len() {
                 let Some(line) = read_line_trimmed(&mut self.inner)? else {
-                    anyhow::bail!(
-                        "truncated quality string in {} for read {id}",
-                        self.path.display()
-                    );
+                    anyhow::bail!("truncated quality string in {} for read {id}", self.label);
                 };
                 q.extend_from_slice(line.as_bytes());
             }
             anyhow::ensure!(
                 q.len() == seq.len(),
                 "quality/sequence length mismatch in {} for read {id} (seq={}, qual={})",
-                self.path.display(),
+                self.label,
                 seq.len(),
                 q.len()
             );
@@ -236,23 +279,25 @@ fn strip_mate_suffix(id: &mut String) {
     }
 }
 
-/// Opens `path`, auto-detecting gzip compression by sniffing the gzip magic
-/// bytes (`0x1f 0x8b`) at the start of the file (see module docs).
+/// Opens `path` and transparently decompresses gzip/BGZF via niffler
+/// (mirroring T1K's zlib auto-detection, `ReadFiles.hpp:9,90-91`), returning
+/// a decoded `BufRead`. Plain input passes through unchanged.
 fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
-    let mut file =
-        File::open(path).with_context(|| format!("opening read file {}", path.display()))?;
-    let mut magic = [0u8; 2];
-    let n = file.read(&mut magic).with_context(|| format!("reading {}", path.display()))?;
-    let is_gzip = n == 2 && magic == [0x1f, 0x8b];
-
-    // Re-open from the start rather than trying to "un-read" the sniffed
-    // bytes through the same handle -- simplest correct approach, and this
-    // is only paid once per `open`/`rewind` call, not per record.
     let file = File::open(path).with_context(|| format!("opening read file {}", path.display()))?;
-    if is_gzip {
-        Ok(Box::new(BufReader::new(MultiGzDecoder::new(file))))
-    } else {
-        Ok(Box::new(BufReader::new(file)))
+    match niffler::get_reader(Box::new(file)) {
+        Ok((decoded, _fmt)) => Ok(Box::new(BufReader::new(decoded))),
+        // Files under 5 bytes (including empty files) can never be gzip --
+        // niffler can't sniff them and errors out, but the old magic-byte
+        // sniff treated them as plain input rather than failing. Re-open
+        // (the failed attempt above consumed the original handle) and read
+        // directly, preserving that behavior (e.g. empty-file handling is a
+        // downstream concern, see `extract::tests::empty_read1_file_is_an_error`).
+        Err(niffler::Error::FileTooShort) => {
+            let file = File::open(path)
+                .with_context(|| format!("opening read file {}", path.display()))?;
+            Ok(Box::new(BufReader::new(file)))
+        }
+        Err(e) => Err(e).with_context(|| format!("detecting compression of {}", path.display())),
     }
 }
 
@@ -392,6 +437,26 @@ mod tests {
     }
 
     #[test]
+    fn short_file_under_five_bytes_is_treated_as_plain_not_an_open_error() {
+        // niffler::get_reader errors on streams under 5 bytes (it can't sniff
+        // them), but the reader should still open successfully and simply
+        // read them as plain (uncompressed) content -- see `open_reader`'s
+        // `niffler::Error::FileTooShort` fallback.
+        let f = write_temp("");
+        let mut r = FastqReader::open(f.path()).unwrap();
+        assert!(r.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn from_bufread_rewind_returns_an_error() {
+        let mut r = FastqReader::from_bufread(
+            "<stdin>".to_string(),
+            Box::new(BufReader::new(std::io::Cursor::new(b"@r1\nACGT\n+\nIIII\n".to_vec()))),
+        );
+        assert!(r.rewind().is_err());
+    }
+
+    #[test]
     fn gzip_input_is_auto_detected() {
         use flate2::Compression;
         use flate2::write::GzEncoder;
@@ -402,6 +467,42 @@ mod tests {
             enc.finish().unwrap();
         }
         let mut r = FastqReader::open(tmp.path()).unwrap();
+        let rec = r.next_record().unwrap().unwrap();
+        assert_eq!(rec.id, "r1");
+        assert_eq!(rec.seq, b"ACGT");
+    }
+
+    #[test]
+    fn push_front_records_are_returned_before_stream() {
+        let f = write_temp("@r3\nAAAA\n+\nIIII\n");
+        let mut r = FastqReader::open(f.path()).unwrap();
+        let r1 =
+            FastqRecord { id: "r1".into(), seq: b"CCCC".to_vec(), qual: Some(b"IIII".to_vec()) };
+        let r2 =
+            FastqRecord { id: "r2".into(), seq: b"GGGG".to_vec(), qual: Some(b"IIII".to_vec()) };
+        // Push so that r1 comes out first, then r2, then the stream's r3.
+        r.push_front(r2);
+        r.push_front(r1);
+        assert_eq!(r.next_record().unwrap().unwrap().id, "r1");
+        assert_eq!(r.next_record().unwrap().unwrap().id, "r2");
+        assert_eq!(r.next_record().unwrap().unwrap().id, "r3");
+        assert!(r.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn from_bufread_reads_gzip_stream_without_a_path() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        let mut bytes: Vec<u8> = Vec::new();
+        {
+            let mut enc = GzEncoder::new(&mut bytes, Compression::default());
+            enc.write_all(b"@r1\nACGT\n+\nIIII\n").unwrap();
+            enc.finish().unwrap();
+        }
+        // niffler decodes the gzip; from_bufread wraps the decoded stream.
+        let (decoded, _fmt) = niffler::get_reader(Box::new(std::io::Cursor::new(bytes))).unwrap();
+        let mut r =
+            FastqReader::from_bufread("<test>".to_string(), Box::new(BufReader::new(decoded)));
         let rec = r.next_record().unwrap().unwrap();
         assert_eq!(rec.id, "r1");
         assert_eq!(rec.seq, b"ACGT");
