@@ -114,7 +114,7 @@ fn run_rust(out_prefix: &Path) {
     let allele_refs: Vec<AlleleRef> = consensus
         .iter()
         .zip(&comments)
-        .map(|(seq, comment)| AlleleRef::new(seq.clone(), comment.as_deref()))
+        .map(|(seq, comment)| AlleleRef::new(std::sync::Arc::from(seq.clone()), comment.as_deref()))
         .collect();
     let allele_cnt = names.len();
 

@@ -99,6 +99,7 @@ use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 /// `SeqSet`'s default `hitLenRequired` (`SeqSet.hpp:764`), used by
 /// [`RefKmerFilter::from_reference_fasta`] since it mirrors a plain
@@ -376,7 +377,7 @@ impl FlatKmerIndex {
     /// running [`KmerIndex::build_index_from_read`] over `seqs` in 0-based
     /// load order (`id` = index), byte-for-byte (see type docs for the
     /// ordering proof).
-    fn build(seqs: &[Vec<u8>], kmer_length: usize) -> Self {
+    fn build<S: AsRef<[u8]> + Sync>(seqs: &[S], kmer_length: usize) -> Self {
         // 1. Emit every (code, idx, offset) tuple, in parallel per sequence,
         //    via the SAME shared emitter the sequential build uses.
         let mut tuples: Vec<(u64, IndexT, IndexT)> = seqs
@@ -389,7 +390,7 @@ impl FlatKmerIndex {
                 #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
                 let id = seq_idx as i32;
                 let mut local: Vec<(u64, IndexT, IndexT)> = Vec::new();
-                for_each_kmer(seq, id, kmer_length, 0, &mut |code, idx, offset| {
+                for_each_kmer(seq.as_ref(), id, kmer_length, 0, &mut |code, idx, offset| {
                     local.push((code, idx, offset));
                 });
                 local.into_iter()
@@ -479,7 +480,12 @@ pub struct RefKmerFilter {
     /// k-mer length without re-reading the source FASTA (mirrors
     /// `SeqSet::UpdateKmerLength` re-iterating `seqs[i].consensus`,
     /// `SeqSet.hpp:2847-2857`).
-    seqs: Vec<Vec<u8>>,
+    ///
+    /// Stored as `Arc<[u8]>` so the genotype/analyze load path can SHARE one
+    /// copy of each allele's bytes with `genotyper::AlleleRef::consensus`
+    /// (built from the same `Arc`s) rather than materializing a second full
+    /// copy of the reference (~77 MB on the genomic HLA reference).
+    seqs: Vec<Arc<[u8]>>,
     /// `SeqSet::hitLenRequired` (`SeqSet.hpp:223`), used by
     /// [`RefKmerFilter::has_hit_in_set`]'s bucket-count gate. Fixed at the
     /// `SeqSet(kmerLength)` constructor default (`SeqSet.hpp:764`); see
@@ -524,7 +530,7 @@ impl RefKmerFilter {
             .with_context(|| format!("reading reference FASTA {}", path.display()))?;
 
         let mut seq_names = Vec::new();
-        let mut seqs: Vec<Vec<u8>> = Vec::new();
+        let mut seqs: Vec<Arc<[u8]>> = Vec::new();
 
         for record in parse_fasta(&text) {
             let seq_idx = seq_names.len();
@@ -534,7 +540,7 @@ impl RefKmerFilter {
                 format!("reference FASTA {} has more than i32::MAX sequences", path.display())
             })?;
             seq_names.push(record.id);
-            seqs.push(record.seq.into_bytes());
+            seqs.push(Arc::from(record.seq.into_bytes()));
         }
 
         // Build the flat k-mer index in parallel over all sequences (byte-
@@ -552,6 +558,51 @@ impl RefKmerFilter {
             hit_len_required: DEFAULT_HIT_LEN_REQUIRED,
             ref_seq_similarity: DEFAULT_REF_SEQ_SIMILARITY,
         })
+    }
+
+    /// Builds a filter directly from already-loaded, deduplicated allele
+    /// sequences, SHARING their `Arc<[u8]>` byte buffers with the caller
+    /// (e.g. `genotyper::AlleleRef::consensus`) rather than re-reading the
+    /// reference from a file into a second copy. Equivalent in every observable
+    /// way to [`Self::from_reference_fasta`] over the same sequences in the same
+    /// order (the k-mer index build is identical); it just avoids the scratch
+    /// FASTA round-trip and the duplicate reference copy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `kmer_length < 1` (same precondition as
+    /// [`Self::from_reference_fasta`]), or if `seq_names.len() != seqs.len()`.
+    /// Unlike [`Self::from_reference_fasta`] -- which builds `seq_names`/`seqs`
+    /// together in one loop -- these two `Vec`s arrive independently, and the
+    /// filter's accessors index them in lockstep (`seq_count`/`seq_name` off
+    /// `seq_names`, the k-mer index/`seq_consensus` off `seqs`), so a length
+    /// mismatch would silently produce an inconsistent filter and risk a later
+    /// out-of-bounds panic. Reject it up front.
+    #[must_use]
+    pub fn from_consensus(
+        seq_names: Vec<String>,
+        seqs: Vec<Arc<[u8]>>,
+        kmer_length: usize,
+    ) -> Self {
+        assert!(kmer_length >= 1, "kmer_length must be >= 1, got {kmer_length}");
+        assert_eq!(
+            seq_names.len(),
+            seqs.len(),
+            "seq_names ({}) and seqs ({}) must have equal length",
+            seq_names.len(),
+            seqs.len()
+        );
+        let seq_index = FlatKmerIndex::build(&seqs, kmer_length);
+        let seq_count = seq_names.len();
+        Self {
+            seq_index,
+            kmer_length,
+            seq_count,
+            seq_names,
+            seqs,
+            hit_len_required: DEFAULT_HIT_LEN_REQUIRED,
+            ref_seq_similarity: DEFAULT_REF_SEQ_SIMILARITY,
+        }
     }
 
     /// The k-mer length every reference sequence was indexed at.
@@ -619,7 +670,7 @@ impl RefKmerFilter {
     /// for exactly the same purpose.
     #[must_use]
     pub fn seq_consensus(&self, idx: usize) -> &[u8] {
-        &self.seqs[idx]
+        &self.seqs[idx][..]
     }
 
     /// Ported EXACTLY from `SeqSet::InferKmerLength` (`SeqSet.hpp:2830-2845`):
@@ -1662,6 +1713,17 @@ mod tests {
         }
         f.flush().unwrap();
         f
+    }
+
+    #[test]
+    #[should_panic(expected = "must have equal length")]
+    fn from_consensus_rejects_mismatched_name_and_seq_counts() {
+        // Two names but only one sequence: the filter's accessors index
+        // `seq_names` and `seqs` in lockstep, so an unequal-length pair would
+        // produce an inconsistent filter -- the constructor must reject it.
+        let names = vec!["A*01:01".to_string(), "B*07:02".to_string()];
+        let seqs: Vec<Arc<[u8]>> = vec![Arc::from(b"ACGTACGTA".to_vec())];
+        let _ = RefKmerFilter::from_consensus(names, seqs, 9);
     }
 
     #[test]
