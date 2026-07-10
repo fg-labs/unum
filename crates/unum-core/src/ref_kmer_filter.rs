@@ -96,7 +96,6 @@ use crate::overlap::{self, OverlapHit};
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -324,7 +323,11 @@ pub struct Scratch {
     overlap_hits: Vec<OverlapHit>,
     /// Reused `(tag, seqIdx) -> count` bucket map for `has_hit_in_set`'s
     /// add02ca touched-buckets bucket sort (see that function's doc comment).
-    buckets: HashMap<(i8, u32), u32>,
+    /// Keyed with [`FxHashMap`] (not std SipHash): this map is populated and
+    /// scanned once per read end on the hot `get_hits_from_read` path, and
+    /// [`select_best_bucket`] sorts the keys before scanning, so the hasher
+    /// choice cannot affect which bucket is selected (byte-identical output).
+    buckets: FxHashMap<(i8, u32), u32>,
     /// Per-thread memoization cache for the DP alignment path
     /// (`global_alignment`). `assign_reads_parallel`'s `map_init` gives one
     /// `Scratch` -- hence one `DpCache` -- per rayon worker, which is the
@@ -1093,7 +1096,13 @@ impl RefKmerFilter {
                     } else {
                         match_cnt += 2 * kmer_length_i32;
 
-                        let align = if is_ref {
+                        // Only the (match, mismatch, indel) tally of this gap's
+                        // alignment is consumed, so use the stats-only aligner
+                        // that avoids allocating an `align` Vec per call (this
+                        // is the hot ~90%-of-wall path). Byte-identical to
+                        // `get_align_stats(&global_alignment_cached(..).align,
+                        // false, ..)` -- see `global_alignment_cached_stats`.
+                        let (m, mm, ind) = if is_ref {
                             let seq_slice = seq_gap_slice(
                                 &self.seqs[overlaps[i].seq_idx as usize],
                                 prev.b + kmer_length_i32,
@@ -1104,7 +1113,7 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment_cached(
+                            crate::align_algo::global_alignment_cached_stats(
                                 seq_slice,
                                 read_slice,
                                 crate::align_algo::DEFAULT_BAND,
@@ -1132,17 +1141,19 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment_pos_weight(&weights, read_slice)
+                            let align = crate::align_algo::global_alignment_pos_weight(
+                                &weights, read_slice,
+                            );
+                            let (mut m, mut mm, mut ind) = (0, 0, 0);
+                            crate::align_algo::get_align_stats(
+                                &align.align,
+                                false,
+                                &mut m,
+                                &mut mm,
+                                &mut ind,
+                            );
+                            (m, mm, ind)
                         };
-
-                        let (mut m, mut mm, mut ind) = (0, 0, 0);
-                        crate::align_algo::get_align_stats(
-                            &align.align,
-                            false,
-                            &mut m,
-                            &mut mm,
-                            &mut ind,
-                        );
                         match_cnt += 2 * m;
                         mismatch_cnt += mm;
                         indel_cnt += ind;
@@ -1178,7 +1189,10 @@ impl RefKmerFilter {
                     } else {
                         match_cnt += 2 * kmer_length_i32;
 
-                        let align = if is_ref {
+                        // Stats-only aligner (allocation-free hot path); see the
+                        // colinear-gap call site above and
+                        // `global_alignment_cached_stats` for byte-identity.
+                        let (m, mm, ind) = if is_ref {
                             let seq_slice = seq_gap_slice(
                                 &self.seqs[overlaps[i].seq_idx as usize],
                                 prev.b + kmer_length_i32,
@@ -1189,7 +1203,7 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment_cached(
+                            crate::align_algo::global_alignment_cached_stats(
                                 seq_slice,
                                 read_slice,
                                 crate::align_algo::DEFAULT_BAND,
@@ -1207,17 +1221,19 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment_pos_weight(&weights, read_slice)
+                            let align = crate::align_algo::global_alignment_pos_weight(
+                                &weights, read_slice,
+                            );
+                            let (mut m, mut mm, mut ind) = (0, 0, 0);
+                            crate::align_algo::get_align_stats(
+                                &align.align,
+                                false,
+                                &mut m,
+                                &mut mm,
+                                &mut ind,
+                            );
+                            (m, mm, ind)
                         };
-
-                        let (mut m, mut mm, mut ind) = (0, 0, 0);
-                        crate::align_algo::get_align_stats(
-                            &align.align,
-                            false,
-                            &mut m,
-                            &mut mm,
-                            &mut ind,
-                        );
                         match_cnt += 2 * m;
                         mismatch_cnt += mm;
                         indel_cnt += ind;
@@ -1459,7 +1475,7 @@ impl RefKmerFilter {
 /// every one of those `2 * seqCnt` slots regardless of how many of them are
 /// actually non-empty; a read only ever touches `hitCnt` distinct buckets
 /// (`hitCnt` = the number of k-mer hits collected, independent of `seqCnt`),
-/// so tracking only the touched buckets in a `HashMap` and scanning those is
+/// so tracking only the touched buckets in an `FxHashMap` and scanning those is
 /// `O(hitCnt)` instead of `O(seqCnt)`.
 ///
 /// # Ordering and tie-breaking are what make this byte-identical to stock
@@ -1495,7 +1511,7 @@ impl RefKmerFilter {
 /// identity is computed and returned here anyway, both because it costs
 /// nothing extra and because a future `GetOverlapsFromHits` port will need
 /// it.)
-fn select_best_bucket(buckets: &HashMap<(i8, u32), u32>) -> Option<((i8, u32), u32)> {
+fn select_best_bucket(buckets: &FxHashMap<(i8, u32), u32>) -> Option<((i8, u32), u32)> {
     let mut keys: Vec<(i8, u32)> = buckets.keys().copied().collect();
     keys.sort_unstable();
 
