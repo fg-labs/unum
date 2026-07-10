@@ -1072,7 +1072,13 @@ impl RefKmerFilter {
                     } else {
                         match_cnt += 2 * kmer_length_i32;
 
-                        let align = if is_ref {
+                        // Only the (match, mismatch, indel) tally of this gap's
+                        // alignment is consumed, so use the stats-only aligner
+                        // that avoids allocating an `align` Vec per call (this
+                        // is the hot ~90%-of-wall path). Byte-identical to
+                        // `get_align_stats(&global_alignment_cached(..).align,
+                        // false, ..)` -- see `global_alignment_cached_stats`.
+                        let (m, mm, ind) = if is_ref {
                             let seq_slice = seq_gap_slice(
                                 &self.seqs[overlaps[i].seq_idx as usize],
                                 prev.b + kmer_length_i32,
@@ -1083,7 +1089,7 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment_cached(
+                            crate::align_algo::global_alignment_cached_stats(
                                 seq_slice,
                                 read_slice,
                                 crate::align_algo::DEFAULT_BAND,
@@ -1111,17 +1117,19 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment_pos_weight(&weights, read_slice)
+                            let align = crate::align_algo::global_alignment_pos_weight(
+                                &weights, read_slice,
+                            );
+                            let (mut m, mut mm, mut ind) = (0, 0, 0);
+                            crate::align_algo::get_align_stats(
+                                &align.align,
+                                false,
+                                &mut m,
+                                &mut mm,
+                                &mut ind,
+                            );
+                            (m, mm, ind)
                         };
-
-                        let (mut m, mut mm, mut ind) = (0, 0, 0);
-                        crate::align_algo::get_align_stats(
-                            &align.align,
-                            false,
-                            &mut m,
-                            &mut mm,
-                            &mut ind,
-                        );
                         match_cnt += 2 * m;
                         mismatch_cnt += mm;
                         indel_cnt += ind;
@@ -1157,7 +1165,10 @@ impl RefKmerFilter {
                     } else {
                         match_cnt += 2 * kmer_length_i32;
 
-                        let align = if is_ref {
+                        // Stats-only aligner (allocation-free hot path); see the
+                        // colinear-gap call site above and
+                        // `global_alignment_cached_stats` for byte-identity.
+                        let (m, mm, ind) = if is_ref {
                             let seq_slice = seq_gap_slice(
                                 &self.seqs[overlaps[i].seq_idx as usize],
                                 prev.b + kmer_length_i32,
@@ -1168,7 +1179,7 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment_cached(
+                            crate::align_algo::global_alignment_cached_stats(
                                 seq_slice,
                                 read_slice,
                                 crate::align_algo::DEFAULT_BAND,
@@ -1186,17 +1197,19 @@ impl RefKmerFilter {
                                 prev.a + kmer_length_i32,
                                 cur.a - (prev.a + kmer_length_i32),
                             );
-                            crate::align_algo::global_alignment_pos_weight(&weights, read_slice)
+                            let align = crate::align_algo::global_alignment_pos_weight(
+                                &weights, read_slice,
+                            );
+                            let (mut m, mut mm, mut ind) = (0, 0, 0);
+                            crate::align_algo::get_align_stats(
+                                &align.align,
+                                false,
+                                &mut m,
+                                &mut mm,
+                                &mut ind,
+                            );
+                            (m, mm, ind)
                         };
-
-                        let (mut m, mut mm, mut ind) = (0, 0, 0);
-                        crate::align_algo::get_align_stats(
-                            &align.align,
-                            false,
-                            &mut m,
-                            &mut mm,
-                            &mut ind,
-                        );
                         match_cnt += 2 * m;
                         mismatch_cnt += mm;
                         indel_cnt += ind;

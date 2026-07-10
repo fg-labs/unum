@@ -672,6 +672,102 @@ pub fn global_alignment_cached(t: &[u8], p: &[u8], band: i32, cache: &mut DpCach
     global_alignment_impl(t, p, band, Some(cache))
 }
 
+/// Match/mismatch/indel tallies from an [`AlignResult::align`], as
+/// [`get_align_stats`] with `update = false` would produce them.
+pub type AlignStats = (i32, i32, i32);
+
+/// Stats-only counterpart of [`global_alignment_cached`]: returns the
+/// `(match, mismatch, indel)` tallies for the alignment of `(t, p)` WITHOUT
+/// materializing an owned `align` `Vec` for the caller.
+///
+/// # Why this exists (the allocation it removes)
+///
+/// The read->allele overlap phase (~90% of genotype wall time) calls the
+/// aligner ~5x10^8 times per sample, and every hot-path caller
+/// ([`RefKmerFilter::get_overlaps_from_read`]) does exactly one thing with the
+/// result: feed `align` to [`get_align_stats`] for the `(match, mismatch,
+/// indel)` counts, then drop it. Going through [`global_alignment_cached`] there
+/// allocates a fresh `Vec<i8>` on *every* call -- a diagonal-fast-path build, a
+/// single/empty-case `vec!`, or (on the ~99% DP cache hit) a `clone()` of the
+/// stored alignment -- purely to be counted and discarded. This entry point
+/// computes the same tallies in place: the fast paths tally directly, and the
+/// cache hit tallies the borrowed stored slice with no clone. Only a genuine
+/// cache miss (~0.8% of calls) still runs the DP, and it moves (not clones) the
+/// alignment into the cache.
+///
+/// # Byte-identical invariant
+///
+/// This MUST resolve `(t, p)` through the exact same branch ladder as
+/// [`global_alignment_impl`] (empty/single -> diagonal fast path -> cache
+/// hit/miss) so the tallies equal
+/// `get_align_stats(&global_alignment_cached(t, p, band, cache).align, false, ..)`
+/// for every input. The DP core, the cache, and the tally rule are all shared
+/// (`global_alignment_dp`, `cache`, [`get_align_stats`]); only the branch
+/// predicates (`diagonal_fast_path_applies`, the length checks, `chars_match`)
+/// are mirrored here, and they mirror [`global_alignment_impl`]'s verbatim.
+///
+/// [`RefKmerFilter::get_overlaps_from_read`]: crate::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read
+#[must_use]
+pub fn global_alignment_cached_stats(t: &[u8], p: &[u8], band: i32, cache: &mut DpCache) -> AlignStats {
+    let lent = t.len();
+    let lenp = p.len();
+
+    // Empty: global_alignment_impl returns an empty `align` -> all-zero tallies.
+    if lent == 0 || lenp == 0 {
+        return (0, 0, 0);
+    }
+    // Single base: one EDIT_MATCH or one EDIT_MISMATCH.
+    if lent == 1 && lenp == 1 {
+        return if chars_match(t[0], p[0]) { (1, 0, 0) } else { (0, 1, 0) };
+    }
+    // Diagonal fast path: equal-length, <=2 mismatches, pure diagonal (no
+    // indels). Mirrors the impl's `for k in 0..lent { push MATCH/MISMATCH }`.
+    if diagonal_fast_path_applies(t, p) {
+        let mut match_cnt = 0;
+        let mut mismatch_cnt = 0;
+        for k in 0..lent {
+            if chars_match(t[k], p[k]) {
+                match_cnt += 1;
+            } else {
+                mismatch_cnt += 1;
+            }
+        }
+        return (match_cnt, mismatch_cnt, 0);
+    }
+
+    // Cache path: tally the stored alignment in place. A hit borrows it (no
+    // clone); a miss runs the DP once, tallies the owned result, then moves it
+    // into the cache under the (already-built) key.
+    cache.build_key(t, p);
+    if let Some((_, align)) = cache.cache.get(&cache.dp_key) {
+        return stats_of(align);
+    }
+    let result = global_alignment_dp(t, p, band);
+    let stats = stats_of(&result.align);
+    cache.cache.insert(cache.dp_key.clone(), (result.score, result.align));
+    stats
+}
+
+/// `(match, mismatch, indel)` tally of an `align[]` op sequence -- the
+/// allocation-free core shared by [`get_align_stats`] (`update = false`) and
+/// [`global_alignment_cached_stats`].
+#[inline]
+fn stats_of(align: &[i8]) -> AlignStats {
+    let mut match_cnt = 0;
+    let mut mismatch_cnt = 0;
+    let mut indel_cnt = 0;
+    for &op in align {
+        if op == EDIT_MATCH {
+            match_cnt += 1;
+        } else if op == EDIT_MISMATCH {
+            mismatch_cnt += 1;
+        } else {
+            indel_cnt += 1;
+        }
+    }
+    (match_cnt, mismatch_cnt, indel_cnt)
+}
+
 /// Shared implementation for [`global_alignment`] (no cache) and
 /// [`global_alignment_cached`] (per-thread memoized DP path). See those
 /// functions' docs.
@@ -961,20 +1057,15 @@ pub fn get_align_stats(
     mismatch_cnt: &mut i32,
     indel_cnt: &mut i32,
 ) {
-    if !update {
-        *match_cnt = 0;
-        *mismatch_cnt = 0;
-        *indel_cnt = 0;
-    }
-
-    for &op in align {
-        if op == EDIT_MATCH {
-            *match_cnt += 1;
-        } else if op == EDIT_MISMATCH {
-            *mismatch_cnt += 1;
-        } else {
-            *indel_cnt += 1;
-        }
+    let (m, mm, ind) = stats_of(align);
+    if update {
+        *match_cnt += m;
+        *mismatch_cnt += mm;
+        *indel_cnt += ind;
+    } else {
+        *match_cnt = m;
+        *mismatch_cnt = mm;
+        *indel_cnt = ind;
     }
 }
 
