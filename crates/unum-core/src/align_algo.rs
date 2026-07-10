@@ -1765,12 +1765,13 @@ mod tests {
 
             // Track how many cases fell through the fast paths into the DP so
             // the fuzz corpus is demonstrably exercising the refactored kernel.
+            // The non-trivial cases are exactly those the production ladder does
+            // NOT short-circuit, so reuse its own predicates rather than
+            // re-deriving the diagonal condition here.
             let is_trivial = lent == 0
                 || lenp == 0
                 || (lent == 1 && lenp == 1)
-                || (lent == lenp
-                    && (0..lent).filter(|&k| !chars_match(t[k], p[k])).count()
-                        <= DIAGONAL_FAST_PATH_MAX_MISMATCHES as usize);
+                || diagonal_fast_path_applies(&t, &p);
             if !is_trivial {
                 dp_cases += 1;
             }
