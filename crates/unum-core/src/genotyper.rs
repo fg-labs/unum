@@ -844,14 +844,21 @@ fn nuc_to_num(c: u8) -> Option<usize> {
 /// `reverse_complement_into`/`complement_base` -- see this module's doc
 /// comment for why 5c stays additive-only on top of Phase 3/3b/4 files.
 fn complement_base(c: u8) -> u8 {
-    match c {
-        b'A' => b'T',
-        b'C' => b'G',
-        b'G' => b'C',
-        b'T' => b'A',
-        _ => b'N',
-    }
+    COMPLEMENT_LUT[c as usize]
 }
+
+/// 256-entry complement lookup table: `A<->T`, `C<->G`, and every other byte
+/// (including `N`) maps to `N` -- byte-identical to the former `match`
+/// (`A/C/G/T` mapped, `_ => b'N'`), but a single indexed load instead of a
+/// branch chain on the per-base reverse-complement hot path.
+const COMPLEMENT_LUT: [u8; 256] = {
+    let mut lut = [b'N'; 256];
+    lut[b'A' as usize] = b'T';
+    lut[b'C' as usize] = b'G';
+    lut[b'G' as usize] = b'C';
+    lut[b'T' as usize] = b'A';
+    lut
+};
 
 /// Returns the reverse complement of `seq` (see [`complement_base`]).
 fn reverse_complement(seq: &[u8]) -> Vec<u8> {
@@ -1098,8 +1105,16 @@ pub fn assign_read(
         }
     });
 
-    let rc: Vec<u8> = reverse_complement(read);
-    let r: &[u8] = if sorted_overlaps[0].strand == -1 { &rc } else { read };
+    // Only the reverse-strand branch reads the reverse complement, so compute
+    // it lazily: forward-best reads (`strand != -1`) skip the allocation and the
+    // per-base complement entirely. Byte-identical -- `rc` is otherwise unused.
+    let rc: Vec<u8>;
+    let r: &[u8] = if sorted_overlaps[0].strand == -1 {
+        rc = reverse_complement(read);
+        &rc
+    } else {
+        read
+    };
 
     let mut extended_overlaps: Vec<ExtendedOverlap> = Vec::new();
     let mut only_consider_clip = false;
