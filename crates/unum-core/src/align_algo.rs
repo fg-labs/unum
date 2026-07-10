@@ -344,6 +344,13 @@ pub struct DpCache {
     /// Reused scratch buffer for the lookup key; cleared and rebuilt each call
     /// so a cache hit performs no heap allocation.
     dp_key: Vec<u8>,
+    /// Reused DP score matrices (`m`/`e`/`f`) for the cache-miss path, so a miss
+    /// re-zeroes and refills these buffers rather than allocating three fresh
+    /// `(lenp+1)*(lent+1)` matrices per DP. Held here (per-worker, alongside the
+    /// cache they back) since the miss path always has a `&mut DpCache`.
+    dp_m: Matrix,
+    dp_e: Matrix,
+    dp_f: Matrix,
 }
 
 impl DpCache {
@@ -375,6 +382,7 @@ impl DpCache {
 /// columns, mirroring the C++ side's manual `m[i * bmax + j]` flat indexing
 /// exactly (kept flat, not `Vec<Vec<i32>>`, so index arithmetic is visibly
 /// identical to the ported C++ at every call site).
+#[derive(Debug, Default, Clone)]
 struct Matrix {
     data: Vec<i32>,
     bmax: usize,
@@ -383,6 +391,18 @@ struct Matrix {
 impl Matrix {
     fn new(lenp: usize, lent: usize) -> Self {
         Self { data: vec![0; (lenp + 1) * (lent + 1)], bmax: lent + 1 }
+    }
+
+    /// Reuse this matrix's backing allocation for a fresh `(lenp, lent)` DP,
+    /// re-zeroing exactly `(lenp + 1) * (lent + 1)` cells. Byte-identical to a
+    /// freshly [`Matrix::new`]-allocated matrix (same all-zero contents, same
+    /// `bmax`), but reuses the heap buffer across calls instead of allocating
+    /// and freeing a new one every DP -- the DP runs on the ~0.8% cache-miss
+    /// path ~4x10^6 times per sample, each allocating three of these.
+    fn reset(&mut self, lenp: usize, lent: usize) {
+        self.data.clear();
+        self.data.resize((lenp + 1) * (lent + 1), 0);
+        self.bmax = lent + 1;
     }
 
     #[inline]
@@ -742,7 +762,7 @@ pub fn global_alignment_cached_stats(t: &[u8], p: &[u8], band: i32, cache: &mut 
     if let Some((_, align)) = cache.cache.get(&cache.dp_key) {
         return stats_of(align);
     }
-    let result = global_alignment_dp(t, p, band);
+    let result = global_alignment_dp_with(t, p, band, &mut cache.dp_m, &mut cache.dp_e, &mut cache.dp_f);
     let stats = stats_of(&result.align);
     cache.cache.insert(cache.dp_key.clone(), (result.score, result.align));
     stats
@@ -839,8 +859,9 @@ fn global_alignment_impl(
         return AlignResult { score: *score, align: align.clone() };
     }
 
-    // Cache miss: run the DP, then store it under the (already-built) key.
-    let result = global_alignment_dp(t, p, band);
+    // Cache miss: run the DP (reusing the per-worker score matrices), then
+    // store it under the (already-built) key.
+    let result = global_alignment_dp_with(t, p, band, &mut cache.dp_m, &mut cache.dp_e, &mut cache.dp_f);
     cache.cache.insert(cache.dp_key.clone(), (result.score, result.align.clone()));
     result
 }
@@ -850,8 +871,29 @@ fn global_alignment_impl(
 /// Callers must have already handled the empty/single-base/diagonal fast paths;
 /// this is the expensive path the memoization cache wraps.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 fn global_alignment_dp(t: &[u8], p: &[u8], band: i32) -> AlignResult {
+    // Uncached callers ([`global_alignment`], the no-cache branch): allocate
+    // three throwaway matrices for this one DP.
+    let (mut m, mut e, mut f) = (Matrix::default(), Matrix::default(), Matrix::default());
+    global_alignment_dp_with(t, p, band, &mut m, &mut e, &mut f)
+}
+
+/// [`global_alignment_dp`] over caller-provided score matrices, so the
+/// cache-miss hot path can reuse three per-worker [`Matrix`] buffers (held in
+/// [`DpCache`]) instead of allocating and freeing three per call. `m`/`e`/`f`
+/// are [`Matrix::reset`]-re-zeroed here before use, so their prior contents and
+/// capacities are irrelevant on entry -- the result is byte-identical to
+/// running on freshly allocated matrices.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+fn global_alignment_dp_with(
+    t: &[u8],
+    p: &[u8],
+    band: i32,
+    m: &mut Matrix,
+    e: &mut Matrix,
+    f: &mut Matrix,
+) -> AlignResult {
     let lent = t.len();
     let lenp = p.len();
 
@@ -867,9 +909,9 @@ fn global_alignment_dp(t: &[u8], p: &[u8], band: i32) -> AlignResult {
 
     let neg_inf = (lent_i32 + 1) * (lenp_i32 + 1) * SCORE_GAPOPEN;
 
-    let mut m = Matrix::new(lenp, lent);
-    let mut e = Matrix::new(lenp, lent);
-    let mut f = Matrix::new(lenp, lent);
+    m.reset(lenp, lent);
+    e.reset(lenp, lent);
+    f.reset(lenp, lent);
 
     m.set(0, 0, 0);
     e.set(0, 0, 0);
