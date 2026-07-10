@@ -362,16 +362,20 @@ impl DpCache {
 
     /// Rebuild [`Self::dp_key`] in place for the pair `(t, p)`.
     ///
-    /// Layout: `lent` (8 bytes LE) `lenp` (8 bytes LE) `t[..]` `0xFF` `p[..]`.
-    /// Including both explicit lengths AND a `0xFF` separator between the two
-    /// sequences guarantees the byte string uniquely determines `(t, p)`:
-    /// `t` and `p` are both plain uppercase nucleotide/`N` bytes (never `0xFF`),
-    /// and the leading lengths pin the split even if `0xFF` ever appeared, so
-    /// no two distinct `(t, p)` pairs can collide onto one key.
+    /// Layout: `t[..]` `0xFF` `p[..]`. `t` and `p` are both plain uppercase
+    /// nucleotide/`N` bytes (`A`/`C`/`G`/`T`/`N`), so neither ever contains
+    /// `0xFF`; the single `0xFF` separator therefore uniquely determines the
+    /// `t`/`p` split, and the byte string uniquely determines `(t, p)` -- no two
+    /// distinct pairs can collide onto one key.
     fn build_key(&mut self, t: &[u8], p: &[u8]) {
+        // Layout: `t[..] 0xFF p[..]`. `t` and `p` are plain uppercase
+        // nucleotide/`N` bytes (`A`/`C`/`G`/`T`/`N`), so neither ever contains
+        // `0xFF`; the single `0xFF` separator therefore uniquely determines the
+        // `t`/`p` split (`"AC" 0xFF "GT"` can never collide with `"ACG" 0xFF
+        // "T"`), and no explicit length prefix is needed. Dropping the former
+        // 16-byte `(lent, lenp)` prefix shaves 16 bytes off the memcpy AND the
+        // hash on every lookup (the ~99%-hit path runs this once per call).
         self.dp_key.clear();
-        self.dp_key.extend_from_slice(&(t.len() as u64).to_le_bytes());
-        self.dp_key.extend_from_slice(&(p.len() as u64).to_le_bytes());
         self.dp_key.extend_from_slice(t);
         self.dp_key.push(0xFF);
         self.dp_key.extend_from_slice(p);
