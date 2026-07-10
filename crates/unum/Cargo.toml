@@ -1,6 +1,6 @@
 [package]
 name = "unum"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,7 +17,7 @@ anyhow = "1"
 rayon = "1"
 mimalloc = "0.1"
 tempfile = "3"
-unum-core = { path = "../unum-core", version = "0.1.0" }
+unum-core = { path = "../unum-core", version = "0.1.1" }
 
 [dev-dependencies]
 rust-htslib = "1.0.1"
