@@ -253,7 +253,12 @@ fn binary_search_lis(top: &[usize], size: usize, val_a: i32, hits: &[Pair]) -> i
 /// # Panics
 ///
 /// Panics if `hits` is empty.
-fn longest_increasing_subsequence(hits: &[Pair], lis: &mut Vec<Pair>) -> usize {
+fn longest_increasing_subsequence(
+    hits: &[Pair],
+    lis: &mut Vec<Pair>,
+    top: &mut Vec<usize>,
+    link: &mut Vec<i32>,
+) -> usize {
     lis.clear();
     let size = hits.len();
     assert!(size > 0, "longest_increasing_subsequence: hits must be non-empty");
@@ -268,8 +273,14 @@ fn longest_increasing_subsequence(hits: &[Pair], lis: &mut Vec<Pair>) -> usize {
     // `top[k]`: index (into `hits`) of the hit with the smallest `.a` among
     // all increasing subsequences of length `k + 1` found so far.
     // `link[i]`: predecessor index (into `hits`) for backtrace, or `-1`.
-    let mut top: Vec<usize> = vec![0; size];
-    let mut link: Vec<i32> = vec![-1; size];
+    // Caller-owned scratch, re-zeroed to length `size` here (equivalent to a
+    // fresh `vec![0; size]` / `vec![-1; size]`), so the per-call allocation is
+    // pooled across the many LIS calls one `get_overlaps_from_hits_with_coords`
+    // makes rather than reallocated each time.
+    top.clear();
+    top.resize(size, 0);
+    link.clear();
+    link.resize(size, -1);
 
     top[0] = 0;
     link[0] = -1;
@@ -547,6 +558,11 @@ pub(crate) fn get_overlaps_from_hits_with_coords(
     let mut hit_coord_diff: Vec<Triple> = Vec::new();
     let mut concordant_hit_coord: Vec<Pair> = Vec::new();
     let mut hit_coord_lis: Vec<Pair> = Vec::new();
+    // Reused across every `longest_increasing_subsequence` call below (one per
+    // candidate segment) so LIS's `top`/`link` working arrays are pooled, not
+    // reallocated per call.
+    let mut lis_top: Vec<usize> = Vec::new();
+    let mut lis_link: Vec<i32> = Vec::new();
     let mut final_hits: Vec<OverlapHit> = Vec::new();
 
     let mut i = 0usize;
@@ -719,7 +735,12 @@ pub(crate) fn get_overlaps_from_hits_with_coords(
             let lis_size = if concordant_hit_coord.is_empty() {
                 0
             } else {
-                longest_increasing_subsequence(&concordant_hit_coord, &mut hit_coord_lis)
+                longest_increasing_subsequence(
+                    &concordant_hit_coord,
+                    &mut hit_coord_lis,
+                    &mut lis_top,
+                    &mut lis_link,
+                )
             };
             #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
             let lis_size_i32 = lis_size as i32;
@@ -862,7 +883,8 @@ mod tests {
         // whole sequence, unchanged.
         let hits = vec![Pair { a: 0, b: 100 }, Pair { a: 9, b: 109 }, Pair { a: 18, b: 118 }];
         let mut lis = Vec::new();
-        let len = longest_increasing_subsequence(&hits, &mut lis);
+        let (mut top, mut link) = (Vec::new(), Vec::new());
+        let len = longest_increasing_subsequence(&hits, &mut lis, &mut top, &mut link);
         assert_eq!(len, 3);
         assert_eq!(lis, hits);
     }
@@ -879,7 +901,8 @@ mod tests {
             Pair { a: 18, b: 118 },
         ];
         let mut lis = Vec::new();
-        let len = longest_increasing_subsequence(&hits, &mut lis);
+        let (mut top, mut link) = (Vec::new(), Vec::new());
+        let len = longest_increasing_subsequence(&hits, &mut lis, &mut top, &mut link);
         assert_eq!(len, 3);
         assert_eq!(lis, vec![Pair { a: 0, b: 100 }, Pair { a: 9, b: 109 }, Pair { a: 18, b: 118 }]);
     }
@@ -896,7 +919,8 @@ mod tests {
             Pair { a: 18, b: 118 },
         ];
         let mut lis = Vec::new();
-        let len = longest_increasing_subsequence(&hits, &mut lis);
+        let (mut top, mut link) = (Vec::new(), Vec::new());
+        let len = longest_increasing_subsequence(&hits, &mut lis, &mut top, &mut link);
         // Full increasing run is length 4 (0,5,9,18 strictly increasing in
         // a); after same-b dedup, the second b=109 entry (a=9) is dropped
         // since it immediately follows another b=109 entry in LIS order.
@@ -910,7 +934,8 @@ mod tests {
     fn lis_single_element() {
         let hits = vec![Pair { a: 5, b: 50 }];
         let mut lis = Vec::new();
-        let len = longest_increasing_subsequence(&hits, &mut lis);
+        let (mut top, mut link) = (Vec::new(), Vec::new());
+        let len = longest_increasing_subsequence(&hits, &mut lis, &mut top, &mut link);
         assert_eq!(len, 1);
         assert_eq!(lis, hits);
     }
