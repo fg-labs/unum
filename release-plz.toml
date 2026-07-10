@@ -16,11 +16,9 @@ git_tag_name = "v{{ version }}"
 git_release_name = "v{{ version }}"
 git_release_enable = true
 
-# disable running `cargo-semver-checks` until after the first release
-# TODO: flip to `true` once v0.1.0 is published — semver-check is the
-# main reason we chose release-plz, and skipping it forever defeats the
-# point.
-semver_check = false
+# run cargo-semver-checks on release PRs; v0.1.0 is published on crates.io and
+# serves as the comparison baseline.
+semver_check = true
 
 # `unum` owns the single shared `v{{ version }}` tag + GitHub release configured
 # at the [workspace] level; disable unum-core's own tag/release so the two crates
