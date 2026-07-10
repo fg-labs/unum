@@ -291,7 +291,7 @@ fn longest_increasing_subsequence(
         let tag: i32 = if hits[top[ret - 1]].a <= hits[record_i].a {
             i32::try_from(ret - 1).unwrap_or(i32::MAX)
         } else {
-            binary_search_lis(&top, ret, hits[record_i].a, hits)
+            binary_search_lis(top, ret, hits[record_i].a, hits)
         };
 
         if tag == -1 {

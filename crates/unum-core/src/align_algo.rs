@@ -732,7 +732,12 @@ pub type AlignStats = (i32, i32, i32);
 ///
 /// [`RefKmerFilter::get_overlaps_from_read`]: crate::ref_kmer_filter::RefKmerFilter::get_overlaps_from_read
 #[must_use]
-pub fn global_alignment_cached_stats(t: &[u8], p: &[u8], band: i32, cache: &mut DpCache) -> AlignStats {
+pub fn global_alignment_cached_stats(
+    t: &[u8],
+    p: &[u8],
+    band: i32,
+    cache: &mut DpCache,
+) -> AlignStats {
     let lent = t.len();
     let lenp = p.len();
 
@@ -766,7 +771,8 @@ pub fn global_alignment_cached_stats(t: &[u8], p: &[u8], band: i32, cache: &mut 
     if let Some((_, align)) = cache.cache.get(&cache.dp_key) {
         return stats_of(align);
     }
-    let result = global_alignment_dp_with(t, p, band, &mut cache.dp_m, &mut cache.dp_e, &mut cache.dp_f);
+    let result =
+        global_alignment_dp_with(t, p, band, &mut cache.dp_m, &mut cache.dp_e, &mut cache.dp_f);
     let stats = stats_of(&result.align);
     cache.cache.insert(cache.dp_key.clone(), (result.score, result.align));
     stats
@@ -865,7 +871,8 @@ fn global_alignment_impl(
 
     // Cache miss: run the DP (reusing the per-worker score matrices), then
     // store it under the (already-built) key.
-    let result = global_alignment_dp_with(t, p, band, &mut cache.dp_m, &mut cache.dp_e, &mut cache.dp_f);
+    let result =
+        global_alignment_dp_with(t, p, band, &mut cache.dp_m, &mut cache.dp_e, &mut cache.dp_f);
     cache.cache.insert(cache.dp_key.clone(), (result.score, result.align.clone()));
     result
 }
@@ -1547,6 +1554,7 @@ mod tests {
 
         /// Uniform-ish integer in `[0, n)` for small `n` (fuzz corpus, not
         /// cryptographic uniformity).
+        #[allow(clippy::cast_possible_truncation)]
         fn below(&mut self, n: usize) -> usize {
             (self.next_u64() % (n as u64)) as usize
         }
@@ -1565,6 +1573,7 @@ mod tests {
     /// full public ladder (empty / single-base / diagonal fast path / banded
     /// DP) and the exact 3-state traceback, so it must be byte-identical to
     /// `global_alignment` for every input.
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn naive_global_alignment(t: &[u8], p: &[u8], band: i32) -> AlignResult {
         let lent = t.len();
         let lenp = p.len();
@@ -1731,6 +1740,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
     fn fuzz_dp_matches_naive_reference() {
         let mut rng = Lcg::new(0x0DDC_0FFE_E123_4567);
         let mut dp_cases = 0u32; // count inputs that actually exercised the banded DP
