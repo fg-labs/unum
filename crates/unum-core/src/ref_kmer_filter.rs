@@ -91,7 +91,7 @@
 //! `get_overlaps_from_hits`/LIS port for `has_hit_in_set`'s gate 2.
 
 use crate::kmer::KmerCode;
-use crate::kmer_index::{IndexInfo, IndexT, for_each_kmer};
+use crate::kmer_index::{IndexInfo, for_each_kmer};
 use crate::overlap::{self, OverlapHit};
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -353,14 +353,17 @@ pub struct Scratch {
 /// ascending, then `offset` ascending within an `id`) order, because
 /// `from_reference_fasta`/`update_kmer_length` process sequence `id` 0 fully
 /// before `id` 1 and roll offsets left->right within a sequence. This flat
-/// build collects `(code, idx, offset)` tuples from every sequence via the
-/// SAME shared [`for_each_kmer`] emitter, then `par_sort_unstable`s them
-/// lexicographically. Since a given forward code occurs at most once per
-/// `(seq, offset)`, the `(code, idx, offset)` tuples are all-distinct within
-/// a code, so the sort order is unambiguous and reproduces the sequential
-/// push order EXACTLY. Grouping consecutive-equal-`code` runs then yields,
-/// for each code, a `positions` slice byte-identical to the old per-code
-/// `Vec`.
+/// build reproduces that layout with a two-pass counting sort over the SAME
+/// shared [`for_each_kmer`] emitter (see [`build`](Self::build)): pass 1
+/// counts each forward code's emissions, a prefix sum over the codes in
+/// ascending-`code` order assigns each its contiguous window in `positions`,
+/// and pass 2 re-runs the emitter in `id`-ascending load order and scatters
+/// each entry to its code's running cursor. Because the emitter visits seqs
+/// by ascending `id` and offsets left->right, each code's window fills in
+/// (idx, offset)-ascending order -- identical to sorting the (all-distinct)
+/// `(code, idx, offset)` tuples, since a given forward code occurs at most
+/// once per `(seq, offset)`. So for each code the `positions` slice is
+/// byte-identical to the old per-code `Vec`.
 #[derive(Debug, Default)]
 struct FlatKmerIndex {
     /// Forward `KmerCode::get_code()` -> `(start, len)` window into
@@ -372,58 +375,79 @@ struct FlatKmerIndex {
 }
 
 impl FlatKmerIndex {
-    /// Builds the flat index over `seqs` at k-mer length `kmer_length`, in
-    /// parallel across the current rayon thread pool. Mirrors the result of
-    /// running [`KmerIndex::build_index_from_read`] over `seqs` in 0-based
-    /// load order (`id` = index), byte-for-byte (see type docs for the
-    /// ordering proof).
+    /// Builds the flat index over `seqs` at k-mer length `kmer_length`.
+    /// Mirrors the result of running [`KmerIndex::build_index_from_read`] over
+    /// `seqs` in 0-based load order (`id` = index), byte-for-byte (see type
+    /// docs for the ordering proof).
+    ///
+    /// Uses a two-pass counting sort rather than materializing-then-sorting a
+    /// `(code, idx, offset)` tuple buffer: that transient was 16 B/window and
+    /// coexisted with the 8 B/window `positions` result, ~doubling the build
+    /// peak (issue #62). The counting sort never allocates it -- its only
+    /// transient beyond the final result is an 8 B/distinct-code key vector.
     fn build<S: AsRef<[u8]> + Sync>(seqs: &[S], kmer_length: usize) -> Self {
-        // 1. Emit every (code, idx, offset) tuple, in parallel per sequence,
-        //    via the SAME shared emitter the sequential build uses.
-        let mut tuples: Vec<(u64, IndexT, IndexT)> = seqs
+        // Pass 1: count emissions per forward code, in parallel per sequence,
+        // via the SAME shared emitter the sequential build uses -- so these
+        // per-code counts equal the pass-2 write counts exactly. Values are
+        // `(0, count)`; the `.0` slot becomes the window start after layout.
+        let mut map: FxHashMap<u64, (u32, u32)> = seqs
             .par_iter()
-            .enumerate()
-            .flat_map_iter(|(seq_idx, seq)| {
-                // `seqs.len()` is bounded by an `i32` at load time
-                // (`from_reference_fasta`'s `i32::try_from`), so this cannot
-                // truncate; matches the `id: i32` the sequential build uses.
-                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-                let id = seq_idx as i32;
-                let mut local: Vec<(u64, IndexT, IndexT)> = Vec::new();
-                for_each_kmer(seq.as_ref(), id, kmer_length, 0, &mut |code, idx, offset| {
-                    local.push((code, idx, offset));
+            .fold(FxHashMap::default, |mut acc, seq| {
+                for_each_kmer(seq.as_ref(), 0, kmer_length, 0, &mut |code, _idx, _offset| {
+                    acc.entry(code).or_insert((0, 0)).1 += 1;
                 });
-                local.into_iter()
+                acc
             })
-            .collect();
+            .reduce(FxHashMap::default, |a, b| {
+                // Merge the smaller map into the larger to minimize rehashing.
+                let (mut a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+                for (code, (_, n)) in b {
+                    a.entry(code).or_insert((0, 0)).1 += n;
+                }
+                a
+            });
 
-        // 2. Sort lexicographically by (code, idx, offset). This is exactly
-        //    the sequential push order per code (see type docs). Unstable is
-        //    safe because the tuples are all-distinct within a code.
-        tuples.par_sort_unstable();
+        // Lay out codes in ascending-`code` order -- the exact order the old
+        // `par_sort_unstable` produced -- so `positions` is byte-identical.
+        // Prefix-sum each code's count into its window start, recorded in the
+        // value's `.0` slot (used as a live write cursor during pass 2).
+        let mut codes: Vec<u64> = map.keys().copied().collect();
+        codes.par_sort_unstable();
+        let mut running: u32 = 0;
+        for &code in &codes {
+            let slot = map.get_mut(&code).expect("code inserted in pass 1");
+            slot.0 = running;
+            // Total entries are bounded by the reference size (well under
+            // u32::MAX for any real T1K reference), so this cannot overflow.
+            running += slot.1;
+        }
+        let total = running as usize;
+        drop(codes);
 
-        // 3. Group consecutive-equal-`code` runs into `(start, len)` windows
-        //    and flatten into the contiguous `positions` blob.
-        let mut map: FxHashMap<u64, (u32, u32)> = FxHashMap::default();
-        let mut positions: Vec<IndexInfo> = Vec::with_capacity(tuples.len());
-        let mut run_start = 0usize;
-        while run_start < tuples.len() {
-            let code = tuples[run_start].0;
-            let mut run_end = run_start + 1;
-            while run_end < tuples.len() && tuples[run_end].0 == code {
-                run_end += 1;
-            }
-            // Positions indices fit in u32: total entries are bounded by the
-            // reference size (well under u32::MAX for any real T1K reference).
-            #[allow(clippy::cast_possible_truncation)]
-            let start = positions.len() as u32;
-            #[allow(clippy::cast_possible_truncation)]
-            let len = (run_end - run_start) as u32;
-            map.insert(code, (start, len));
-            for &(_, idx, offset) in &tuples[run_start..run_end] {
-                positions.push(IndexInfo { idx, offset });
-            }
-            run_start = run_end;
+        // Pass 2 (sequential, to preserve the global (idx, offset) visitation
+        // order per code): re-run the SAME emitter over `seqs` in load order
+        // and scatter each `IndexInfo` to its code's live cursor (`map[code].0`),
+        // advancing the cursor. Because the emitter visits seqs in `id`-ascending
+        // order and offsets left->right, each code's slice fills in
+        // (idx, offset)-ascending order -- byte-identical to the old sort.
+        let mut positions: Vec<IndexInfo> = vec![IndexInfo { idx: 0, offset: 0 }; total];
+        for (seq_idx, seq) in seqs.iter().enumerate() {
+            // `seqs.len()` is bounded by an `i32` at load time
+            // (`from_reference_fasta`'s `i32::try_from`), so this cannot
+            // truncate; matches the `id: i32` the sequential build uses.
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            let id = seq_idx as i32;
+            for_each_kmer(seq.as_ref(), id, kmer_length, 0, &mut |code, idx, offset| {
+                let cursor = &mut map.get_mut(&code).expect("code counted in pass 1").0;
+                positions[*cursor as usize] = IndexInfo { idx, offset };
+                *cursor += 1;
+            });
+        }
+
+        // Rewind each cursor back to its window start: after pass 2,
+        // `map[code].0 == start + len`, so subtract `len` to restore `start`.
+        for slot in map.values_mut() {
+            slot.0 -= slot.1;
         }
 
         Self { map, positions }
@@ -1703,6 +1727,7 @@ fn parse_fasta(text: &str) -> Vec<FastaRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kmer_index::IndexT;
     use std::io::Write;
 
     fn write_fasta(records: &[(&str, &str)]) -> tempfile::NamedTempFile {
@@ -1713,6 +1738,74 @@ mod tests {
         }
         f.flush().unwrap();
         f
+    }
+
+    /// Reference (pre-issue-#62) sort-based `FlatKmerIndex` build: materialize
+    /// every `(code, idx, offset)` tuple, `par_sort_unstable`, then group
+    /// consecutive-equal-`code` runs into `(start, len)` windows. Kept only to
+    /// prove the counting-sort [`FlatKmerIndex::build`] is bit-identical to it.
+    fn build_via_sort<S: AsRef<[u8]> + Sync>(seqs: &[S], kmer_length: usize) -> FlatKmerIndex {
+        let mut tuples: Vec<(u64, IndexT, IndexT)> = seqs
+            .par_iter()
+            .enumerate()
+            .flat_map_iter(|(seq_idx, seq)| {
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                let id = seq_idx as i32;
+                let mut local: Vec<(u64, IndexT, IndexT)> = Vec::new();
+                for_each_kmer(seq.as_ref(), id, kmer_length, 0, &mut |code, idx, offset| {
+                    local.push((code, idx, offset));
+                });
+                local.into_iter()
+            })
+            .collect();
+        tuples.par_sort_unstable();
+
+        let mut map: FxHashMap<u64, (u32, u32)> = FxHashMap::default();
+        let mut positions: Vec<IndexInfo> = Vec::with_capacity(tuples.len());
+        let mut run_start = 0usize;
+        while run_start < tuples.len() {
+            let code = tuples[run_start].0;
+            let mut run_end = run_start + 1;
+            while run_end < tuples.len() && tuples[run_end].0 == code {
+                run_end += 1;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let start = positions.len() as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let len = (run_end - run_start) as u32;
+            map.insert(code, (start, len));
+            for &(_, idx, offset) in &tuples[run_start..run_end] {
+                positions.push(IndexInfo { idx, offset });
+            }
+            run_start = run_end;
+        }
+        FlatKmerIndex { map, positions }
+    }
+
+    #[test]
+    fn counting_sort_build_is_byte_identical_to_sort_build() {
+        // Byte-identity is the load-bearing property of issue #62: the counting
+        // sort must produce the exact same `positions` blob and `map` as the
+        // old materialize-and-sort build. Exercise sequence sets that stress the
+        // ordering proof: repeated k-mers within/across seqs (multi-entry codes),
+        // reverse-complement palindromes, homopolymers, and varied lengths.
+        let cases: Vec<(Vec<&str>, usize)> = vec![
+            (vec!["ACGTACGTACGTACGT", "TTTTACGTAAAACGGG", "ACGTACGTACGTACGT"], 9),
+            (vec!["AAAAAAAAAAAAAAAAAAAA", "ACACACACACACACAC", "GATTACAGATTACAGATTACA"], 11),
+            (vec!["ACGTGGTACCAACGTTGGTACCACGT", "N", "ACGTNNNNACGTACGT"], 15),
+            (vec!["ACGTACGT"], 9), // len 8 < k: emitter yields nothing (empty index)
+        ];
+        for (records, k) in cases {
+            let seqs: Vec<Arc<[u8]>> =
+                records.iter().map(|s| Arc::from(s.as_bytes().to_vec())).collect();
+            let counting = FlatKmerIndex::build(&seqs, k);
+            let sorted = build_via_sort(&seqs, k);
+            assert_eq!(
+                counting.positions, sorted.positions,
+                "positions blob diverged for {records:?} k={k}"
+            );
+            assert_eq!(counting.map, sorted.map, "map diverged for {records:?} k={k}");
+        }
     }
 
     #[test]
