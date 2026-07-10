@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#
+# Pre-push hook: run the same format and lint gates CI runs, before the push
+# leaves your machine. These use the exact `cargo ci-*` aliases from
+# `.cargo/config.toml` under the toolchain pinned in `rust-toolchain.toml`, so
+# a green run here means a green `format` and `lint` job in CI.
+#
+# Enable once per clone (see the "Development" section of the README):
+#
+#     git config core.hooksPath .githooks
+#
+# Bypass for a single push (e.g. a docs-only or WIP branch):
+#
+#     git push --no-verify
+#
+set -euo pipefail
+
+echo "pre-push: cargo ci-fmt"
+cargo ci-fmt
+
+echo "pre-push: cargo ci-lint"
+cargo ci-lint
+
+echo "pre-push: format and lint gates passed"

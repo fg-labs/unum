@@ -33,6 +33,24 @@ cargo build
 
 The build is pure Rust with no C++ dependency — `unum-core` and `unum` never invoke a C++ compiler.
 
+## Development
+
+CI runs three gates, each wired to a `cargo` alias in [`.cargo/config.toml`](.cargo/config.toml) so they are identical locally and in CI (both under the toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml)):
+
+```bash
+cargo ci-fmt    # rustfmt --check
+cargo ci-lint   # clippy with -D warnings and the project's pedantic set
+cargo ci-test   # the nextest suite
+```
+
+To catch `format`/`lint` failures before they reach CI, enable the shared pre-push hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This runs `cargo ci-fmt` and `cargo ci-lint` on every `git push` (bypass a single push with `git push --no-verify`). Worktrees inherit the setting, but `core.hooksPath` is per-clone, so run the command again in any freshly cloned checkout.
+
 ## Divergences from T1K
 
 `unum` began as a byte-identical port but intentionally diverges from T1K where it can be more correct or robust. Each divergence — what changed, why, and the T1K source it departs from — is recorded in [docs/DIVERGENCES.md](docs/DIVERGENCES.md).
