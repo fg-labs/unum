@@ -977,23 +977,44 @@ fn global_alignment_dp_with(
             m.set(i, j, neg_inf);
         }
 
+        // Slice the current (`i`) and previous (`i - 1`) rows of each matrix out
+        // of the flat buffers ONCE per row, so the inner cell loop indexes into
+        // fixed-window row slices -- the row base `i * bmax` is hoisted out of the
+        // per-cell arithmetic instead of recomputing `i * bmax + j` and
+        // bounds-checking against the entire matrix on every `Matrix::get`/`set`.
+        // Each row slice is trimmed to `..=end_u`; since `j` ranges over
+        // `start_u..=end_u` (and `j - 1 >= 0` because `start_u >= 1`), both `j`
+        // and `j - 1` are provably in-bounds of a length-`(end_u + 1)` slice, so
+        // LLVM can elide the slice bounds checks. This is byte-identical to the
+        // `Matrix::get`/`set` form: identical reads, identical `max` chains,
+        // identical writes -- only the access mechanics change.
+        let bmax = m.bmax;
+        let row = i * bmax;
+        // `e` and `m` need both the previous and current row; `f` needs only the
+        // current row (its recurrence reads `f[i][j-1]`, never row `i - 1`).
+        let (e_head, e_tail) = e.data.split_at_mut(row);
+        let e_prev = &e_head[row - bmax..][..=end_u];
+        let e_cur = &mut e_tail[..=end_u];
+        let (m_head, m_tail) = m.data.split_at_mut(row);
+        let m_prev = &m_head[row - bmax..][..=end_u];
+        let m_cur = &mut m_tail[..=end_u];
+        let f_cur = &mut f.data[row..][..=end_u];
+
         for j in start_u..=end_u {
-            // for e (insertion to the text)
-            let mut score = e.get(i - 1, j) + SCORE_GAPEXTEND;
-            score = score.max(m.get(i - 1, j) + SCORE_GAPOPEN + SCORE_GAPEXTEND);
-            e.set(i, j, score);
+            // for e (insertion to the text): max(e[i-1][j]+GE, m[i-1][j]+GO+GE)
+            let e_ij =
+                (e_prev[j] + SCORE_GAPEXTEND).max(m_prev[j] + SCORE_GAPOPEN + SCORE_GAPEXTEND);
+            e_cur[j] = e_ij;
 
-            // for f (deletion to the text)
-            let mut score = f.get(i, j - 1) + SCORE_GAPEXTEND;
-            score = score.max(m.get(i, j - 1) + SCORE_GAPOPEN + SCORE_GAPEXTEND);
-            f.set(i, j, score);
+            // for f (deletion to the text): max(f[i][j-1]+GE, m[i][j-1]+GO+GE)
+            let f_ij = (f_cur[j - 1] + SCORE_GAPEXTEND)
+                .max(m_cur[j - 1] + SCORE_GAPOPEN + SCORE_GAPEXTEND);
+            f_cur[j] = f_ij;
 
-            // for m
-            let mut score = m.get(i - 1, j - 1)
+            // for m: max(m[i-1][j-1]+match, e[i][j], f[i][j])
+            let diag = m_prev[j - 1]
                 + if chars_match(t[j - 1], p[i - 1]) { SCORE_MATCH } else { SCORE_MISMATCH };
-            score = score.max(e.get(i, j));
-            score = score.max(f.get(i, j));
-            m.set(i, j, score);
+            m_cur[j] = diag.max(e_ij).max(f_ij);
         }
     }
 
@@ -1486,5 +1507,272 @@ mod tests {
         let (mut m, mut mm, mut i) = (1, 2, 3);
         get_align_stats(&[], true, &mut m, &mut mm, &mut i);
         assert_eq!((m, mm, i), (1, 2, 3));
+    }
+
+    // ---- randomized differential fuzz of the banded-DP fill refactor ------
+    //
+    // The `global_alignment_dp_with` inner fill loop was refactored from
+    // per-cell `Matrix::get`/`set` (flat `i * bmax + j` indexing) to per-row
+    // slice windows. These tests fuzz that refactor against (a) an independent
+    // naive reference DP written below with plain 2D `Vec` matrices (byte-for-
+    // byte comparison of both `score` AND `align[]`), and (b) a self-consistency
+    // check that the returned `align[]` op sequence, scored under the affine
+    // scoring scheme, reproduces the returned `score`. All randomness is a
+    // deterministic seeded LCG -- no system randomness or time.
+
+    /// Deterministic 64-bit linear-congruential PRNG (SplitMix-style output
+    /// mix) so the fuzz corpus is reproducible across runs and machines.
+    struct Lcg {
+        state: u64,
+    }
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            // LCG step (Numerical Recipes constants), then a SplitMix64 output
+            // finalizer for well-distributed low bits.
+            self.state = self.state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let mut z = self.state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+
+        /// Uniform-ish integer in `[0, n)` for small `n` (fuzz corpus, not
+        /// cryptographic uniformity).
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u64() % (n as u64)) as usize
+        }
+    }
+
+    /// A random `ACGTN` byte string of length `len`.
+    fn random_seq(rng: &mut Lcg, len: usize) -> Vec<u8> {
+        const ALPHABET: &[u8; 5] = b"ACGTN";
+        (0..len).map(|_| ALPHABET[rng.below(ALPHABET.len())]).collect()
+    }
+
+    /// Independent naive reference for [`global_alignment`]: the SAME banded
+    /// affine-gap Gotoh DP, but transcribed with plain `Vec<Vec<i32>>` matrices
+    /// and per-cell `[i][j]` indexing (no flat buffer, no row slicing) so it is
+    /// a genuine cross-check of the sliced fill's matrix values. Reproduces the
+    /// full public ladder (empty / single-base / diagonal fast path / banded
+    /// DP) and the exact 3-state traceback, so it must be byte-identical to
+    /// `global_alignment` for every input.
+    fn naive_global_alignment(t: &[u8], p: &[u8], band: i32) -> AlignResult {
+        let lent = t.len();
+        let lenp = p.len();
+
+        if lent == 0 || lenp == 0 {
+            return AlignResult { score: 0, align: Vec::new() };
+        }
+        if lent == 1 && lenp == 1 {
+            return if chars_match(t[0], p[0]) {
+                AlignResult { score: SCORE_MATCH, align: vec![EDIT_MATCH] }
+            } else {
+                AlignResult { score: SCORE_MISMATCH, align: vec![EDIT_MISMATCH] }
+            };
+        }
+        // Diagonal fast path (equal length, <= 2 mismatches).
+        if lent == lenp {
+            let mismatches = (0..lent).filter(|&k| !chars_match(t[k], p[k])).count();
+            if mismatches <= DIAGONAL_FAST_PATH_MAX_MISMATCHES as usize {
+                let mut align = Vec::with_capacity(lent);
+                let mut score = 0;
+                for k in 0..lent {
+                    if chars_match(t[k], p[k]) {
+                        align.push(EDIT_MATCH);
+                        score += SCORE_MATCH;
+                    } else {
+                        align.push(EDIT_MISMATCH);
+                        score += SCORE_MISMATCH;
+                    }
+                }
+                return AlignResult { score, align };
+            }
+        }
+
+        let (lent_i32, lenp_i32) = (lent as i32, lenp as i32);
+        let (left_band, right_band) = if lent_i32 > lenp_i32 {
+            (band, band + (lent_i32 - lenp_i32))
+        } else if lent_i32 < lenp_i32 {
+            (band + (lenp_i32 - lent_i32), band)
+        } else {
+            (band, band)
+        };
+        let neg_inf = (lent_i32 + 1) * (lenp_i32 + 1) * SCORE_GAPOPEN;
+
+        let mut m = vec![vec![0i32; lent + 1]; lenp + 1];
+        let mut e = vec![vec![0i32; lent + 1]; lenp + 1];
+        let mut f = vec![vec![0i32; lent + 1]; lenp + 1];
+
+        for i in 1..=lenp {
+            let i_i32 = i as i32;
+            e[i][0] = SCORE_GAPOPEN + i_i32 * SCORE_GAPEXTEND;
+            f[i][0] = SCORE_GAPOPEN + i_i32 * SCORE_GAPOPEN;
+            m[i][0] = SCORE_GAPOPEN + i_i32 * SCORE_GAPOPEN;
+        }
+        let row0_e_sentinel = SCORE_GAPOPEN + (lenp_i32 + 1) * SCORE_GAPOPEN;
+        for j in 1..=lent {
+            let j_i32 = j as i32;
+            f[0][j] = SCORE_GAPOPEN + j_i32 * SCORE_GAPEXTEND;
+            e[0][j] = row0_e_sentinel;
+            m[0][j] = SCORE_GAPOPEN + j_i32 * SCORE_GAPOPEN;
+        }
+
+        for i in 1..=lenp {
+            let i_i32 = i as i32;
+            let start = if i_i32 - left_band < 1 { 1 } else { i_i32 - left_band };
+            let end = if i_i32 + right_band > lent_i32 { lent_i32 } else { i_i32 + right_band };
+            let (start_u, end_u) = (start as usize, end as usize);
+
+            if start > 1 {
+                let j = start_u - 1;
+                e[i][j] = neg_inf;
+                f[i][j] = neg_inf;
+                m[i][j] = neg_inf;
+            }
+            if end < lent_i32 {
+                let j = end_u + 1;
+                e[i][j] = neg_inf;
+                f[i][j] = neg_inf;
+                m[i][j] = neg_inf;
+            }
+
+            for j in start_u..=end_u {
+                let es = (e[i - 1][j] + SCORE_GAPEXTEND)
+                    .max(m[i - 1][j] + SCORE_GAPOPEN + SCORE_GAPEXTEND);
+                e[i][j] = es;
+                let fs = (f[i][j - 1] + SCORE_GAPEXTEND)
+                    .max(m[i][j - 1] + SCORE_GAPOPEN + SCORE_GAPEXTEND);
+                f[i][j] = fs;
+                let diag = m[i - 1][j - 1]
+                    + if chars_match(t[j - 1], p[i - 1]) { SCORE_MATCH } else { SCORE_MISMATCH };
+                m[i][j] = diag.max(es).max(fs);
+            }
+        }
+
+        let ret = m[lenp][lent];
+
+        let mut tagi = lenp;
+        let mut tagj = lent;
+        let mut mat: u8 = 0;
+        let mut align: Vec<i8> = Vec::new();
+        while tagi > 0 || tagj > 0 {
+            match mat {
+                0 => {
+                    let max = e[tagi][tagj];
+                    let mut a = EDIT_INSERT;
+                    if f[tagi][tagj] >= max {
+                        a = EDIT_DELETE;
+                    }
+                    if tagi > 0
+                        && tagj > 0
+                        && m[tagi - 1][tagj - 1]
+                            + if chars_match(t[tagj - 1], p[tagi - 1]) {
+                                SCORE_MATCH
+                            } else {
+                                SCORE_MISMATCH
+                            }
+                            == m[tagi][tagj]
+                    {
+                        a = if chars_match(t[tagj - 1], p[tagi - 1]) {
+                            EDIT_MATCH
+                        } else {
+                            EDIT_MISMATCH
+                        };
+                    }
+                    if a == EDIT_MATCH || a == EDIT_MISMATCH {
+                        align.push(a);
+                        tagi -= 1;
+                        tagj -= 1;
+                    } else if a == EDIT_INSERT {
+                        mat = 1;
+                    } else if a == EDIT_DELETE {
+                        mat = 2;
+                    }
+                }
+                1 => {
+                    align.push(EDIT_INSERT);
+                    if tagi > 0 {
+                        if m[tagi - 1][tagj] + SCORE_GAPOPEN + SCORE_GAPEXTEND == e[tagi][tagj] {
+                            tagi -= 1;
+                            mat = 0;
+                        } else {
+                            tagi -= 1;
+                        }
+                    } else {
+                        mat = 2;
+                    }
+                }
+                _ => {
+                    align.push(EDIT_DELETE);
+                    if tagj > 0 {
+                        if m[tagi][tagj - 1] + SCORE_GAPOPEN + SCORE_GAPEXTEND == f[tagi][tagj] {
+                            tagj -= 1;
+                            mat = 0;
+                        } else {
+                            tagj -= 1;
+                        }
+                    } else {
+                        mat = 1;
+                    }
+                }
+            }
+        }
+        align.reverse();
+        AlignResult { score: ret, align }
+    }
+
+    #[test]
+    fn fuzz_dp_matches_naive_reference() {
+        let mut rng = Lcg::new(0x0DDC_0FFE_E123_4567);
+        let mut dp_cases = 0u32; // count inputs that actually exercised the banded DP
+        for _ in 0..20_000 {
+            // Bias toward inputs that reach the banded DP: mostly unequal
+            // lengths (or long enough to accumulate >2 mismatches), plus some
+            // equal-length fast-path cases for full-ladder coverage.
+            let lent = rng.below(81); // 0..=80
+            let lenp = rng.below(81);
+            let band = 1 + rng.below(8) as i32; // 1..=8
+            let t = random_seq(&mut rng, lent);
+            let p = random_seq(&mut rng, lenp);
+
+            let got = global_alignment(&t, &p, band);
+            let want = naive_global_alignment(&t, &p, band);
+            assert_eq!(got.score, want.score, "score mismatch for t={t:?} p={p:?} band={band}");
+            assert_eq!(got.align, want.align, "align mismatch for t={t:?} p={p:?} band={band}");
+
+            // Cached and stats-only entry points share the refactored DP; they
+            // must agree with the direct call.
+            let mut cache = DpCache::new();
+            let cached = global_alignment_cached(&t, &p, band, &mut cache);
+            assert_eq!(cached, got, "cached != uncached for t={t:?} p={p:?} band={band}");
+            let (m0, mm0, i0) = {
+                let (mut a, mut b, mut c) = (0, 0, 0);
+                get_align_stats(&got.align, false, &mut a, &mut b, &mut c);
+                (a, b, c)
+            };
+            let mut cache2 = DpCache::new();
+            let stats = global_alignment_cached_stats(&t, &p, band, &mut cache2);
+            assert_eq!(stats, (m0, mm0, i0), "stats mismatch for t={t:?} p={p:?} band={band}");
+
+            // Track how many cases fell through the fast paths into the DP so
+            // the fuzz corpus is demonstrably exercising the refactored kernel.
+            let is_trivial = lent == 0
+                || lenp == 0
+                || (lent == 1 && lenp == 1)
+                || (lent == lenp
+                    && (0..lent).filter(|&k| !chars_match(t[k], p[k])).count()
+                        <= DIAGONAL_FAST_PATH_MAX_MISMATCHES as usize);
+            if !is_trivial {
+                dp_cases += 1;
+            }
+        }
+        // Guard against the corpus silently degenerating into only fast-path
+        // inputs (which would leave the refactored DP fill untested).
+        assert!(dp_cases > 1000, "fuzz corpus exercised the banded DP only {dp_cases} times");
     }
 }
