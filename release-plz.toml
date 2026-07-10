@@ -5,12 +5,30 @@ changelog_config = "cliff.toml"
 dependencies_update = true
 # labels for the release PR
 pr_labels = ["release"]
-# let release-plz create the GitHub release + tag during `release-plz release`
-# (the publish job runs `command: release`); crates.io auth is OIDC Trusted
-# Publishing, so no CARGO_REGISTRY_TOKEN is needed.
+
+# The two workspace crates (`unum-core`, `unum`) release in lockstep at the same
+# version, so emit a single shared `v{{ version }}` git tag + GitHub release
+# rather than release-plz's per-crate `{{ package }}-v{{ version }}` default (the
+# default for workspaces with more than one public package). Only `unum` (the
+# last crate published, in dependency order) owns the shared tag/release; see the
+# per-package sections below.
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
 git_release_enable = true
-# disable running `cargo-semver-checks` until after the first release
-# TODO: flip to `true` once v0.1.0 is published — semver-check is the
-# main reason we chose release-plz, and skipping it forever defeats the
-# point.
-semver_check = false
+
+# run cargo-semver-checks on release PRs; v0.1.0 is published on crates.io and
+# serves as the comparison baseline.
+semver_check = true
+
+# `unum` owns the single shared `v{{ version }}` tag + GitHub release configured
+# at the [workspace] level; disable unum-core's own tag/release so the two crates
+# don't collide trying to create the same ref during `release-plz release`.
+[[package]]
+name = "unum-core"
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "unum"
+git_tag_enable = true
+git_release_enable = true
