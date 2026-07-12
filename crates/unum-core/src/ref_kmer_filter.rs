@@ -249,6 +249,29 @@ fn pack_hit_key(h: &Hit) -> u128 {
         | u128::from(h.offset)
 }
 
+/// Packs the bucket branch's `(tag, idx)` sort key into a single `u64`,
+/// monotonic in `(tag, idx)` ascending so a STABLE radix sort on it is
+/// byte-identical to a stable `sort_by_key(|h| (i8::from(h.strand == 1),
+/// h.idx))`.
+///
+/// Layout: `tag` in bit 32, `idx` in bits `0..=31`. `tag` is `1` for a
+/// forward hit (`strand == 1`) and `0` otherwise, matching the bucket branch's
+/// `i8::from(h.strand == 1)` (which also collapses every non-`1` strand -- in
+/// practice only `-1` -- to tag `0`). Because `tag ∈ {0, 1}` occupies a bit
+/// above the 32-bit `idx`, `bucket(a) < bucket(b)` iff `(tag_a, idx_a) <
+/// (tag_b, idx_b)` lexicographically, and `bucket(a) == bucket(b)` iff both
+/// fields tie -- exactly the key ordering the bucket branch sorts on. Unlike
+/// [`pack_hit_key`] this key is deliberately NOT unique (hits sharing a
+/// `(tag, idx)` bucket collide), so byte-identity relies on the sort being
+/// STABLE within a bucket; `radsort` (LSD radix) is a stable sort, so it
+/// preserves each bucket's original encounter order. Verified by
+/// `bucket_hit_key_matches_stable_tag_idx_order`.
+#[must_use]
+#[inline]
+fn bucket_hit_key(h: &Hit) -> u64 {
+    (u64::from(h.strand == 1) << 32) | u64::from(h.idx)
+}
+
 /// Ported from `SeqSet::SortHits` (`SeqSet.hpp:1558-1590`): reorders `hits`
 /// in place, either via a `(strand-tag, seqIdx)` bucket sort (STABLE within
 /// each bucket, since it's built by a single forward `PushBack` pass per
@@ -270,10 +293,10 @@ fn pack_hit_key(h: &Hit) -> u128 {
 /// concatenates them back together in bucket order, preserving each hit's
 /// ORIGINAL relative order within its bucket (`PushBack` in encounter
 /// order, `SeqSet.hpp:1570-1574`). This port reproduces that exact
-/// semantics via a stable sort keyed only on `(tag, idx)` (Rust's
-/// `sort_by_key`/`sort_by` are documented stable), NOT [`hit_less_than`]
-/// (which would additionally reorder within a bucket by `readOffset`/
-/// `offset` -- a different, and for this branch WRONG, result).
+/// semantics via a STABLE radix sort ([`radsort`]) on [`bucket_hit_key`]
+/// (an O(n) pass whose unsigned `u64` order is monotonic in `(tag, idx)`),
+/// NOT [`hit_less_than`] (which would additionally reorder within a bucket by
+/// `readOffset`/`offset` -- a different, and for this branch WRONG, result).
 pub(crate) fn sort_hits(hits: &mut [Hit], already_read_order: bool, seq_count: usize) {
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
     let two_seq_count = 2 * seq_count as i64;
@@ -281,8 +304,16 @@ pub(crate) fn sort_hits(hits: &mut [Hit], already_read_order: bool, seq_count: u
         // Bucket sort: stable partition by (tag, idx), tag = (strand==1) as
         // 0/1, buckets visited tag=0 (idx ascending) THEN tag=1 (idx
         // ascending) -- SeqSet.hpp:1577-1583's `for k in 0..=1 { for i in
-        // 0..seqCnt { ... } }` nesting.
-        hits.sort_by_key(|h| (i8::from(h.strand == 1), h.idx));
+        // 0..seqCnt { ... } }` nesting. This branch is the many-hits case
+        // (`hits.len() > 2*seq_count && already_read_order`) and was the hottest
+        // sort (std stable `sort_by_key` -> driftsort, O(n log n)); replaced
+        // with the same O(n) stable radix sort the sibling branch uses, keyed
+        // on `bucket_hit_key` (monotonic in `(tag, idx)`). Byte-identical
+        // because `radsort` is stable, so within-bucket encounter order is
+        // preserved -- see `bucket_hit_key` and the
+        // `sort_hits_bucket_path_preserves_within_bucket_order` /
+        // `bucket_hit_key_matches_stable_tag_idx_order` tests.
+        radsort::sort_by_key(hits, bucket_hit_key);
     } else {
         // `hit_less_than` is a strict total order over every field of `Hit`
         // that participates in equality (strand, idx, read_offset, offset --
@@ -2226,6 +2257,46 @@ mod tests {
         let mut hits = vec![h(0, 0, 30, 1), h(0, 0, 10, 1), h(0, 0, 20, 1)];
         sort_hits(&mut hits, false, 1); // 3 > 2*1 = 2, but already_read_order=false
         assert_eq!(hits, vec![h(0, 0, 10, 1), h(0, 0, 20, 1), h(0, 0, 30, 1)]);
+    }
+
+    #[test]
+    fn bucket_hit_key_matches_stable_tag_idx_order() {
+        // `bucket_hit_key`'s unsigned u64 order must be monotonic in the
+        // bucket branch's `(tag, idx)` key (tag = `strand == 1` as 0/1), and a
+        // STABLE radix sort on it must equal a stable `sort_by_key((tag, idx))`
+        // -- including preserving within-bucket encounter order for hits that
+        // share a `(tag, idx)` bucket (the property that makes the radsort
+        // swap byte-identical to the std stable sort it replaces).
+        let tag = |x: &Hit| i8::from(x.strand == 1);
+        let hits = vec![
+            h(0, 0, 30, 1),        // tag=1 idx=0  (bucket dup A, first)
+            h(0, 0, 10, 1),        // tag=1 idx=0  (bucket dup A, second -> must stay after)
+            h(0, 0, 20, -1),       // tag=0 idx=0  (bucket dup C, first)
+            h(u32::MAX, 5, 0, 1),  // tag=1 idx=u32::MAX (top bucket)
+            h(u32::MAX, 5, 0, -1), // tag=0 idx=u32::MAX
+            h(1, 0, 7, -1),        // tag=0 idx=1  (bucket dup B, first)
+            h(1, 0, 3, -1),        // tag=0 idx=1  (bucket dup B, second)
+            h(0, 9, 0, -1),        // tag=0 idx=0  (bucket dup C, second)
+            h(3, 0, 0, 1),         // tag=1 idx=3
+        ];
+
+        // Monotonicity: bucket(a) < bucket(b) <=> (tag_a, idx_a) < (tag_b, idx_b);
+        // equal keys <=> identical (tag, idx). u32::MAX idx must not bleed into tag.
+        for a in &hits {
+            for b in &hits {
+                let (ka, kb) = (bucket_hit_key(a), bucket_hit_key(b));
+                assert_eq!(ka < kb, (tag(a), a.idx) < (tag(b), b.idx), "{a:?} vs {b:?}");
+                assert_eq!(ka == kb, (tag(a), a.idx) == (tag(b), b.idx), "{a:?} vs {b:?}");
+            }
+        }
+
+        // The production stable radix sort must equal the original stable
+        // `sort_by_key((tag, idx))` this branch replaced -- within-bucket order included.
+        let mut by_radix = hits.clone();
+        radsort::sort_by_key(&mut by_radix, bucket_hit_key);
+        let mut by_stable = hits;
+        by_stable.sort_by_key(|x| (i8::from(x.strand == 1), x.idx));
+        assert_eq!(by_radix, by_stable);
     }
 
     // ---- is_overlap_low_complex (SeqSet::IsOverlapLowComplex) -------------
