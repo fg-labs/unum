@@ -184,35 +184,62 @@ pub(crate) fn overlap_less_than(a: &Overlap, b: &Overlap) -> bool {
     a.seq_end < b.seq_end
 }
 
-/// Ported from `SeqSet::CompSortPairBInc` (`SeqSet.hpp:233-239`): ascending
-/// by `b`, ties broken ascending by `a`. This is a strict total order with no
-/// ties possible for distinct `(a, b)` pairs, and for genuinely equal pairs
-/// any total order agrees -- so this comparator poses no `std::sort`
-/// stability hazard (see module docs on sort-tie handling below for the
-/// comparator that DOES need care).
-// By-reference parameters (rather than by-value, despite `Pair` being
-// `Copy`/8 bytes) are required by `Vec::sort_unstable_by`'s `FnMut(&T, &T)`
-// signature at this function's only call site below.
+/// Packs a [`Pair`]'s sort key -- ascending by `b`, ties broken ascending by
+/// `a` (ported from `SeqSet::CompSortPairBInc`, `SeqSet.hpp:233-239`) -- into a
+/// single `u64` monotonic in that `(b, a)` order, so a `sort_unstable_by_key`
+/// on it runs one integer compare per step instead of the two chained branchy
+/// `i32` compares a `(b, a)` comparator closure would. `flip(x) = (x as u32) ^
+/// 0x8000_0000` maps signed `i32` order onto unsigned `u32` order (negatives
+/// sort below non-negatives). Byte-identical to the `(b, a)` comparator sort it
+/// replaces: the key is unique except for bit-identical `(a, b)` pairs, whose
+/// tie-order is unobservable (swapping two identical pairs changes nothing
+/// downstream), so the sort's small-`n` insertion pass needs no stability
+/// guarantee here. Verified by `pack_pair_b_inc_key_matches_comparator_order`.
+//
+// The `&Pair` parameter (rather than by-value, despite `Pair` being `Copy`/8
+// bytes) is required by `sort_unstable_by_key`'s `FnMut(&T) -> K` signature at
+// this function's only call site below.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn comp_sort_pair_b_inc(p1: &Pair, p2: &Pair) -> std::cmp::Ordering {
-    p1.b.cmp(&p2.b).then_with(|| p1.a.cmp(&p2.a))
+#[inline]
+fn pack_pair_b_inc_key(p: &Pair) -> u64 {
+    // `as u32` is the intended two's-complement reinterpretation; the `^
+    // 0x8000_0000` flip then maps signed order onto unsigned order (matches
+    // `ref_kmer_filter::pack_hit_key`'s idiom).
+    #[allow(clippy::cast_sign_loss)]
+    let b = (p.b as u32) ^ 0x8000_0000;
+    #[allow(clippy::cast_sign_loss)]
+    let a = (p.a as u32) ^ 0x8000_0000;
+    (u64::from(b) << 32) | u64::from(a)
 }
 
-/// Ported from `SeqSet::CompSortHitCoordDiff` (`SeqSet.hpp:266-274`):
-/// ascending by `c` (the coordinate diff), ties broken ascending by `b`, then
-/// ascending by `a`. Like [`comp_sort_pair_b_inc`], this compares every field
-/// of the key down to `a`, so two entries only compare equal if they are
-/// bit-for-bit identical `(a, b, c)` triples -- a strict total order with no
-/// observable ties. `hitCoordDiff` entries are built one per input hit
-/// (`SeqSet.hpp:1339-1346`) and `a`/`b` come directly from that hit's
-/// `(readOffset, seqOffset)`, so two entries CAN be genuinely identical
-/// (e.g. two hits at the same read/seq coordinate from duplicate index
-/// entries) -- in that case `std::sort`'s tie-order is unobservable anyway
-/// (swapping two bit-identical elements changes nothing downstream), so
-/// `sort_unstable_by` is safe here regardless of libstdc++'s introsort tie
-/// behavior.
-fn comp_sort_hit_coord_diff(a: &Triple, b: &Triple) -> std::cmp::Ordering {
-    a.c.cmp(&b.c).then_with(|| a.b.cmp(&b.b)).then_with(|| a.a.cmp(&b.a))
+/// Packs a [`Triple`]'s sort key -- ascending by `c` (the coordinate diff),
+/// ties by `b`, then `a` (ported from `SeqSet::CompSortHitCoordDiff`,
+/// `SeqSet.hpp:266-274`) -- into a single `u128` monotonic in that `(c, b, a)`
+/// order, so a `sort_unstable_by_key` on it runs one integer compare per step
+/// instead of the three chained branchy `i32` compares a `(c, b, a)` comparator
+/// closure would. `flip(x) = (x as u32) ^ 0x8000_0000` maps signed `i32` order
+/// onto unsigned `u32` order. Byte-identical to the `(c, b, a)` comparator sort
+/// it replaces: `hitCoordDiff` entries are built one per input hit
+/// (`SeqSet.hpp:1339-1346`) with `a`/`b` taken directly from that hit's
+/// `(readOffset, seqOffset)`, so two entries CAN be genuinely identical (e.g.
+/// two hits at the same read/seq coordinate from duplicate index entries) --
+/// but the key is unique except for such bit-identical `(a, b, c)` triples,
+/// whose tie-order is unobservable (swapping two identical triples changes
+/// nothing downstream). Verified by
+/// `pack_hit_coord_diff_key_matches_comparator_order`.
+//
+// `&Triple` for the same `FnMut(&T) -> K` reason as [`pack_pair_b_inc_key`].
+#[allow(clippy::trivially_copy_pass_by_ref)]
+#[inline]
+fn pack_hit_coord_diff_key(t: &Triple) -> u128 {
+    // See `pack_pair_b_inc_key` for the `as u32` + flip rationale.
+    #[allow(clippy::cast_sign_loss)]
+    let c = (t.c as u32) ^ 0x8000_0000;
+    #[allow(clippy::cast_sign_loss)]
+    let b = (t.b as u32) ^ 0x8000_0000;
+    #[allow(clippy::cast_sign_loss)]
+    let a = (t.a as u32) ^ 0x8000_0000;
+    (u128::from(c) << 64) | (u128::from(b) << 32) | u128::from(a)
 }
 
 /// Ported from `SeqSet::BinarySearch_LIS` (`SeqSet.hpp:327-348`): returns the
@@ -608,7 +635,7 @@ pub(crate) fn get_overlaps_from_hits_with_coords(
                 c: hit.read_offset - offset_i32,
             });
         }
-        hit_coord_diff.sort_unstable_by(comp_sort_hit_coord_diff);
+        hit_coord_diff.sort_unstable_by_key(pack_hit_coord_diff_key);
 
         // Pick the best concordant hits (SeqSet.hpp:1349-1551).
         let adjust_radius = if is_ref(hits[i].idx) { radius } else { 0 };
@@ -727,7 +754,7 @@ pub(crate) fn get_overlaps_from_hits_with_coords(
                     }
                 }
                 concordant_hit_coord.truncate(l);
-                concordant_hit_coord.sort_unstable_by(comp_sort_pair_b_inc);
+                concordant_hit_coord.sort_unstable_by_key(pack_pair_b_inc_key);
             }
 
             // Compute the longest increasing subsequence.
@@ -875,6 +902,76 @@ mod tests {
 
     fn hit(idx: u32, offset: u32, read_offset: i32, strand: i8) -> OverlapHit {
         OverlapHit { idx, offset, read_offset, strand, repeats: 1 }
+    }
+
+    #[test]
+    fn pack_hit_coord_diff_key_matches_comparator_order() {
+        // `pack_hit_coord_diff_key`'s unsigned u128 order must be monotonic in
+        // the original `(c, b, a)` comparator this branch used, and a
+        // `sort_unstable_by_key(pack_hit_coord_diff_key)` must equal the
+        // `sort_unstable_by((c, b, a) comparator)` it replaced. Because the key
+        // is the full `(c, b, a)` triple, equal keys <=> bit-identical triples,
+        // so the order is unique and byte-identity is exact. Covers negative
+        // fields (sign-flip correctness) and `i32::MIN`/`i32::MAX` extremes.
+        let comparator = |a: &Triple, b: &Triple| {
+            a.c.cmp(&b.c).then_with(|| a.b.cmp(&b.b)).then_with(|| a.a.cmp(&b.a))
+        };
+        let t = |a, b, c| Triple { a, b, c };
+        let items = vec![
+            t(0, 0, 0),
+            t(5, 3, 2),
+            t(5, 3, 2),  // exact duplicate (tied key)
+            t(-1, 0, 2), // negative a, ordered after t(5,3,2)-family by a within same (c,b)
+            t(0, -7, 2), // negative b
+            t(0, 0, -3), // negative c sorts first
+            t(i32::MIN, i32::MIN, i32::MIN),
+            t(i32::MAX, i32::MAX, i32::MAX),
+            t(i32::MIN, i32::MAX, 0),
+            t(100, -100, 0),
+        ];
+        for a in &items {
+            for b in &items {
+                let (ka, kb) = (pack_hit_coord_diff_key(a), pack_hit_coord_diff_key(b));
+                assert_eq!(ka < kb, comparator(a, b).is_lt(), "{a:?} vs {b:?}");
+                assert_eq!(ka == kb, (a.c, a.b, a.a) == (b.c, b.b, b.a), "{a:?} vs {b:?}");
+            }
+        }
+        let mut by_key = items.clone();
+        by_key.sort_unstable_by_key(pack_hit_coord_diff_key);
+        let mut by_cmp = items;
+        by_cmp.sort_by(comparator);
+        assert_eq!(by_key, by_cmp);
+    }
+
+    #[test]
+    fn pack_pair_b_inc_key_matches_comparator_order() {
+        // Same contract as `pack_hit_coord_diff_key_matches_comparator_order`
+        // for the `(b, a)`-keyed `Pair` sort (`comp_sort_pair_b_inc`).
+        let comparator = |p1: &Pair, p2: &Pair| p1.b.cmp(&p2.b).then_with(|| p1.a.cmp(&p2.a));
+        let p = |a, b| Pair { a, b };
+        let items = vec![
+            p(0, 0),
+            p(3, 5),
+            p(3, 5),  // exact duplicate (tied key)
+            p(-1, 5), // negative a within same b
+            p(0, -7), // negative b sorts first
+            p(i32::MIN, i32::MIN),
+            p(i32::MAX, i32::MAX),
+            p(i32::MIN, i32::MAX),
+            p(-100, 100),
+        ];
+        for a in &items {
+            for b in &items {
+                let (ka, kb) = (pack_pair_b_inc_key(a), pack_pair_b_inc_key(b));
+                assert_eq!(ka < kb, comparator(a, b).is_lt(), "{a:?} vs {b:?}");
+                assert_eq!(ka == kb, (a.b, a.a) == (b.b, b.a), "{a:?} vs {b:?}");
+            }
+        }
+        let mut by_key = items.clone();
+        by_key.sort_unstable_by_key(pack_pair_b_inc_key);
+        let mut by_cmp = items;
+        by_cmp.sort_by(comparator);
+        assert_eq!(by_key, by_cmp);
     }
 
     #[test]
