@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - Opt-in candidate pre-filter (--prefilter-frac) to skip DP for doomed candidates ([#83](https://github.com/fg-labs/unum/pull/83))
+- Add descriptive long form to every argument ([#84](https://github.com/fg-labs/unum/pull/84))
 
 ### Miscellaneous Tasks
 
