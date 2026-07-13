@@ -1,4 +1,9 @@
-//! Command-line interface, mirroring the flag names of the vendored `run-t1k` perl wrapper.
+//! Command-line interface. Every argument keeps the single-character short flag of the vendored
+//! `run-t1k` perl wrapper for parity, and additionally exposes a descriptive long form (e.g.
+//! `-1`/`--read1`, `-n`/`--max-alleles-per-read`). Where T1K used a terse or camelCase long flag
+//! (`--frac`, `--cov`, `--crossGeneRate`, `--varMaxGroup`, `--od`), the descriptive kebab-case
+//! spelling is canonical and the original spelling is retained as a hidden `alias` so existing
+//! `run-t1k` invocations keep working.
 use clap::{Args, Parser, Subcommand, ValueHint};
 use std::path::PathBuf;
 
@@ -36,31 +41,31 @@ pub enum Commands {
 #[derive(Args, Debug)]
 pub struct RunArgs {
     /// Path to the first-mate FASTQ file (paired FASTQ input; requires `-2`).
-    #[arg(short = '1', value_name = "STRING")]
+    #[arg(short = '1', long = "read1", value_name = "STRING")]
     pub mate1: Option<String>,
 
     /// Path to the second-mate FASTQ file (paired FASTQ input; requires `-1`).
-    #[arg(short = '2', value_name = "STRING")]
+    #[arg(short = '2', long = "read2", value_name = "STRING")]
     pub mate2: Option<String>,
 
     /// Path to a single-end read file (mutually exclusive with `-1`/`-2` and `-b`).
-    #[arg(short = 'u', value_name = "STRING")]
+    #[arg(short = 'u', long = "single-end", value_name = "STRING")]
     pub single: Option<String>,
 
     /// Path to a BAM/CRAM file (mutually exclusive with `-1`/`-2`/`-u`), fused in-memory into
     /// extract -> genotype -> analyze via `--bam-mode`; see `crate::stages::run`'s doc comment
     /// for exactly which `--bam-mode`/sort-order combinations are currently supported.
-    #[arg(short = 'b', value_name = "STRING")]
+    #[arg(short = 'b', long = "bam", value_name = "STRING")]
     pub bam: Option<String>,
 
     /// Path to the reference sequence FASTA file.
-    #[arg(short = 'f', value_name = "STRING")]
+    #[arg(short = 'f', long = "ref-seq-fasta", value_name = "STRING")]
     pub ref_seq_fasta: String,
 
     /// Gene coordinate FASTA (`*_coord.fa`: headers `name chrom start end
     /// strand` + sequence). REQUIRED for `--bam-mode alignment`; rejected for
     /// FASTQ / `--bam-mode no-alignment`.
-    #[arg(short = 'c', value_name = "STRING")]
+    #[arg(short = 'c', long = "gene-coord-fasta", value_name = "STRING")]
     pub ref_coord_fasta: Option<String>,
 
     /// Reference genome FASTA for decoding CRAM (a `.fai` sibling is required;
@@ -78,15 +83,15 @@ pub struct RunArgs {
     pub bam_mode: Option<BamMode>,
 
     /// Prefix of output files.
-    #[arg(short = 'o', value_name = "STRING")]
+    #[arg(short = 'o', long = "prefix", value_name = "STRING")]
     pub prefix: String,
 
     /// The directory for output files.
-    #[arg(long = "od", value_name = "STRING")]
+    #[arg(long = "output-dir", alias = "od", value_name = "STRING")]
     pub output_dir: Option<String>,
 
     /// Number of threads.
-    #[arg(short = 't', default_value_t = 1)]
+    #[arg(short = 't', long = "threads", default_value_t = 1)]
     pub threads: u32,
 }
 
@@ -94,11 +99,11 @@ pub struct RunArgs {
 /// for the `.dat`-plus-GTF reference-build path (see [`crate::stages::build`]'s scope note for
 /// which of `t1k-build.pl`'s flags are, and are not, implemented).
 ///
-/// # `--od` vs. `t1k-build.pl`'s `-o`
+/// # `--output-dir` vs. `t1k-build.pl`'s `-o`
 ///
-/// `t1k-build.pl` itself uses `-o` for the output directory. We deliberately use `--od`
-/// instead: `-o` is reserved, project-wide, for an output *file prefix* (as it is on
-/// `extract`/`genotype`), not a directory.
+/// `t1k-build.pl` itself uses `-o` for the output directory. We deliberately use
+/// `--output-dir` (aliased `--od`) instead: `-o` is reserved, project-wide, for an output
+/// *file prefix* (as it is on `extract`/`genotype`), not a directory.
 #[derive(Args, Debug)]
 pub struct BuildArgs {
     /// Path to the EMBL-style IPD-IMGT/HLA or IPD-KIR `.dat` database.
@@ -110,7 +115,7 @@ pub struct BuildArgs {
     pub gtf: PathBuf,
 
     /// The directory for output files.
-    #[arg(long = "od", value_name = "DIR", value_hint = ValueHint::DirPath)]
+    #[arg(long = "output-dir", alias = "od", value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub output_dir: PathBuf,
 
     /// Prefix of output files.
@@ -162,13 +167,13 @@ pub struct ExtractArgs {
     /// `--bam-mode no-alignment`; NOT used by `extract --bam-mode alignment`
     /// (which reads sequences from `-c`). Per-mode requirement validated in
     /// `crate::stages::extract`.
-    #[arg(short = 'f', value_name = "STRING")]
+    #[arg(short = 'f', long = "ref-seq-fasta", value_name = "STRING")]
     pub ref_seq_fasta: Option<String>,
 
     /// Gene coordinate FASTA (`*_coord.fa`: headers `name chrom start end
     /// strand` + sequence). REQUIRED for `--bam-mode alignment` (gene
     /// intervals + k-mer seed reference); rejected for FASTQ / no-alignment.
-    #[arg(short = 'c', value_name = "STRING")]
+    #[arg(short = 'c', long = "gene-coord-fasta", value_name = "STRING")]
     pub ref_coord_fasta: Option<String>,
 
     /// Reference genome FASTA for decoding CRAM (a `.fai` sibling is required;
@@ -181,15 +186,15 @@ pub struct ExtractArgs {
     pub reference: Option<String>,
 
     /// Path to the first-mate FASTQ file (paired FASTQ-mode input; requires `-2`).
-    #[arg(short = '1', value_name = "STRING")]
+    #[arg(short = '1', long = "read1", value_name = "STRING")]
     pub mate1: Option<String>,
 
     /// Path to the second-mate FASTQ file (paired FASTQ-mode input; requires `-1`).
-    #[arg(short = '2', value_name = "STRING")]
+    #[arg(short = '2', long = "read2", value_name = "STRING")]
     pub mate2: Option<String>,
 
     /// Path to a single-end read file (FASTQ mode; mutually exclusive with `-1`/`-2` and `-b`).
-    #[arg(short = 'u', value_name = "STRING")]
+    #[arg(short = 'u', long = "single-end", value_name = "STRING")]
     pub single: Option<String>,
 
     /// Unified input: 1 or 2 paths (`-` = stdin). Two paths = paired FASTQ;
@@ -200,7 +205,7 @@ pub struct ExtractArgs {
     pub input: Vec<String>,
 
     /// Path to a BAM/CRAM file (switches to BAM mode; mutually exclusive with `-1`/`-2`/`-u`).
-    #[arg(short = 'b', value_name = "STRING")]
+    #[arg(short = 'b', long = "bam", value_name = "STRING")]
     pub bam: Option<String>,
 
     /// BAM mode only: the flag or order of an unaligned read-pair is not ordinary (i.e. the two
@@ -227,12 +232,12 @@ pub struct ExtractArgs {
     /// Number of threads used to parallelize the per-read candidate-filter decision (both FASTQ
     /// and BAM mode). Output is byte-identical at any `-t` -- see `unum_core::extract`'s and
     /// `unum_core::bam_extract`'s module docs ("Output order == input order") for why.
-    #[arg(short = 't', default_value_t = 1)]
+    #[arg(short = 't', long = "threads", default_value_t = 1)]
     pub threads: u32,
 
     /// FASTQ mode only: filter alignments with alignment similarity less than the specified
     /// value.
-    #[arg(short = 's', default_value_t = unum_core::extract::DEFAULT_REF_SEQ_SIMILARITY)]
+    #[arg(short = 's', long = "similarity", default_value_t = unum_core::extract::DEFAULT_REF_SEQ_SIMILARITY)]
     pub similarity: f64,
 }
 
@@ -247,19 +252,19 @@ pub struct ExtractArgs {
 #[derive(Args, Debug)]
 pub struct GenotypeArgs {
     /// Path to the reference sequence FASTA file (e.g. `kir_rna_seq.fa`).
-    #[arg(short = 'f', value_name = "STRING")]
+    #[arg(short = 'f', long = "ref-seq-fasta", value_name = "STRING")]
     pub ref_seq_fasta: String,
 
     /// Path to the first-mate candidate-read FASTQ file (paired mode; requires `-2`).
-    #[arg(short = '1', value_name = "STRING")]
+    #[arg(short = '1', long = "read1", value_name = "STRING")]
     pub mate1: Option<String>,
 
     /// Path to the second-mate candidate-read FASTQ file (paired mode; requires `-1`).
-    #[arg(short = '2', value_name = "STRING")]
+    #[arg(short = '2', long = "read2", value_name = "STRING")]
     pub mate2: Option<String>,
 
     /// Path to a single-end candidate-read FASTQ file (mutually exclusive with `-1`/`-2`).
-    #[arg(short = 'u', value_name = "STRING")]
+    #[arg(short = 'u', long = "single-end", value_name = "STRING")]
     pub single: Option<String>,
 
     /// Prefix of the output files (`{prefix}_genotype.tsv`, `{prefix}_allele.tsv`).
@@ -271,15 +276,15 @@ pub struct GenotypeArgs {
     /// `unum_core::genotyper::assign_reads_parallel`'s doc comment for why (the shared-state
     /// `assign_read` mutation, and everything downstream, always runs sequentially in a fixed
     /// order regardless of `-t`).
-    #[arg(short = 't', default_value_t = 1)]
+    #[arg(short = 't', long = "threads", default_value_t = 1)]
     pub threads: u32,
 
     /// Maximal number of alleles per read.
-    #[arg(short = 'n', default_value_t = 2000)]
+    #[arg(short = 'n', long = "max-alleles-per-read", default_value_t = 2000)]
     pub max_assign_cnt: i32,
 
     /// Filter alignments with alignment similarity less than the specified value.
-    #[arg(short = 's', default_value_t = 0.8)]
+    #[arg(short = 's', long = "similarity", default_value_t = 0.8)]
     pub similarity: f64,
 
     /// Opt-in candidate pre-filter, as a FRACTION of `-s` in [0, 1] (default 0.0
@@ -297,15 +302,15 @@ pub struct GenotypeArgs {
     pub prefilter_frac: f64,
 
     /// Filter if abundance is less than the frac of the dominant allele.
-    #[arg(long = "frac", default_value_t = 0.15)]
+    #[arg(long = "filter-frac", alias = "frac", default_value_t = 0.15)]
     pub filter_frac: f64,
 
     /// Filter genes with average coverage less than the specified value.
-    #[arg(long = "cov", default_value_t = 1.0)]
+    #[arg(long = "filter-cov", alias = "cov", default_value_t = 1.0)]
     pub filter_cov: f64,
 
     /// The effect from other gene's expression.
-    #[arg(long = "crossGeneRate", default_value_t = 0.04)]
+    #[arg(long = "cross-gene-rate", alias = "crossGeneRate", default_value_t = 0.04)]
     pub cross_gene_rate: f64,
 
     /// Also write a `{prefix}_metrics.tsv` per-call QC + discriminative-quality panel (a unum
@@ -406,23 +411,23 @@ fn parse_finite_non_negative_f64(s: &str) -> Result<f64, String> {
 #[derive(Args, Debug)]
 pub struct AnalyzeArgs {
     /// Path to the reference sequence FASTA file (e.g. `kir_rna_seq.fa`).
-    #[arg(short = 'f', value_name = "STRING")]
+    #[arg(short = 'f', long = "ref-seq-fasta", value_name = "STRING")]
     pub ref_seq_fasta: String,
 
     /// Path to the selected-alleles list file (`{prefix}_allele.tsv`, `genotype`'s output).
-    #[arg(short = 'a', value_name = "STRING")]
+    #[arg(short = 'a', long = "allele-file", value_name = "STRING")]
     pub allele_file: String,
 
     /// Path to the first-mate aligned-read FASTA file (paired mode; requires `-2`).
-    #[arg(short = '1', value_name = "STRING")]
+    #[arg(short = '1', long = "read1", value_name = "STRING")]
     pub mate1: Option<String>,
 
     /// Path to the second-mate aligned-read FASTA file (paired mode; requires `-1`).
-    #[arg(short = '2', value_name = "STRING")]
+    #[arg(short = '2', long = "read2", value_name = "STRING")]
     pub mate2: Option<String>,
 
     /// Path to a single-end aligned-read FASTA file (mutually exclusive with `-1`/`-2`).
-    #[arg(short = 'u', value_name = "STRING")]
+    #[arg(short = 'u', long = "single-end", value_name = "STRING")]
     pub single: Option<String>,
 
     /// Prefix of the output file (`{prefix}_allele.vcf`).
@@ -437,19 +442,19 @@ pub struct AnalyzeArgs {
     /// step (coalesce, quantification, `ComputeVariant`) still running sequentially in a fixed,
     /// thread-count-independent order (see `crate::stages::analyze`'s per-loop comments and
     /// `crate::stages::genotype`'s identical slot-index rationale).
-    #[arg(short = 't', default_value_t = 1)]
+    #[arg(short = 't', long = "threads", default_value_t = 1)]
     pub threads: u32,
 
     /// Maximal number of alleles per read.
-    #[arg(short = 'n', default_value_t = 2000)]
+    #[arg(short = 'n', long = "max-alleles-per-read", default_value_t = 2000)]
     pub max_assign_cnt: i32,
 
     /// Filter alignments with alignment similarity less than the specified value.
-    #[arg(short = 's', default_value_t = 0.8)]
+    #[arg(short = 's', long = "similarity", default_value_t = 0.8)]
     pub similarity: f64,
 
     /// The maximum variant group size to call a novel variant. `-1` for no limitation.
-    #[arg(long = "varMaxGroup", default_value_t = 8)]
+    #[arg(long = "max-variant-group", alias = "varMaxGroup", default_value_t = 8)]
     pub var_max_group: i32,
 }
 
@@ -632,5 +637,278 @@ mod tests {
             Cli::try_parse_from(base.iter().chain(["--allele-freq-weight", "-1.0"].iter()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn shared_short_flags_have_descriptive_long_forms() {
+        // Every read-input / output / tuning short flag now also parses via its long form.
+        let cli = Cli::try_parse_from([
+            "unum",
+            "genotype",
+            "--ref-seq-fasta",
+            "ref.fa",
+            "--read1",
+            "r1.fq",
+            "--read2",
+            "r2.fq",
+            "--prefix",
+            "out",
+            "--threads",
+            "4",
+            "--max-alleles-per-read",
+            "500",
+            "--similarity",
+            "0.9",
+        ])
+        .expect("long forms should parse");
+        let Commands::Genotype(a) = cli.command else { panic!("expected genotype subcommand") };
+        assert_eq!(a.ref_seq_fasta, "ref.fa");
+        assert_eq!(a.mate1.as_deref(), Some("r1.fq"));
+        assert_eq!(a.mate2.as_deref(), Some("r2.fq"));
+        assert_eq!(a.prefix, "out");
+        assert_eq!(a.threads, 4);
+        assert_eq!(a.max_assign_cnt, 500);
+        assert!((a.similarity - 0.9).abs() < 1e-12);
+
+        // `--single-end` on the single-read path, and `-u` still works.
+        let cli = Cli::try_parse_from(["unum", "genotype", "-f", "ref.fa", "--single-end", "u.fq"])
+            .expect("single-end long form should parse");
+        let Commands::Genotype(a) = cli.command else { panic!("expected genotype subcommand") };
+        assert_eq!(a.single.as_deref(), Some("u.fq"));
+    }
+
+    #[test]
+    fn extract_short_flags_have_descriptive_long_forms() {
+        // Extract carries the unique `--bam` / `--gene-coord-fasta` / BAM-mode surface, so
+        // exercise its long forms explicitly alongside the shared read-input/tuning flags.
+        let cli = Cli::try_parse_from([
+            "unum",
+            "extract",
+            "--ref-seq-fasta",
+            "ref.fa",
+            "--read1",
+            "r1.fq",
+            "--read2",
+            "r2.fq",
+            "--threads",
+            "2",
+            "--similarity",
+            "0.9",
+        ])
+        .expect("extract long forms should parse");
+        let Commands::Extract(a) = cli.command else { panic!("expected extract subcommand") };
+        assert_eq!(a.ref_seq_fasta.as_deref(), Some("ref.fa"));
+        assert_eq!(a.mate1.as_deref(), Some("r1.fq"));
+        assert_eq!(a.mate2.as_deref(), Some("r2.fq"));
+        assert_eq!(a.threads, 2);
+        assert!((a.similarity - 0.9).abs() < 1e-12);
+
+        // The BAM-input long forms (`--bam` / `--gene-coord-fasta`) resolve as well.
+        let cli = Cli::try_parse_from([
+            "unum",
+            "extract",
+            "--bam",
+            "x.bam",
+            "--bam-mode",
+            "alignment",
+            "--gene-coord-fasta",
+            "coord.fa",
+        ])
+        .expect("extract BAM long forms should parse");
+        let Commands::Extract(a) = cli.command else { panic!("expected extract subcommand") };
+        assert_eq!(a.bam.as_deref(), Some("x.bam"));
+        assert_eq!(a.ref_coord_fasta.as_deref(), Some("coord.fa"));
+        assert_eq!(a.bam_mode, Some(BamMode::Alignment));
+    }
+
+    #[test]
+    fn renamed_long_flags_keep_t1k_spelling_as_alias() {
+        // The descriptive kebab-case spelling and the retained T1K alias both parse to the
+        // same field.
+        for (flag, alias) in [
+            ("--filter-frac", "--frac"),
+            ("--filter-cov", "--cov"),
+            ("--cross-gene-rate", "--crossGeneRate"),
+        ] {
+            for spelling in [flag, alias] {
+                let cli = Cli::try_parse_from([
+                    "unum", "genotype", "-f", "ref.fa", "-u", "reads.fq", spelling, "0.2",
+                ])
+                .unwrap_or_else(|e| panic!("`{spelling}` should parse: {e}"));
+                assert!(matches!(cli.command, Commands::Genotype(_)));
+            }
+        }
+
+        // analyze's --varMaxGroup -> --max-variant-group
+        for spelling in ["--max-variant-group", "--varMaxGroup"] {
+            let cli = Cli::try_parse_from([
+                "unum",
+                "analyze",
+                "-f",
+                "ref.fa",
+                "-a",
+                "alleles.tsv",
+                "-u",
+                "reads.fa",
+                spelling,
+                "4",
+            ])
+            .unwrap_or_else(|e| panic!("`{spelling}` should parse: {e}"));
+            let Commands::Analyze(a) = cli.command else { panic!("expected analyze subcommand") };
+            assert_eq!(a.var_max_group, 4);
+        }
+    }
+
+    #[test]
+    fn output_dir_long_and_od_alias_both_parse() {
+        for spelling in ["--output-dir", "--od"] {
+            let cli = Cli::try_parse_from([
+                "unum",
+                "build",
+                "--dat",
+                "db.dat",
+                "--gtf",
+                "genes.gtf",
+                spelling,
+                "outdir",
+                "--prefix",
+                "hla",
+            ])
+            .unwrap_or_else(|e| panic!("`{spelling}` should parse: {e}"));
+            let Commands::Build(a) = cli.command else { panic!("expected build subcommand") };
+            assert_eq!(a.output_dir.to_str(), Some("outdir"));
+        }
+    }
+
+    #[test]
+    fn run_prefix_long_form_parses() {
+        let cli = Cli::try_parse_from([
+            "unum",
+            "run",
+            "-u",
+            "reads.fq",
+            "--ref-seq-fasta",
+            "seq.fa",
+            "--prefix",
+            "out",
+        ])
+        .expect("run --prefix should parse");
+        let Commands::Run(a) = cli.command else { panic!("expected run subcommand") };
+        assert_eq!(a.prefix, "out");
+        assert_eq!(a.ref_seq_fasta, "seq.fa");
+    }
+
+    #[test]
+    fn run_long_forms_parse() {
+        // Paired FASTQ input exercised through every descriptive read-input / output / tuning
+        // long flag, including `--output-dir`.
+        let cli = Cli::try_parse_from([
+            "unum",
+            "run",
+            "--read1",
+            "r1.fq",
+            "--read2",
+            "r2.fq",
+            "--ref-seq-fasta",
+            "seq.fa",
+            "--prefix",
+            "out",
+            "--output-dir",
+            "outdir",
+            "--threads",
+            "4",
+        ])
+        .expect("run long forms should parse");
+        let Commands::Run(a) = cli.command else { panic!("expected run subcommand") };
+        assert_eq!(a.mate1.as_deref(), Some("r1.fq"));
+        assert_eq!(a.mate2.as_deref(), Some("r2.fq"));
+        assert_eq!(a.ref_seq_fasta, "seq.fa");
+        assert_eq!(a.prefix, "out");
+        assert_eq!(a.output_dir.as_deref(), Some("outdir"));
+        assert_eq!(a.threads, 4);
+
+        // `--single-end` on the single-read path.
+        let cli = Cli::try_parse_from([
+            "unum",
+            "run",
+            "--single-end",
+            "u.fq",
+            "--ref-seq-fasta",
+            "seq.fa",
+            "--prefix",
+            "out",
+        ])
+        .expect("run --single-end should parse");
+        let Commands::Run(a) = cli.command else { panic!("expected run subcommand") };
+        assert_eq!(a.single.as_deref(), Some("u.fq"));
+
+        // `--bam` input long form, plus the `--od` alias for the output directory.
+        let cli = Cli::try_parse_from([
+            "unum",
+            "run",
+            "--bam",
+            "x.bam",
+            "--bam-mode",
+            "no-alignment",
+            "--ref-seq-fasta",
+            "seq.fa",
+            "--prefix",
+            "out",
+            "--od",
+            "outdir",
+        ])
+        .expect("run --bam / --od should parse");
+        let Commands::Run(a) = cli.command else { panic!("expected run subcommand") };
+        assert_eq!(a.bam.as_deref(), Some("x.bam"));
+        assert_eq!(a.bam_mode, Some(BamMode::NoAlignment));
+        assert_eq!(a.output_dir.as_deref(), Some("outdir"));
+    }
+
+    #[test]
+    fn analyze_long_forms_parse() {
+        // Analyze carries the unique `--allele-file` surface; exercise it alongside the shared
+        // read-input / tuning long flags on the paired path.
+        let cli = Cli::try_parse_from([
+            "unum",
+            "analyze",
+            "--ref-seq-fasta",
+            "ref.fa",
+            "--allele-file",
+            "alleles.tsv",
+            "--read1",
+            "r1.fa",
+            "--read2",
+            "r2.fa",
+            "--threads",
+            "3",
+            "--max-alleles-per-read",
+            "500",
+            "--similarity",
+            "0.9",
+        ])
+        .expect("analyze long forms should parse");
+        let Commands::Analyze(a) = cli.command else { panic!("expected analyze subcommand") };
+        assert_eq!(a.ref_seq_fasta, "ref.fa");
+        assert_eq!(a.allele_file, "alleles.tsv");
+        assert_eq!(a.mate1.as_deref(), Some("r1.fa"));
+        assert_eq!(a.mate2.as_deref(), Some("r2.fa"));
+        assert_eq!(a.threads, 3);
+        assert_eq!(a.max_assign_cnt, 500);
+        assert!((a.similarity - 0.9).abs() < 1e-12);
+
+        // `--single-end` on the single-read path.
+        let cli = Cli::try_parse_from([
+            "unum",
+            "analyze",
+            "--ref-seq-fasta",
+            "ref.fa",
+            "--allele-file",
+            "alleles.tsv",
+            "--single-end",
+            "u.fa",
+        ])
+        .expect("analyze --single-end should parse");
+        let Commands::Analyze(a) = cli.command else { panic!("expected analyze subcommand") };
+        assert_eq!(a.single.as_deref(), Some("u.fa"));
     }
 }

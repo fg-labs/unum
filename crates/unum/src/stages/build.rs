@@ -9,7 +9,7 @@ use crate::cli::BuildArgs;
 
 /// Builds the four T1K reference files for `args`, matching `t1k-build.pl`'s
 /// `-d`/`-g`/`--prefix` invocation path (see [`crate::cli::BuildArgs`]'s doc comment for the one
-/// deliberate flag-naming divergence, `--od` vs. `t1k-build.pl`'s own `-o`).
+/// deliberate flag-naming divergence, `--output-dir` vs. `t1k-build.pl`'s own `-o`).
 pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
     unum_core::refbuild::build_reference(&args.dat, &args.gtf, &args.output_dir, &args.prefix)
 }

@@ -89,7 +89,7 @@ fn resolve_fastq_source(args: &RunArgs) -> anyhow::Result<FastqSource<'_>> {
 /// `_aligned_*.fa`.
 ///
 /// Output file names are derived exactly as `run-t1k` derives them:
-/// - prefix = `{output_dir}/{prefix}` when `--od` is given, else just `{prefix}`.
+/// - prefix = `{output_dir}/{prefix}` when `--output-dir` is given, else just `{prefix}`.
 /// - genotyper writes `{prefix}_allele.tsv`, `{prefix}_aligned_1.fa`, `{prefix}_aligned_2.fa`,
 ///   and `{prefix}_genotype.tsv`.
 /// - analyzer reads those genotyper outputs and writes the final `{prefix}_allele.vcf`.
@@ -502,8 +502,9 @@ fn run_analyze_native_source(
     analyze::run(&analyze_args).context("analyzing genotype call")
 }
 
-/// Combines `-o`/`--od` into the shared output-file prefix, creating `--od`'s directory if
-/// needed — matching `run-t1k`'s `make_path($outputDirectory) ... $prefix = "$outputDirectory/$prefix"`.
+/// Combines `-o`/`--prefix` with `--output-dir` into the shared output-file prefix, creating
+/// `--output-dir`'s directory if needed — matching `run-t1k`'s
+/// `make_path($outputDirectory) ... $prefix = "$outputDirectory/$prefix"`.
 fn resolve_prefix(args: &RunArgs) -> anyhow::Result<String> {
     match &args.output_dir {
         Some(dir) => {

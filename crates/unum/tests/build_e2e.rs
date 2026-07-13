@@ -21,7 +21,7 @@ fn build_example_matches_golden() {
             fx("kir_subset.dat").to_str().unwrap(),
             "-g",
             fx("kir_genes.gtf").to_str().unwrap(),
-            "--od",
+            "--output-dir",
             tmp.path().to_str().unwrap(),
             "--prefix",
             "kir",
