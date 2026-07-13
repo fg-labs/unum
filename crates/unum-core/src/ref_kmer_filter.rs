@@ -555,6 +555,17 @@ pub struct RefKmerFilter {
     /// computation. Fixed at the `SeqSet(kmerLength)` constructor default;
     /// see [`DEFAULT_REF_SEQ_SIMILARITY`]'s doc comment.
     ref_seq_similarity: f64,
+    /// Opt-in candidate pre-filter cutoff (default `0.0` = disabled). When
+    /// `> 0.0`, a candidate overlap whose cheap pre-DP similarity estimate
+    /// `init_match / (read_span + seq_span)` is below this value is dropped in
+    /// [`RefKmerFilter::get_overlaps_from_read`] BEFORE running its per-gap DP
+    /// refinement -- skipping the dominant alignment cost for candidates that
+    /// (empirically) never survive the final similarity filter. This is a
+    /// heuristic accuracy/speed trade (NOT byte-identical): `init_sim` is a
+    /// lower bound on the post-DP similarity, so a sufficiently small cutoff
+    /// prunes only doomed candidates in practice. `0.0` prunes nothing and is
+    /// byte-identical to the unfiltered path.
+    candidate_prefilter_min_sim: f64,
 }
 
 impl RefKmerFilter {
@@ -615,6 +626,7 @@ impl RefKmerFilter {
             seqs,
             hit_len_required: DEFAULT_HIT_LEN_REQUIRED,
             ref_seq_similarity: DEFAULT_REF_SEQ_SIMILARITY,
+            candidate_prefilter_min_sim: 0.0,
         })
     }
 
@@ -660,6 +672,7 @@ impl RefKmerFilter {
             seqs,
             hit_len_required: DEFAULT_HIT_LEN_REQUIRED,
             ref_seq_similarity: DEFAULT_REF_SEQ_SIMILARITY,
+            candidate_prefilter_min_sim: 0.0,
         }
     }
 
@@ -708,6 +721,15 @@ impl RefKmerFilter {
     /// [`DEFAULT_REF_SEQ_SIMILARITY`] constructor default.
     pub fn set_ref_seq_similarity(&mut self, ref_seq_similarity: f64) {
         self.ref_seq_similarity = ref_seq_similarity;
+    }
+
+    /// Sets the opt-in candidate pre-filter cutoff (default `0.0` = disabled).
+    /// See [`RefKmerFilter::candidate_prefilter_min_sim`]. `0.0` is
+    /// byte-identical to the unfiltered path; a positive value trades a small,
+    /// empirically-validated accuracy risk for skipping the DP refinement of
+    /// low-`init_sim` candidates.
+    pub fn set_candidate_prefilter_min_sim(&mut self, min_sim: f64) {
+        self.candidate_prefilter_min_sim = min_sim;
     }
 
     /// Ported from `SeqSet::GetRefSeqSimilarity` (`SeqSet.hpp:840-843`).
@@ -1103,6 +1125,25 @@ impl RefKmerFilter {
         // = ...` sinks proved were never read. See this crate's history for
         // the faithful-but-dead port that this removal replaces.
         for i in 0..overlaps.len() {
+            // Opt-in candidate pre-filter (default off): drop a candidate BEFORE
+            // its per-gap DP refinement when its cheap pre-DP similarity estimate
+            // `init_match / (read_span + seq_span)` is below the cutoff. The
+            // overlap keeps its initial `similarity` (0.0 from
+            // `get_overlaps_from_hits`), so the final `retain` drops it. Heuristic
+            // (not byte-identical); `cutoff <= 0.0` disables it entirely. See
+            // `candidate_prefilter_min_sim`.
+            if self.candidate_prefilter_min_sim > 0.0 {
+                let read_span = overlaps[i].read_end - overlaps[i].read_start + 1;
+                let seq_span = overlaps[i].seq_end - overlaps[i].seq_start + 1;
+                let span_sum = read_span + seq_span;
+                if span_sum > 0 {
+                    let init_sim = f64::from(overlaps[i].match_cnt) / f64::from(span_sum);
+                    if init_sim < self.candidate_prefilter_min_sim {
+                        continue;
+                    }
+                }
+            }
+
             let r: &[u8] = if overlaps[i].strand == 1 { read } else { &rc_read };
             let hit_coords = &overlaps_hit_coords[i];
             let hit_cnt = hit_coords.len();

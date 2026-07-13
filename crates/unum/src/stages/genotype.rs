@@ -336,6 +336,9 @@ pub fn run_with_candidate_reads(
     let mut loaded = load_reference(Path::new(&args.ref_seq_fasta))?;
     let mut filter = build_ref_kmer_filter(&loaded.names, &loaded.consensus);
     filter.set_ref_seq_similarity(args.similarity);
+    // The pre-filter cutoff is a fraction of the `-s` threshold, so it auto-scales
+    // with how strict the user's similarity filter is (see the flag's help).
+    filter.set_candidate_prefilter_min_sim(args.prefilter_frac * args.similarity);
 
     let mut genotyper = Genotyper::new();
     genotyper.set_filter_frac(args.filter_frac);
@@ -810,6 +813,7 @@ mod tests {
             threads: 1,
             max_assign_cnt: 2000,
             similarity: 0.8,
+            prefilter_frac: 0.0,
             filter_frac: 0.15,
             filter_cov: 1.0,
             cross_gene_rate: 0.04,

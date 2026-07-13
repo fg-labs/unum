@@ -282,6 +282,20 @@ pub struct GenotypeArgs {
     #[arg(short = 's', default_value_t = 0.8)]
     pub similarity: f64,
 
+    /// Opt-in candidate pre-filter, as a FRACTION of `-s` in [0, 1] (default 0.0
+    /// = disabled). Before the DP refinement, drops a candidate overlap whose
+    /// cheap pre-DP similarity estimate (init_match / (read_span + seq_span)) is
+    /// below `fraction * -s`, skipping the dominant alignment cost for candidates
+    /// that (empirically) never survive the final `-s` filter. `0.0` prunes
+    /// nothing (exact); `1.0` pre-screens at the full `-s` threshold (most
+    /// aggressive). Heuristic speed/accuracy trade, NOT byte-identical for > 0.0.
+    #[arg(
+        long = "prefilter-frac",
+        default_value_t = 0.0,
+        value_parser = parse_prefilter_frac
+    )]
+    pub prefilter_frac: f64,
+
     /// Filter if abundance is less than the frac of the dominant allele.
     #[arg(long = "frac", default_value_t = 0.15)]
     pub filter_frac: f64,
@@ -351,6 +365,22 @@ fn parse_allele_freq_null_penalty(s: &str) -> Result<f64, String> {
         Ok(p)
     } else {
         Err(format!("must be a finite value in [0, {max}] (the prior no-override bound); got {p}"))
+    }
+}
+
+/// Parses and range-validates `--prefilter-frac`: a finite fraction in `[0, 1]`.
+///
+/// The value is multiplied by `-s` to form the pre-DP similarity cutoff, so a value
+/// above `1.0` would push the cutoff past `-s` itself and over-prune candidates the
+/// final `-s` filter would have kept, while a negative value is nonsensical (and would
+/// silently disable the prefilter). Rejecting out-of-range values up front (rather than
+/// silently clamping) makes a mis-set fraction a hard, visible error.
+fn parse_prefilter_frac(s: &str) -> Result<f64, String> {
+    let frac: f64 = s.parse().map_err(|_| format!("`{s}` is not a valid number"))?;
+    if frac.is_finite() && (0.0..=1.0).contains(&frac) {
+        Ok(frac)
+    } else {
+        Err(format!("must be a finite fraction of `-s` in [0, 1]; got {frac}"))
     }
 }
 
@@ -504,6 +534,44 @@ mod tests {
     #[test]
     fn parse_finite_non_negative_f64_rejects_garbage() {
         assert!(parse_finite_non_negative_f64("abc").is_err());
+    }
+
+    #[test]
+    fn parse_prefilter_frac_accepts_in_range() {
+        assert_eq!(parse_prefilter_frac("0"), Ok(0.0));
+        assert_eq!(parse_prefilter_frac("0.65"), Ok(0.65));
+        assert_eq!(parse_prefilter_frac("1"), Ok(1.0));
+    }
+
+    #[test]
+    fn parse_prefilter_frac_rejects_out_of_range() {
+        assert!(parse_prefilter_frac("-0.0001").is_err());
+        assert!(parse_prefilter_frac("1.0001").is_err());
+        assert!(parse_prefilter_frac("2.0").is_err());
+    }
+
+    #[test]
+    fn parse_prefilter_frac_rejects_non_finite_and_garbage() {
+        assert!(parse_prefilter_frac("nan").is_err());
+        assert!(parse_prefilter_frac("inf").is_err());
+        assert!(parse_prefilter_frac("abc").is_err());
+    }
+
+    #[test]
+    fn genotype_cli_validates_prefilter_frac() {
+        // A complete, otherwise-valid genotype invocation parses when the fraction is in
+        // range, so the out-of-range failures below are attributable to the value_parser,
+        // not to a missing required argument.
+        let base = ["unum", "genotype", "-f", "ref.fa", "-u", "reads.fa"];
+        assert!(
+            Cli::try_parse_from(base.iter().chain(["--prefilter-frac", "0.65"].iter())).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(base.iter().chain(["--prefilter-frac", "1.5"].iter())).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(base.iter().chain(["--prefilter-frac", "-0.1"].iter())).is_err()
+        );
     }
 
     #[test]

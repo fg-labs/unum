@@ -464,6 +464,7 @@ fn genotype_args_for(args: &RunArgs, prefix: &str) -> GenotypeArgs {
         threads: args.threads,
         max_assign_cnt: 2000,
         similarity: 0.8,
+        prefilter_frac: 0.0,
         filter_frac: 0.15,
         filter_cov: 1.0,
         cross_gene_rate: 0.04,
