@@ -38,6 +38,10 @@ pub enum Commands {
     /// Combine multiple samples' `_genotype.tsv` files into one allele-by-sample abundance
     /// matrix on stdout (the Rust port of `t1k-merge.py`).
     Combine(CombineArgs),
+
+    /// Infer per-allele copy number from a genotype result on stdout (the Rust port of
+    /// `t1k-copynumber.py`). Meaningful for the copy-number-variable KIR locus.
+    CopyNumber(CopyNumberArgs),
 }
 
 /// Arguments for the `combine` subcommand (port of `t1k-merge.py`): combine multiple samples'
@@ -60,6 +64,36 @@ pub struct CombineArgs {
     /// at least this value.
     #[arg(long = "total-quality", default_value_t = 30.0, value_name = "FLOAT")]
     pub min_total_quality: f64,
+}
+
+/// Arguments for the `copy-number` subcommand (port of `t1k-copynumber.py`): infer per-allele
+/// copy number from a genotype result, printed to stdout.
+#[derive(Args, Debug)]
+pub struct CopyNumberArgs {
+    /// Path to the genotype result file (`{prefix}_genotype.tsv`).
+    #[arg(short = 'g', long = "genotype", value_name = "STRING")]
+    pub genotype: String,
+
+    /// Comma-separated genes assumed present on every chromosome; used to anchor the one-copy
+    /// parameters (their presence overrides the quantile options for those genes).
+    #[arg(long = "nomissing", default_value = "", value_name = "STRING")]
+    pub nomissing: String,
+
+    /// Upper quantile of heterozygous-allele abundances used to infer one-copy parameters.
+    #[arg(long = "upper-quantile", default_value_t = 0.3, value_name = "FLOAT")]
+    pub upper_quantile: f64,
+
+    /// Lower quantile of heterozygous-allele abundances used to infer one-copy parameters.
+    #[arg(long = "lower-quantile", default_value_t = 0.0, value_name = "FLOAT")]
+    pub lower_quantile: f64,
+
+    /// Scale the inferred variance by this factor.
+    #[arg(long = "adjust-var", default_value_t = 1.0, value_name = "FLOAT")]
+    pub adjust_var: f64,
+
+    /// Ignore alleles with genotype quality less than or equal to this value.
+    #[arg(short = 'q', long = "min-quality", default_value_t = 0, value_name = "INT")]
+    pub min_quality: i64,
 }
 
 /// Arguments for the `run` subcommand, mirroring `run-t1k`'s flag names for the paired-end

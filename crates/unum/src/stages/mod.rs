@@ -37,6 +37,7 @@ use unum_core::extract::InMemoryCandidateSink;
 pub mod analyze;
 pub mod build;
 pub mod combine;
+pub mod copy_number;
 pub mod extract;
 pub mod genotype;
 
