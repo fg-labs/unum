@@ -186,5 +186,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Genotype(args) => stages::genotype::run(&args),
         Commands::Analyze(args) => stages::analyze::run(&args),
         Commands::Run(args) => stages::run(&args),
+        Commands::Combine(args) => stages::combine::run(&args),
     }
 }

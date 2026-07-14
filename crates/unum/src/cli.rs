@@ -34,6 +34,32 @@ pub enum Commands {
     /// Run the full extract -> genotype -> analyze pipeline in a single fused process (the Rust
     /// port of `run-t1k`), keeping candidate reads in memory between extract and genotype.
     Run(RunArgs),
+
+    /// Combine multiple samples' `_genotype.tsv` files into one allele-by-sample abundance
+    /// matrix on stdout (the Rust port of `t1k-merge.py`).
+    Combine(CombineArgs),
+}
+
+/// Arguments for the `combine` subcommand (port of `t1k-merge.py`): combine multiple samples'
+/// `_genotype.tsv` files into one allele-by-sample abundance matrix, printed to stdout.
+#[derive(Args, Debug)]
+pub struct CombineArgs {
+    /// Path to a file listing genotype-result TSV paths, one per line.
+    #[arg(short = 'l', long = "input-list", value_name = "STRING")]
+    pub input_list: String,
+
+    /// Number of representative alleles kept per gene.
+    #[arg(short = 'n', long = "num-alleles", default_value_t = 2, value_name = "INT")]
+    pub num_alleles_per_gene: usize,
+
+    /// Ignore alleles with genotype quality less than or equal to this value.
+    #[arg(short = 'q', long = "min-quality", default_value_t = 0.0, value_name = "FLOAT")]
+    pub min_quality: f64,
+
+    /// A candidate allele becomes representative only when its total (summed) voting quality is
+    /// at least this value.
+    #[arg(long = "total-quality", default_value_t = 30.0, value_name = "FLOAT")]
+    pub min_total_quality: f64,
 }
 
 /// Arguments for the `run` subcommand, mirroring `run-t1k`'s flag names for the paired-end

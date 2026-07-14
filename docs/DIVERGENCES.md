@@ -62,6 +62,16 @@ With the opt-in population-frequency prior active for a gene, unum extends the P
 
 A null / low-expression allele (IMGT `N`/`L`/`S`/`C`/`A`/`Q` suffix) typically differs from a common expressed allele by a single defining variant, so a caller can flip to the non-expressed allele on a handful of reads. `--allele-freq-null-penalty p` subtracts a fixed, coverage-independent penalty (`p` per null haplotype a candidate would call; `2p` for a homozygous-null call) from the selection objective in **both** Path A (the pair search) and Path B (hom-vs-het reconciliation), biasing the caller away from asserting a non-expressed allele on marginal evidence. It is **name-driven** — detection reads the full reference allele name (not the frequency table), so unlike the HWE term it acts even without `--allele-freq`. When the penalty is active for a gene (`p > 0` and the gene has a null/expression rank) it also **enables the `k == j` homozygous candidate (Path A) and runs Path B**, so the penalty can drive a null-het → expressed-hom call *without any frequency table* (the HWE term simply drops to 0). All of this activation is gated on `p > 0`, so at the default `p == 0` the candidate set and the whole selection are **byte-identical** to the oracle. The value is bounded to `[0, 16]` (`Genotyper::NULL_PENALTY_MAX`, half the ~32-weighted-read no-override span, since the max per-candidate penalty is `2p`) so the penalty alone can never flip a coverage margin beyond the span. Covered by detection, per-haplotype, Path-A demote/no-override, Path-B override, and no-table scope-full tests.
 
+### `unum combine` treats `-q` as numeric (`t1k-merge.py` crashes on nonzero `-q`)
+
+- **unum:** `crates/unum-core/src/combine.rs` / `crates/unum/src/cli.rs` — `CombineArgs::min_quality` is an `f64`.
+- **T1K:** `t1k-merge.py:35`.
+- **Affects real output:** only when `-q` is passed a nonzero value; the default (`-q 0`) is byte-identical.
+
+`t1k-merge.py` compares `float(cols[i + 2]) > args.qual`, but `argparse` leaves a passed `-q` value as a **string** (only the unset default is the int `0`). So any `python3 t1k-merge.py -q 20 ...` raises `TypeError: '>' not supported between instances of 'float' and 'str'` and produces no output — the `-q` flag is effectively unusable upstream.
+
+`unum combine` parses `-q` as `f64` and filters `quality > min_quality` as intended, so nonzero `-q` works. On every flag combination T1K *can* run (default, `-n`, `--total-quality`/`--tq`), `unum combine` is byte-identical to `t1k-merge.py` (validated on 15 1000G-DNA and 40 HPRC genotype outputs).
+
 ## Known T1K quirks/bugs still reproduced (candidates for future divergence)
 
 These are places where `unum` currently matches T1K on purpose — a known bug, quirk, or UB in T1K that we reproduce for parity rather than fix. They are tracked here as candidates for future divergence: if any starts to matter for a real result, revisit it the way we did the weighted-count bug above. Each is marked in the source with a comment explaining it is a deliberate parity choice.
