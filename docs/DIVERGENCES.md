@@ -72,6 +72,32 @@ A null / low-expression allele (IMGT `N`/`L`/`S`/`C`/`A`/`Q` suffix) typically d
 
 `unum combine` parses `-q` as `f64` and filters `quality > min_quality` as intended, so nonzero `-q` works. On every flag combination T1K *can* run (default, `-n`, `--total-quality`/`--tq`), `unum combine` is byte-identical to `t1k-merge.py` (validated on 15 1000G-DNA and 40 HPRC genotype outputs).
 
+### `unum copy-number` treats `-q` as numeric (`t1k-copynumber.py` crashes on nonzero `-q`)
+
+- **unum:** `crates/unum-core/src/copy_number.rs` / `crates/unum/src/cli.rs` — `CopyNumberArgs::min_quality` is an `i64`.
+- **T1K:** `t1k-copynumber.py:60`.
+- **Affects real output:** only when `-q` is passed a nonzero value; the default (`-q 0`) is byte-identical.
+
+`t1k-copynumber.py` compares `quality <= args.qual` with `quality = int(...)`, but `argparse` leaves a passed `-q` value as a **string** (only the unset default is the int `0`). So `python3 t1k-copynumber.py -q 20 ...` raises `TypeError: '<=' not supported between instances of 'int' and 'str'` and produces no output — the same latent bug as `t1k-merge.py`.
+
+`unum copy-number` parses `-q` as `i64` and filters `quality > min_quality` as intended. On every flag combination T1K *can* run (default, `--nomissing`, `--upper-quantile`/`--lower-quantile`, `--adjust-var`), `unum copy-number` is byte-identical to `t1k-copynumber.py` (validated on the T1K KIR example genotype).
+
+### `unum copy-number` errors when the anchor sample can't yield a one-copy distribution (`t1k-copynumber.py` divides by zero / NaN)
+
+- **unum:** `crates/unum-core/src/copy_number.rs` — `infer_copy_numbers` returns an error whenever at least one allele still needs a copy call but the anchor sample has non-positive variance: it is **empty** (no usable anchors), has a **single** value, or is **all-equal** (every anchor abundance identical). All three give `sigma = sqrt(var) <= 0`, so the one-copy `N(mean, var)` is unusable.
+- **T1K:** `t1k-copynumber.py:95` (`mean = sum(abundances)/inspectAlleleCnt`) for the empty case; the per-allele likelihood's `sigma = sqrt(var)` division for the single / all-equal (`var == 0`) case.
+- **Affects real output:** only on a degenerate anchor sample — no `--nomissing` gene present *and* every passing gene homozygous (empty), or the quantile band / `--nomissing` set collapsing to a single anchor or a run of identical abundances (`var == 0`); never on the KIR example, nor on any input with two or more heterozygous non-`--nomissing` alleles of differing abundance.
+
+With an empty anchor sample, `t1k-copynumber.py` evaluates `sum(abundances)/len(abundances)` on an empty list and raises `ZeroDivisionError`; with a single or all-equal sample it computes `var == 0`, so `sigma = sqrt(var) == 0` and the per-allele likelihood divides by zero — both produce no usable output. `unum copy-number` cannot estimate the one-copy `N(mean, var)` in any of these cases either, but fails cleanly with a descriptive error rather than dividing to `NaN` and emitting garbage copy/ratio calls. When *no* allele passes the quality filter (nothing to call at all), unum instead emits each gene row with sentinel slots (`. -1 0`), since no copy call — and thus no `NaN` — is ever produced.
+
+### `unum copy-number` validates its numeric flags (`t1k-copynumber.py` does not)
+
+- **unum:** `crates/unum-core/src/copy_number.rs` — `CopyNumberConfig::validate` (called from the stage before inference) requires finite `--upper-quantile`/`--lower-quantile` in `[0, 1]` with `--lower-quantile <= --upper-quantile`, and a finite `--adjust-var > 0`.
+- **T1K:** `t1k-copynumber.py` — `argparse` parses these as raw `float`s with no range check.
+- **Affects real output:** only on invalid numeric flag values, including out-of-range/non-finite values and reversed quantile bounds. On every in-range combination (the documented usage) unum stays byte-identical to `t1k-copynumber.py`.
+
+On an invalid flag, `t1k-copynumber.py` runs on regardless: an out-of-`[0, 1]` quantile or reversed bounds (`--lower-quantile > --upper-quantile`, even with both individually in `[0, 1]`) selects an empty, truncated, or wrapped anchor band from its unchecked Python slice, and a non-positive `--adjust-var` drives `var <= 0` so the one-copy `sigma` collapses to `0`/`NaN` — either way it emits a (possibly garbage) table instead of erroring. `unum copy-number` rejects these up front with an actionable argument error rather than reproducing that silent-garbage behavior. This is a deliberate divergence confined to invalid input; it never changes output for a run T1K would have produced meaningfully.
+
 ## Known T1K quirks/bugs still reproduced (candidates for future divergence)
 
 These are places where `unum` currently matches T1K on purpose — a known bug, quirk, or UB in T1K that we reproduce for parity rather than fix. They are tracked here as candidates for future divergence: if any starts to matter for a real result, revisit it the way we did the weighted-count bug above. Each is marked in the source with a comment explaining it is a deliberate parity choice.
@@ -99,6 +125,7 @@ Reproduced verbatim for parity; each is either provably inert on the only reacha
 - `crates/unum-core/src/alignments.rs` — CIGAR length switch adds reference length for any unlisted op, mirroring stock's `switch` (only exotic CIGAR ops).
 - `crates/unum-core/src/bam_extract.rs` — coord-FASTA parse assumes each sequence is on a single unwrapped line (`fscanf %s`); a wrapped sequence would desync stock too.
 - `crates/unum-core/src/genotyper.rs` (`parse_allele_name`) — with a non-default explicit `alleleDigitUnits`, name parsing walks raw bytes instead of `:`-delimited fields (not the pipeline default).
+- `crates/unum/src/stages/copy_number.rs` — `--nomissing` entries are split on `,` **without** trimming whitespace, matching `t1k-copynumber.py:42` (`{g:1 for g in ...split(",")}`). A value with surrounding spaces (`--nomissing "A, B"`) never matches a whitespace-split gene name in either tool, so the whitespace-prefixed `B` anchor is silently dropped identically; unspaced lists (the documented usage) are unaffected.
 
 ### Structural numeric tolerance (not a discrete bug)
 

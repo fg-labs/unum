@@ -187,5 +187,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Analyze(args) => stages::analyze::run(&args),
         Commands::Run(args) => stages::run(&args),
         Commands::Combine(args) => stages::combine::run(&args),
+        Commands::CopyNumber(args) => stages::copy_number::run(&args),
     }
 }
