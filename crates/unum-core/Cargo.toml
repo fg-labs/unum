@@ -13,7 +13,7 @@ categories = ["science"]
 [dependencies]
 anyhow = "1"
 flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
-niffler = { version = "2", default-features = false, features = ["gz"] }
+niffler = { version = "3", default-features = false, features = ["gz"] }
 radsort = "0.1"
 rayon = "1"
 rust-htslib = "1.0.1"
