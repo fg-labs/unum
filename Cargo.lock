@@ -663,9 +663,9 @@ dependencies = [
 
 [[package]]
 name = "niffler"
-version = "2.7.0"
+version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e84f25af5326bacf3cbc3b9d2586d096426b10c889050cab891f89c9cb65932"
+checksum = "01baa3696744e580712b28344fe25ed4ac1e8c4b76cc5189a34e713924c25208"
 dependencies = [
  "cfg-if",
  "flate2",
