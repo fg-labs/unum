@@ -1,5 +1,6 @@
 [![Build](https://github.com/fg-labs/unum/actions/workflows/check.yml/badge.svg)](https://github.com/fg-labs/unum/actions/workflows/check.yml)
 [![License](http://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/fg-labs/unum/blob/main/LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21445800.svg)](https://doi.org/10.5281/zenodo.21445800)
 
 # unum
 
